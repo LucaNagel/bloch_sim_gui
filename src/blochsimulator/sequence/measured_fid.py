@@ -36,6 +36,8 @@ _ARRAY_SUFFIXES = (".npy", ".txt", ".csv", ".dat")
 # Bruker digital filters settle within about two group delays.
 _FILTER_SETTLING = 2.0
 _RESIDUAL_LIMIT = 1.1
+# Below this gain the digitizer, not the coil, sets the noise floor.
+_LOW_RECEIVER_GAIN = 10.0
 
 
 @dataclass(frozen=True)
@@ -217,6 +219,18 @@ def _first(value):
         return None
 
 
+def _receiver_gain(acqp):
+    """Applied receiver gain: ACQ_CalibratedRG when set, else RG.
+
+    ParaVision may store a changed RG after the acquisition ran; the
+    calibrated gain is the one the data were recorded with.
+    """
+    calibrated = _first(acqp.get("ACQ_CalibratedRG"))
+    if calibrated is not None and calibrated > 0:
+        return calibrated
+    return _first(acqp.get("RG"))
+
+
 def _receiver_count(acqp, method):
     count = _first(method.get("PVM_EncNReceivers")) if method else None
     selected = acqp.get("ACQ_ReceiverSelect")
@@ -301,7 +315,7 @@ def read_bruker_scan(path) -> MeasuredScan:
         dwell_s=1.0 / bandwidth if bandwidth else None,
         group_delay_points=float(_first(acqp.get("GRPDLY")) or 0.0),
         averages=int(_first(acqp.get("NA")) or 1),
-        receiver_gain=_first(acqp.get("RG")),
+        receiver_gain=_receiver_gain(acqp),
         nucleus=simulator_nucleus(nucleus) if nucleus else None,
         frequency_hz=None if frequency is None else frequency * 1e6,
         flip_angle_deg=_first(acqp.get("ACQ_flip_angle")),
@@ -390,12 +404,12 @@ def estimate_noise_std(
 ) -> NoiseEstimate:
     """Per-quadrature noise std of the mean of ``averaged_rows`` repetitions.
 
-    A noise scan (no excitation) uses the time-domain std of every row after
-    the filter has settled (two group delays) and its mean removed.
-    ``from_tail`` instead uses the last ``tail_fraction`` of every FID row:
-    its time-domain std while that is white noise, or else the robust
-    spectral median, which ignores a residual line (``residual_ratio`` above
-    the limit).
+    A noise scan (no excitation) uses every row after the filter has settled
+    (two group delays) and its mean removed; ``from_tail`` instead uses the
+    last ``tail_fraction`` of every FID row. Either takes the time-domain std
+    while the data are white noise, or else the robust spectral median, which
+    ignores a residual line, spurs or a noisy band edge (``residual_ratio``
+    above the limit).
     ``averaged_rows`` defaults to the scan's repetitions; pass the FID's
     repetition count for a separate noise scan.
     """
@@ -415,14 +429,16 @@ def estimate_noise_std(
     spectral = _spectral_std(segment)
     temporal = _time_std(segment)
     ratio = temporal / spectral if spectral > 0 else np.inf
-    per_row = spectral if from_tail and ratio > _RESIDUAL_LIMIT else temporal
+    robust = ratio > _RESIDUAL_LIMIT
+    per_row = spectral if robust else temporal
     if not per_row > 0:
         raise ValueError("The noise data have zero variance")
+    method = "FID tail" if from_tail else "noise scan"
     return NoiseEstimate(
         std=per_row / np.sqrt(rows),
         std_per_row=per_row,
         samples=int(segment.size),
-        method="FID tail" if from_tail else "noise scan",
+        method=f"{method}, spectral median" if robust else method,
         averaged_rows=int(rows),
         residual_ratio=ratio,
     )
@@ -498,7 +514,8 @@ def measured_calibration_inputs(
         if estimate.residual_ratio > _RESIDUAL_LIMIT:
             warnings.append(
                 "The noise scan is not white noise (time/spectral std "
-                f"{estimate.residual_ratio:.2f}); check for signal or spurs"
+                f"{estimate.residual_ratio:.2f}); σ is the spectral median, "
+                "which ignores spurs; check for signal"
             )
     else:
         estimate = estimate_noise_std(fid, from_tail=True)
@@ -507,6 +524,13 @@ def measured_calibration_inputs(
                 "Signal remains in the FID tail (time/spectral std "
                 f"{estimate.residual_ratio:.2f}); a 0° noise scan is more reliable"
             )
+    gain = fid.receiver_gain
+    if gain is not None and gain < _LOW_RECEIVER_GAIN:
+        warnings.append(
+            f"Receiver gain {gain:g} is low: the digitizer rather than the coil "
+            "may set the noise, so the SNR of scans at a higher gain is "
+            "underestimated; calibrate at the imaging scan's receiver gain"
+        )
     snr = amplitude.amplitude / estimate.std
     if snr < 20:
         warnings.append(

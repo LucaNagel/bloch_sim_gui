@@ -526,7 +526,8 @@ calibration inputs from raw data:
   real/imaginary pairs, one repetition per row, without scanner parameters.
 
 ParaVision parameters give the dwell $1/\mathrm{SW_h}$, the filter group delay
-`GRPDLY`, NA, receiver gain, nucleus, field $\mathrm{BF1}/\gamma$, flip
+`GRPDLY`, NA, receiver gain (`ACQ_CalibratedRG`, the gain the data were
+recorded with, else `RG`), nucleus, field $\mathrm{BF1}/\gamma$, flip
 angle, TR and dummy scans. The digital filter delays the FID by `GRPDLY`
 points, so sample $k$ lies at $t_k = (k - \mathrm{GRPDLY})\,\Delta t$ after
 the acquisition start; that start follows the excitation centre by half the
@@ -541,12 +542,16 @@ its slope $T_2^*$.
 
 The noise std is per quadrature and refers to the mean of the FID's
 repetitions. A noise scan without excitation must share NA, receiver gain and
-bandwidth with the FID; its time-domain std is taken after two group delays,
-with each row's mean removed. Without a noise scan, the last quarter of every
-FID row is used. While its time-domain std is at most 1.1 times the median of
-its Hann-windowed periodogram, the tail counts as white noise and the
-time-domain std is used. Otherwise the spectral median, which ignores a
-residual line, is used with a warning. An SNR below 20 also warns. Averages
+bandwidth with the FID; it is used after two group delays, with each row's
+mean removed. Without a noise scan, the last quarter of every FID row is used.
+While the time-domain std is at most 1.1 times the median of the
+Hann-windowed periodogram, the data count as white noise and the time-domain
+std is used. Otherwise the spectral median, which ignores a residual line,
+spurs or a noisy band edge, is used with a warning. An SNR below 20 also
+warns, and so does a receiver gain below 10: there the digitizer rather than
+the coil can set the noise floor, so the calibration underestimates the SNR of
+scans at a higher gain. On a 2 M [13C]urea phantom at 7 T, an FID at RG 63
+had 2.3 times the SNR of the same FID at RG 1. Averages
 are NA × repetitions, so the calibration's single-scan SNR is
 $A/(\sigma\sqrt{N_A N_R})$. This holds whether the scanner sums or averages
 the accumulations, provided FID and noise scan are treated alike.

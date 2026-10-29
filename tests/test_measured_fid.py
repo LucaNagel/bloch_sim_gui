@@ -77,6 +77,7 @@ def write_bruker_scan(
     *,
     na=1,
     rg=64.0,
+    calibrated_rg=None,
     sw=SW_HZ,
     data_format="GO_32BIT_SGN_INT",
     byte_order="little",
@@ -99,6 +100,8 @@ def write_bruker_scan(
     acqp.scalar("NR", rows.shape[0])
     acqp.scalar("DS", 0)
     acqp.scalar("RG", rg)
+    if calibrated_rg is not None:
+        acqp.array("ACQ_CalibratedRG", [calibrated_rg] + [0] * 7)
     acqp.scalar("SW_h", sw)
     acqp.scalar("GRPDLY", GRPDLY)
     acqp.string("NUC1", "13C")
@@ -197,6 +200,33 @@ def test_noise_scan_skips_filter_start_and_scales_to_the_fid_rows(tmp_path):
     inputs = measured_calibration_inputs(fid, noise)
     assert inputs.noise == estimate
     assert inputs.snr == pytest.approx(5e4 / (100 / np.sqrt(2)), rel=0.04)
+
+
+def test_spurs_in_the_noise_scan_use_the_spectral_median(tmp_path):
+    fid = load_measured_scan(write_bruker_scan(tmp_path / "1", fid_rows(rows=2)))
+    rows = noise_rows()
+    # A cluster of spurs near the band edge, as a digitizer at low gain shows.
+    time = np.arange(rows.shape[1]) * DWELL
+    for frequency in (900.0, 920.0, 950.0):
+        rows += 300.0 * np.exp(2j * np.pi * frequency * time)
+    noise = load_measured_scan(write_bruker_scan(tmp_path / "2", rows))
+    estimate = estimate_noise_std(noise, averaged_rows=fid.repetitions)
+    assert estimate.residual_ratio > 1.1
+    assert estimate.method == "noise scan, spectral median"
+    assert estimate.std_per_row == pytest.approx(100.0, rel=0.1)
+    inputs = measured_calibration_inputs(fid, noise)
+    assert any("spectral median" in text for text in inputs.warnings)
+
+
+def test_calibrated_receiver_gain_and_low_gain_warning(tmp_path):
+    # ParaVision may keep a changed RG; ACQ_CalibratedRG is the applied gain.
+    folder = write_bruker_scan(tmp_path / "1", fid_rows(), rg=64.0, calibrated_rg=1.01)
+    scan = load_measured_scan(folder)
+    assert scan.receiver_gain == pytest.approx(1.01)
+    inputs = measured_calibration_inputs(scan)
+    assert any("Receiver gain 1.01 is low" in text for text in inputs.warnings)
+    unset = write_bruker_scan(tmp_path / "2", fid_rows(), rg=64.0, calibrated_rg=0)
+    assert load_measured_scan(unset).receiver_gain == 64.0
 
 
 @pytest.mark.parametrize(

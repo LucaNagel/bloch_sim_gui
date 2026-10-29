@@ -23,6 +23,7 @@ from .receiver import ReceiverNoise, _sample_std, ideal_amplitude_map
 
 KELVIN_AT_0_CELSIUS = 273.15
 _PHYSICAL_UNIT = "mol × P/P_th"
+_BELOW_NOISE = "⚠ SNR < 1"
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,15 @@ def format_amount(mol):
 
 def _celsius(kelvin):
     return f"{kelvin - KELVIN_AT_0_CELSIUS:.4g} °C"
+
+
+def _below_noise_row(snr, what):
+    """Warning row for an SNR below 1, with the averaging that reaches 3."""
+    factor = (3.0 / snr) ** 2
+    return BudgetRow(
+        f"{what} is below the noise: SNR 3 needs about {factor:.3g}× the "
+        f"averages or {np.sqrt(factor):.3g}× the signal"
+    )
 
 
 def _message(title, text, status=""):
@@ -377,6 +387,17 @@ def _voxel_rows(grid, shares, sigma_reference):
     return tuple(rows)
 
 
+def _last_run_section(result, noise, shares):
+    rows = _last_run_rows(result, noise, shares)
+    voxel = next(
+        (row for row in rows if row.label == "Brightest voxel, all samples"), None
+    )
+    if voxel is not None and voxel.number < 1:
+        rows += (_below_noise_row(voxel.number, "The brightest voxel"),)
+        return BudgetSection("Last run", rows, _BELOW_NOISE)
+    return BudgetSection("Last run", rows)
+
+
 def _last_run_rows(result, noise, shares):
     if result is None:
         return (BudgetRow("Run the simulation to measure its acquisition SNR."),)
@@ -446,6 +467,7 @@ def snr_budget(
                 "budget from the receiver setting to the voxel SNR.",
             ),
         )
+    configured = noise.calibration
     noise = noise.for_object(getattr(phantom, "metadata", {}))
     sections = []
     calibration = noise.calibration
@@ -472,6 +494,24 @@ def snr_budget(
     else:
         sections.append(_calibration_section(calibration, calibration_preview))
         target = calibration.target_thermal_polarization
+        temperature_k = calibration.target_temperature_k
+        enrichment = calibration.target_enrichment
+        overridden = []
+        if not np.isclose(temperature_k, configured.target_temperature_k):
+            overridden.append("temperature")
+            temperature_note = (
+                "from the phantom; overrides the Simulated object temperature "
+                f"of {_celsius(configured.target_temperature_k)}"
+            )
+        else:
+            temperature_note = "sets the thermal polarization of the object"
+        if not np.isclose(enrichment, configured.target_enrichment):
+            overridden.append("enrichment")
+            enrichment_note = (
+                "from the phantom; observed isotope share of the simulated molecules"
+            )
+        else:
+            enrichment_note = "observed isotope share of the simulated molecules"
         sections.append(
             BudgetSection(
                 "Simulation units",
@@ -479,15 +519,21 @@ def snr_budget(
                     BudgetRow(
                         "Signal unit",
                         _PHYSICAL_UNIT,
-                        f"P_th = {target * 1e6:.4g} ppm, thermal at "
-                        f"{_celsius(calibration.target_temperature_k)}",
+                        f"P_th = {target * 1e6:.4g} ppm at "
+                        f"{calibration.field_strength_t:g} T",
                         target,
                     ),
                     BudgetRow(
+                        "Object temperature",
+                        _celsius(temperature_k),
+                        temperature_note,
+                        temperature_k,
+                    ),
+                    BudgetRow(
                         "Object enrichment",
-                        f"{calibration.target_enrichment * 100:g} %",
-                        "observed isotope share of the simulated molecules",
-                        calibration.target_enrichment,
+                        f"{enrichment * 100:g} %",
+                        enrichment_note,
+                        enrichment,
                     ),
                     BudgetRow(
                         "Noise factor",
@@ -502,6 +548,7 @@ def snr_budget(
                         calibration.noise_std(calibration.dwell_s),
                     ),
                 ),
+                " and ".join(overridden) + " from the phantom" if overridden else "",
             )
         )
 
@@ -567,8 +614,16 @@ def snr_budget(
                 ceiling,
             )
         )
+        if ceiling < 1:
+            rows.append(_below_noise_row(ceiling, "The whole-object FID"))
         object_rows = tuple(rows)
-    sections.append(BudgetSection("Simulated object", object_rows))
+    sections.append(
+        BudgetSection(
+            "Simulated object",
+            object_rows,
+            _BELOW_NOISE if amplitude is not None and ceiling < 1 else "",
+        )
+    )
 
     if program is None:
         readout = (BudgetRow("Build a sequence to see its readout bandwidths."),)
@@ -600,5 +655,5 @@ def snr_budget(
                 "not available.",
             )
         )
-    sections.append(BudgetSection("Last run", _last_run_rows(result, noise, shares)))
+    sections.append(_last_run_section(result, noise, shares))
     return tuple(sections)
