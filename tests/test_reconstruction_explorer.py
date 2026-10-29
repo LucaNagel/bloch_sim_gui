@@ -474,6 +474,9 @@ def test_time_course_never_shows_negative_repetitions(qt_application):
     )
     explorer = SequenceReconstructionExplorer()
     explorer.set_dataset(dataset)
+    explorer.voxel_plot_combo.setCurrentIndex(
+        explorer.voxel_plot_combo.findData("time_course")
+    )
     explorer._voxel_selected(4, 2)
 
     assert explorer.spectrum_plot.getViewBox().state["limits"]["xLimits"][0] == 0.0
@@ -715,7 +718,12 @@ def test_dynamic_explorer_plots_voxel_time_course(qt_application):
     explorer = SequenceReconstructionExplorer()
     explorer.set_dataset(dataset)
 
-    assert explorer.voxel_plot_combo.currentData() == "time_course"
+    modes = [
+        explorer.voxel_plot_combo.itemData(index)
+        for index in range(explorer.voxel_plot_combo.count())
+    ]
+    assert modes == ["echoes", "echo_spectrum", "time_course"]
+    explorer.voxel_plot_combo.setCurrentIndex(2)
     assert explorer.spectrum_plot.isVisibleTo(explorer)
     explorer.outer_controls["echo"].setValue(1)
     explorer._voxel_selected(4, 2)
@@ -734,6 +742,9 @@ def test_clicking_the_time_course_selects_the_nearest_repetition(qt_application)
     explorer.resize(1200, 800)
     explorer.show()
     explorer.set_dataset(dataset)
+    explorer.voxel_plot_combo.setCurrentIndex(
+        explorer.voxel_plot_combo.findData("time_course")
+    )
     qt_application.processEvents()
     repetition = explorer.outer_controls["repetition"]
     assert repetition.value() == 0
@@ -760,13 +771,97 @@ def test_reappearing_voxel_plot_gets_its_share_of_the_height(qt_application):
     explorer.show()
     explorer.set_dataset(_sliced_cartesian_dataset())
     qt_application.processEvents()
-    assert explorer.spectrum_plot.isHidden()
+    assert explorer.voxel_plot_panel.isHidden()
 
     explorer.set_dataset(dataset)
     qt_application.processEvents()
     images, plot = explorer.result_splitter.sizes()
     assert plot == pytest.approx(0.4 * (images + plot), abs=2)
     explorer.close()
+
+
+def _epsi_dataset(echoes=16, spacing_s=1e-3, offset_hz=125.0):
+    ny, nx = 3, 4
+    times = 2e-3 + spacing_s * np.arange(echoes)
+    train = np.exp(2j * np.pi * offset_hz * times)
+    image = np.ones((ny, nx))[None] * train[:, None, None]
+    return (
+        xr.Dataset(
+            {
+                "cartesian_image": (("cartesian_frame", "phase_y", "read_x"), image),
+                "cartesian_kspace": (
+                    ("cartesian_frame", "phase_y", "read_x"),
+                    np.fft.fft2(image, axes=(-2, -1)),
+                ),
+            },
+            coords={
+                "cartesian_frame": np.arange(echoes),
+                "phase_y": np.arange(ny),
+                "read_x": np.arange(nx),
+                "cartesian_frame_echo_index": ("cartesian_frame", np.arange(echoes)),
+            },
+            attrs={"echo_times_s": ",".join(f"{value:.17g}" for value in times)},
+        ),
+        times,
+        train,
+    )
+
+
+def test_epsi_explorer_switches_between_echo_train_and_spectrum(qt_application):
+    dataset, times, train = _epsi_dataset()
+    explorer = SequenceReconstructionExplorer()
+    explorer.resize(1200, 800)
+    explorer.show()
+    explorer.set_dataset(dataset)
+    qt_application.processEvents()
+
+    # Long trains open on the spectrum; the bar above the plot switches.
+    assert explorer.voxel_plot_combo.currentData() == "echo_spectrum"
+    buttons = explorer.voxel_plot_mode_buttons.buttons()
+    assert [button.text() for button in buttons] == ["Spectrum", "Echoes"]
+    assert explorer.voxel_plot_mode_bar.isVisibleTo(explorer)
+    explorer._voxel_selected(1, 2)
+    magnitude = explorer.spectrum_plot.listDataItems()[0]
+    peak = magnitude.xData[int(np.argmax(magnitude.yData))]
+    assert peak == pytest.approx(125.0)
+    assert "62.5 Hz resolution" in explorer.spectrum_plot.plotItem.titleLabel.text
+
+    buttons[1].click()
+    assert explorer.voxel_plot_combo.currentData() == "echoes"
+    echo_train = explorer.spectrum_plot.listDataItems()
+    np.testing.assert_allclose(echo_train[0].xData, times * 1e3)
+    np.testing.assert_allclose(echo_train[1].yData, train.real)
+
+    # Clicking into the echo train selects that echo.
+    view_box = explorer.spectrum_plot.getViewBox()
+    y = float(np.mean(view_box.viewRange()[1]))
+    event = SimpleNamespace(
+        button=lambda: Qt.LeftButton,
+        scenePos=lambda: view_box.mapViewToScene(QPointF(times[5] * 1e3, y)),
+        accept=lambda: None,
+    )
+    explorer._time_course_clicked(explorer.spectrum_plot, event)
+    assert explorer.outer_controls["echo"].value() == 5
+    assert buttons[1].isChecked()
+    explorer.close()
+
+
+def test_csi_voxel_plot_has_spectrum_and_fid_buttons(qt_application):
+    values = np.ones((2, 3, 4), dtype=complex)
+    dataset = xr.Dataset(
+        {
+            name: (("phase_y", "phase_x", "spectral_point"), values)
+            for name in ("csi_kspace", "csi_spatial_fid", "csi_spectrum")
+        },
+        coords={"spectral_point": np.arange(4)},
+    )
+    explorer = SequenceReconstructionExplorer()
+    explorer.set_dataset(dataset)
+    buttons = explorer.voxel_plot_mode_buttons.buttons()
+    assert [button.text() for button in buttons] == ["Spectrum", "FID"]
+    buttons[1].click()
+    assert explorer.voxel_plot_combo.currentData() == "fid"
+    assert explorer.spectrum_plot.plotItem.titleLabel.text.startswith("FID")
 
 
 def test_single_frame_explorer_hides_voxel_plot(qt_application):
