@@ -411,9 +411,11 @@ def test_sequence_mode_exposes_b1_and_combination_tabs():
     ]
 
     assert "B1 Fields" in labels
-    assert "Phantom + B1" in labels
+    # Phantom + B1 is a sub-tab of both Phantom and B1 Fields.
+    assert "Phantom + B1" not in labels
+    assert window.b1_subtabs.tabText(1) == "Phantom + B1"
+    assert window.phantom_subtabs.tabText(1) == "Phantom + B1"
     assert not window.tab_widget.isTabVisible(window.magnetization_tab_index)
     assert window.tab_widget.isTabVisible(window.b1_tab_index)
-    assert window.tab_widget.isTabVisible(window.b1_combo_tab_index)
     window.close()
     app.processEvents()

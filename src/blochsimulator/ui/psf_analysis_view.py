@@ -37,7 +37,7 @@ from ..sequence.psf import (
     psf_from_result,
     simulate_point_sources,
 )
-from .plot_interaction import AXIS_ZOOM_TOOLTIP
+from .plot_interaction import StaticPlotWidget
 
 ROLE_COLORS = {
     "read": "#2563eb",
@@ -493,7 +493,8 @@ class PSFAnalysisView(QWidget):
 
     @staticmethod
     def _plot(title, x_label, y_label, tooltip, legend=True):
-        plot = pg.PlotWidget()
+        # The plots always show their whole range; zooming is switched off.
+        plot = StaticPlotWidget()
         plot.setBackground("w")
         plot.setTitle(title, color="#0f172a")
         plot.setLabel("bottom", x_label)
@@ -507,7 +508,7 @@ class PSFAnalysisView(QWidget):
             )
         for axis in ("bottom", "left"):
             plot.getAxis(axis).enableAutoSIPrefix(False)
-        plot.setToolTip(f"{tooltip}\n\n{AXIS_ZOOM_TOOLTIP}")
+        plot.setToolTip(tooltip)
         plot.setMinimumHeight(PLOT_MINIMUM_HEIGHT)
         return plot
 

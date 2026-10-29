@@ -175,7 +175,7 @@ def test_sequence_tab_order_and_log_shares_application_history(qt_application):
     ]
     assert visible_tabs == [
         "Sequence",
-        "Geometry",
+        "Setup",
         "Reconstruction Explorer",
         "Spin Probe",
         "Signal",
@@ -745,7 +745,7 @@ def test_session_simulations_tab_is_next_to_phantom_b1_and_accepts_runs():
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
 
-    assert window.receiver_noise_tab_index == window.b1_combo_tab_index + 1
+    assert window.receiver_noise_tab_index == window.b1_tab_index + 1
     assert window.spoiling_analysis_tab_index == window.receiver_noise_tab_index + 1
     assert window.psf_analysis_tab_index == window.spoiling_analysis_tab_index + 1
     assert window.kspace_tab_index == window.psf_analysis_tab_index + 1
@@ -996,7 +996,13 @@ def test_completed_spin_probe_is_retained_and_can_be_reopened(tmp_path, monkeypa
     window = BlochSimulatorGUI()
     window.set_workspace_mode("sequence")
     widget = window.sequence_simulation_widget
+    widget.object_source.setCurrentIndex(0)
+    # Dimmed probe buttons say which source they need.
+    assert not widget.run_probe_button.isEnabled()
+    assert "Spin probe" in widget.run_probe_button.toolTip()
     widget.object_source.setCurrentIndex(2)
+    tab_bar = widget.views.tabBar()
+    assert not tab_bar.tabTextColor(widget.spin_probe_tab_index).isValid()
     result = SequenceProbeResult(
         time_s=np.array([0.0, 0.01]),
         positions_m=np.array([[0.0, 0.0, 0.0]]),
@@ -1010,6 +1016,7 @@ def test_completed_spin_probe_is_retained_and_can_be_reopened(tmp_path, monkeypa
     )
 
     widget._probe_finished(result, np.array([-100.0, 100.0]), "Hz", "spectral")
+    assert tab_bar.tabTextColor(widget.spin_probe_tab_index).isValid()
 
     retained = window.simulation_explorer.runs
     assert len(retained) == 1

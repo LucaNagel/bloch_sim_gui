@@ -63,6 +63,7 @@ from ..default_phantoms import (
     DEFAULT_COMPOUNDS,
     build_default_phantom,
     default_phantom_grid,
+    default_single_voxel_grid,
     is_default_phantom,
 )
 from ..phantom import Phantom
@@ -6231,7 +6232,7 @@ class SequenceSimulationWidget(QWidget):
         self.geometry_viewer.geometry_offset_requested.connect(
             self._geometry_offset_requested
         )
-        self.geometry_tab_index = views.addTab(self.geometry_viewer, "Geometry")
+        self.geometry_tab_index = views.addTab(self.geometry_viewer, "Setup")
         views.setTabToolTip(
             self.geometry_tab_index,
             "Check object, simulated grid, sequence FOV and slices before running.",
@@ -6436,6 +6437,7 @@ class SequenceSimulationWidget(QWidget):
         self.probe_views.currentChanged.connect(self._probe_view_changed)
         probe_layout.addWidget(self.probe_views, 1)
         spin_probe_index = views.addTab(probe_page, "Spin Probe")
+        self.spin_probe_tab_index = spin_probe_index
         views.setTabToolTip(
             spin_probe_index,
             "Run and inspect spectral or geometry spin probes.",
@@ -8299,6 +8301,29 @@ class SequenceSimulationWidget(QWidget):
                     self.nucleus.setCurrentIndex(nucleus_index)
                 self._apply_probe_defaults_from_phantom(phantom)
 
+    def _update_probe_button_hints(self, probe_selected):
+        """Say on the probe buttons why they are dimmed."""
+        if not probe_selected:
+            hint = (
+                "Select <b>Spin probe</b> as <b>Source</b> under Simulation "
+                "object to run a probe."
+            )
+        elif self.program is None:
+            hint = "Generate or load a sequence first."
+        else:
+            hint = ""
+        for button, action in (
+            (
+                self.run_probe_button,
+                "Probe the sequence response over a range of frequency offsets.",
+            ),
+            (
+                self.run_geometry_probe_button,
+                "Probe the sequence response over a range of positions.",
+            ),
+        ):
+            button.setToolTip(action if not hint else f"{action}<br><br>{hint}")
+
     def _update_run_action_availability(self):
         """Dim actions that do not apply to the selected simulation object."""
         probe_selected = self.object_source.currentIndex() == 2
@@ -8312,6 +8337,7 @@ class SequenceSimulationWidget(QWidget):
         self.run_geometry_probe_button.setEnabled(
             probe_selected and self.program is not None and idle
         )
+        self._update_probe_button_hints(probe_selected)
         self.run_button.setEnabled(
             not probe_selected and self.program is not None and idle
         )
@@ -8359,6 +8385,18 @@ class SequenceSimulationWidget(QWidget):
         )
         if geometry is None:
             side_m, cells = default_phantom_grid()
+        elif (
+            self.program.metadata.get("definitions", {}).get("TrajectoryType")
+            == "single_voxel_press"
+        ):
+            # PRESS encodes no grid: the sphere is sized around the selected
+            # voxel so the whole voxel lies inside the object.
+            center = tuple(getattr(geometry, "in_plane_center_m", None) or (0.0,) * 2)
+            slices = tuple(geometry.slice_positions_m) or (0.0,)
+            side_m, cells = default_single_voxel_grid(
+                (*geometry.fov_m[:2], geometry.slice_thickness_m),
+                (*center[:2], max(slices, key=abs)),
+            )
         else:
             side_m, cells = default_phantom_grid(
                 geometry.fov_m,
@@ -14881,6 +14919,7 @@ class SequenceSimulationWidget(QWidget):
         self.run_probe_button.setEnabled(False)
         self.run_geometry_probe_button.setEnabled(False)
         self.cancel_probe_button.setEnabled(True)
+        self._mark_result_tab_ready(self.spin_probe_tab_index, False)
         self.probe_status.setText(f"Preparing {label} probe…")
         self.probe_result = None
         self.probe_empty_hint.setVisible(False)
@@ -14983,6 +15022,7 @@ class SequenceSimulationWidget(QWidget):
         self.run_geometry_probe_button.setEnabled(probe_selected)
         self.cancel_probe_button.setEnabled(False)
         self.probe_status.setText("Spin probe complete")
+        self._mark_result_tab_ready(self.spin_probe_tab_index, True)
         self._update_probe_stale_warning()
         self._show_probe_result()
         self.export_button.setEnabled(True)
@@ -16715,11 +16755,13 @@ class SequenceSimulationWidget(QWidget):
 
     def _mark_reconstruction_ready(self, ready):
         """Colour the Reconstruction Explorer tab green while it shows a new result."""
+        self._mark_result_tab_ready(self.reconstruction_explorer_tab_index, ready)
+
+    def _mark_result_tab_ready(self, index, ready):
+        """Colour a result tab green while it shows a new result."""
         color = QColor(RESULT_READY_TAB_COLOR) if ready else QColor()
         # An invalid colour returns the tab to the style's text colour.
-        self.views.tabBar().setTabTextColor(
-            self.reconstruction_explorer_tab_index, color
-        )
+        self.views.tabBar().setTabTextColor(index, color)
 
     def _retain_session_simulation_run(self, run):
         register = getattr(self.window(), "register_sequence_simulation_run", None)

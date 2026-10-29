@@ -624,9 +624,21 @@ class SequenceReconstructionExplorer(QWidget):
         self.phantom_panel.hide()
         # Region outlines of the phantom drawn on top of the reconstruction.
         self.image_contours = _ContourOverlay(self.image_panel.plot)
+        # A localized single voxel (PRESS) has no image: its position in the
+        # phantom takes the place of the 1 × 1 k-space and reconstruction.
+        self.voxel_location_view = _PhantomOverview()
+        self.voxel_location_view.setObjectName("reconstruction_voxel_location")
+        self.voxel_location_view.canvas.setToolTip(
+            "Phantom sections through the measured voxel. Magenta outlines the "
+            "voxel the spectrum below comes from."
+        )
+        self.voxel_location_view.hide()
+        self._single_voxel = False
+        self.images_splitter = images
         images.addWidget(self.kspace_panel)
         images.addWidget(self.image_panel)
         images.addWidget(self.phantom_panel)
+        images.addWidget(self.voxel_location_view)
         # The reconstruction is the image of interest; k-space stays as a
         # smaller companion view.
         images.setStretchFactor(0, 2)
@@ -1715,10 +1727,12 @@ class SequenceReconstructionExplorer(QWidget):
             )
             metabolite = self._current_metabolite()
             metabolite_note = "" if metabolite is None else f" · {metabolite}"
-            self.summary.setText(
-                f"{model.kind.replace('_', ' ').title()} reconstruction"
-                f"{source}{metabolite_note}{ideal_note}"
+            kind = (
+                "Single-voxel spectroscopy"
+                if self._single_voxel and self.pages.currentWidget() is self.two_d_page
+                else f"{model.kind.replace('_', ' ').title()} reconstruction"
             )
+            self.summary.setText(f"{kind}{source}{metabolite_note}{ideal_note}")
             self._update_metabolite_annotation()
             self.export_button.setEnabled(self._current_display is not None)
             echo_control = self.outer_controls.get("echo")
@@ -1857,9 +1871,13 @@ class SequenceReconstructionExplorer(QWidget):
             int(np.clip(self._voxel[1], 0, image_values.shape[0] - 1)),
         )
         self.image_panel.set_selected_pixel(*self._voxel)
+        self._single_voxel = image_values.shape == (1, 1)
+        for panel in (self.kspace_panel, self.image_panel):
+            panel.setVisible(not self._single_voxel)
         self.pages.setCurrentWidget(self.two_d_page)
         self._current_display = image_values
         self._refresh_phantom_planar()
+        self._update_single_voxel_views()
         self._refresh_voxel_plot(mode, pool_index, effective_coil_mode)
 
     def _contrast_mode_changed(self, automatic):
@@ -2219,6 +2237,7 @@ class SequenceReconstructionExplorer(QWidget):
         for _viewer, _plane, item in self._volume_contour_items:
             item.clear()
         self.phantom_overview.clear()
+        self.voxel_location_view.clear()
         self.phantom_legend.setText("")
         self.phantom_composition.setText("")
         self._set_phantom_tab_visible(False)
@@ -2285,7 +2304,7 @@ class SequenceReconstructionExplorer(QWidget):
             return
         self.phantom_note.setText("")
         rows, cols = int(grid.shape[0]), int(grid.shape[1])
-        if self.phantom_show.isChecked():
+        if self.phantom_show.isChecked() and not self._single_voxel:
             self.phantom_panel.set_rgba(
                 resampled_rgba(resampled), (rows, cols), grid_description(grid)
             )
@@ -2395,6 +2414,16 @@ class SequenceReconstructionExplorer(QWidget):
                 ),
             )
 
+    def _update_single_voxel_views(self):
+        """Show the voxel in the phantom instead of a 1 × 1 image."""
+        located = self._single_voxel and self._phantom_grid is not None
+        self.voxel_location_view.setVisible(located)
+        if not located:
+            self.voxel_location_view.clear()
+        # Without a phantom a single voxel has nothing to show above its
+        # spectrum.
+        self.images_splitter.setVisible(not self._single_voxel or located)
+
     def _update_phantom_selection(self):
         grid = self._phantom_grid
         if grid is None or self._phantom is None:
@@ -2413,6 +2442,10 @@ class SequenceReconstructionExplorer(QWidget):
         contrast = self._phantom_contrast
         try:
             self.phantom_overview.set_view(self._phantom, contrast, grid.box(), box)
+            if self._single_voxel:
+                self.voxel_location_view.set_view(
+                    self._phantom, contrast, grid.box(), box
+                )
             composition = voxel_composition(
                 self._phantom, box, self._phantom_contrasts, contrast
             )

@@ -319,8 +319,8 @@ Final and checkpoint magnetization remain coil-independent and normalized.
 
 ## Receiver noise and phantom calibration
 
-The Sequence workspace's **Receiver / Noise** tab, between **Phantom + B1**
-and **Simulations**, supports off, relative-SNR and
+The Sequence workspace's **Receiver / Noise** tab, between **B1 Fields**
+(whose **Phantom + B1** sub-tab also appears under **Phantom**) and **Simulations**, supports off, relative-SNR and
 calibrated-from-phantom-FID modes for one receive channel.
 `blochsimulator.sequence.apply_receiver_noise(result, ReceiverNoise(...))`
 is the common post-simulation operation for static, independent spectral, and

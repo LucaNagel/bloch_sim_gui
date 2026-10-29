@@ -940,6 +940,9 @@ class SequenceGeometryViewer(QWidget):
             plot = pg.PlotWidget()
             plot.setToolTip(AXIS_ZOOM_TOOLTIP)
             plot.setAspectLocked(True)
+            # Free zoom onto the object and out to the sequence FOV: with the
+            # locked aspect, data-range limits would crop the object.
+            plot.getViewBox().auto_data_limits = False
             plot.showGrid(x=True, y=True, alpha=0.15)
             plot.setTitle(f"{AXES[horizontal].upper()}–{AXES[vertical].upper()}")
             plot.setLabel("bottom", AXES[horizontal], units="mm")

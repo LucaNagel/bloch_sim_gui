@@ -180,6 +180,10 @@ def test_gui_press_form_builds_places_exports_and_reconstructs(
         assert geometry.slice_thickness_m == pytest.approx(10e-3)
         assert geometry.slice_positions_m == pytest.approx((2e-3,))
         assert geometry.in_plane_center_m == pytest.approx((4e-3, -3e-3))
+        # The default sphere is sized around the voxel, so all of it is inside.
+        default = widget._default_sequence_phantom()
+        corner = np.linalg.norm([9e-3, 8e-3, 7e-3])
+        assert 0.3 * default.fov[0] > corner
 
         # TE1 = 0 means TE / 2 and is never raised to a minimum.
         minimums = widget._timing_minimums_ms()
@@ -225,6 +229,14 @@ def test_gui_press_form_builds_places_exports_and_reconstructs(
         widget.phantom = phantom
         widget._finished(result, record_run=False)
         assert "CSI" in widget.reconstruction_info.text()
+        # One voxel is not an image: the explorer shows where it lies in the
+        # phantom above its spectrum instead of 1 × 1 k-space and image.
+        explorer = widget.reconstruction_explorer
+        assert explorer.kspace_panel.isHidden()
+        assert explorer.image_panel.isHidden()
+        assert explorer.phantom_panel.isHidden()
+        assert not explorer.voxel_location_view.isHidden()
+        assert "Single-voxel spectroscopy" in explorer.summary.text()
     finally:
         widget.close()
         widget.deleteLater()

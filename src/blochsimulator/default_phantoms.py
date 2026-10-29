@@ -25,6 +25,8 @@ MIN_DEFAULT_PHANTOM_MATRIX = 32
 MAX_DEFAULT_PHANTOM_MATRIX = 128
 MAX_DEFAULT_SLICE_AXIS_MATRIX = 256
 CELLS_PER_SLICE_THICKNESS = 2
+SINGLE_VOXEL_SPHERE_MARGIN = 1.5
+CELLS_PER_VOXEL = 8
 DEFAULT_PHANTOM_FOV_M = 0.22
 DEFAULT_SPECTRAL_BANDWIDTH_PPM = 5.0
 DEFAULT_SPECTRAL_POINTS = 257
@@ -100,6 +102,32 @@ def default_phantom_grid(
                     _cells(side_m, width, MAX_DEFAULT_SLICE_AXIS_MATRIX),
                 )
     return side_m, tuple(shape)
+
+
+def default_single_voxel_grid(voxel_size_m, voxel_center_m=(0.0, 0.0, 0.0)):
+    """Return a grid whose centred sphere encloses a single spectroscopy voxel.
+
+    ``voxel_size_m`` and ``voxel_center_m`` are the voxel's edge lengths and
+    centre along its own axes.  The sphere radius is
+    ``SINGLE_VOXEL_SPHERE_MARGIN`` times the distance from the grid centre to
+    the farthest voxel corner, so the whole voxel lies inside the object, and
+    each voxel edge spans at least ``CELLS_PER_VOXEL`` cells.
+    """
+    size = np.abs(np.asarray(tuple(voxel_size_m), dtype=float))
+    center = np.abs(np.asarray(tuple(voxel_center_m), dtype=float))
+    if (
+        size.size == 0
+        or center.size != size.size
+        or not np.all(np.isfinite(size))
+        or not np.all(np.isfinite(center))
+        or np.any(size <= 0)
+    ):
+        return DEFAULT_PHANTOM_FOV_M, (DEFAULT_PHANTOM_MATRIX,) * 3
+    corner_m = float(np.linalg.norm(center + 0.5 * size))
+    radius_m = SINGLE_VOXEL_SPHERE_MARGIN * corner_m
+    side_m = 2.0 * radius_m / DEFAULT_SPHERE_DIAMETER_FRACTION
+    cells = _cells(side_m, float(np.min(size)) / CELLS_PER_VOXEL)
+    return side_m, (cells,) * 3
 
 
 def _isotropic_grid(sequence_fov_m, sequence_matrix, encoding_matrix):

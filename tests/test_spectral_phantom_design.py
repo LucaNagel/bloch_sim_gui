@@ -1794,9 +1794,16 @@ def test_phantom_tabs_preview_the_sequence_default_sphere(tmp_path):
     assert window.phantom_widget.viewer.phantom is default
     assert "sequence default" in window.phantom_widget.phantom_creator.info_label.text()
 
-    window.tab_widget.setCurrentIndex(window.b1_combo_tab_index)
+    window.phantom_subtabs.setCurrentIndex(1)
     app.processEvents()
+    assert window.b1_combo_widget.parent() is window.phantom_subtabs.widget(1)
     assert window.b1_combo_widget.phantom is default
+    # The same view moves into the B1 Fields sub-tab.
+    window.tab_widget.setCurrentIndex(window.b1_tab_index)
+    window.b1_subtabs.setCurrentIndex(1)
+    app.processEvents()
+    assert window.b1_combo_widget.parent() is window.b1_subtabs.widget(1)
+    window.phantom_subtabs.setCurrentIndex(0)
 
     # A chosen phantom replaces the preview and is not overwritten later.
     phantom = _spectral_design().build()
@@ -1805,7 +1812,7 @@ def test_phantom_tabs_preview_the_sequence_default_sphere(tmp_path):
     window.tab_widget.setCurrentIndex(window.phantom_tab_index)
     app.processEvents()
     assert window.phantom_widget.viewer.phantom is phantom
-    window.tab_widget.setCurrentIndex(window.b1_combo_tab_index)
+    window.tab_widget.setCurrentIndex(window.b1_tab_index)
     app.processEvents()
     assert window.b1_combo_widget.phantom is phantom
 

@@ -286,7 +286,7 @@ def test_coverage_notes_report_a_grid_beyond_the_offset_fov():
 def test_sequence_workspace_uses_default_sphere_and_shows_geometry_tab():
     app = QApplication.instance() or QApplication(sys.argv)
     widget = SequenceSimulationWidget()
-    assert widget.views.tabText(widget.geometry_tab_index) == "Geometry"
+    assert widget.views.tabText(widget.geometry_tab_index) == "Setup"
     assert widget.geometry_tab_index == widget.sequence_tab_index + 1
     # The workspace opens on the geometry preview of the default FLASH.
     assert widget.views.currentIndex() == widget.geometry_tab_index

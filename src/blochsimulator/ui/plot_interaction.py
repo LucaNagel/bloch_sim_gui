@@ -135,3 +135,19 @@ class AxisZoomPlotWidget(pg.PlotWidget):
             super().wheelEvent(event)
         else:
             event.ignore()
+
+
+class StaticPlotWidget(pg.PlotWidget):
+    """A plot that always shows what the program set: no zoom, pan or menu.
+
+    Scrolling or swiping over it is passed on to the enclosing scroll area.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setMouseEnabled(x=False, y=False)
+        self.setMenuEnabled(False)
+        self.hideButtons()
+
+    def wheelEvent(self, event):
+        event.ignore()
