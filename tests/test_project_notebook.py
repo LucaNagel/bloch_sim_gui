@@ -24,6 +24,9 @@ def test_notebook_is_valid_json_and_never_overwrites(tmp_path):
     )
     assert "LOOP_ID = 'abc12345'" in code
     assert "load_project" in code
+    assert "infer_spiral_acquisition" in code
+    assert "sampling_gap" in code
+    assert "Cartesian FFT or non-Cartesian NUFFT" in edited
     for cell in notebook["cells"]:
         if cell["cell_type"] == "code":
             compile("".join(cell["source"]), "cell", "exec")

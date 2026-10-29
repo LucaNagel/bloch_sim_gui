@@ -3474,6 +3474,221 @@ def _sequence_result_cartesian_point_example_code() -> str:
     ).strip()
 
 
+_NON_CARTESIAN_NUFFT_NOTE = (
+    "Samples off the Cartesian grid must not be placed into an FFT as they "
+    "come. A non-uniform FFT (NUFFT) interpolates them onto an oversampled "
+    "grid with a Kaiser–Bessel kernel. Density compensation weights the "
+    "densely sampled k-space centre down before that step. "
+    "`blochsimulator.sequence.nufft.NUFFTOperator(k_cyc_per_m, matrix, "
+    "fov_m)` does this for any 2D or 3D trajectory. Its `sampling_gap` is "
+    "the largest gap between samples in units of 1/FOV. Above 0.5 the "
+    "trajectory is undersampled and aliases outside `nyquist_fov_m()`."
+)
+
+
+def _sequence_result_reconstruction_methods_markdown(result_kind: str) -> str:
+    """Explain how the stored images of a result kind were reconstructed."""
+    if result_kind == "spiral_2d":
+        return (
+            "## Reconstruction methods (non-Cartesian spiral)\n\n"
+            "`spiral_image` was reconstructed with the method stored in the "
+            "result's spiral layout. By default this is the density-compensated "
+            "NUFFT. Every spiral frame can also be reconstructed again from the "
+            "raw ADC `signal` and its gradient moments:\n\n"
+            "- `nufft`: density-compensated gridding NUFFT. It is fast and "
+            "the standard choice.\n"
+            "- `cg`: iterative least-squares CG-NUFFT, 10 iterations, starting "
+            "from the gridding image. It reduces residual density-compensation "
+            "errors at the price of some noise amplification.\n"
+            "- `linear`: linear interpolation of the samples onto the "
+            "Cartesian grid, then an FFT. It is the legacy reference. It blurs "
+            "and leaves gaps wherever the spiral turns are sparse.\n\n"
+            + _NON_CARTESIAN_NUFFT_NOTE
+            + "\n\nThe cell below plots the trajectory of one frame. It reports "
+            "its sampling gap and compares the three methods. It needs the "
+            "`blochsimulator` package."
+        )
+    if result_kind == "radial_3d":
+        return (
+            "## Reconstruction methods (non-Cartesian 3D radial)\n\n"
+            "`radial_3d_image` is a density-compensated trilinear gridding "
+            "reference followed by an inverse FFT. Linear interpolation without "
+            "deapodization blurs, and its errors grow towards the FOV edge.\n\n"
+            + _NON_CARTESIAN_NUFFT_NOTE
+            + "\n\nThe cell below reconstructs the first radial volume with "
+            "the NUFFT and shows it next to the stored gridding. It needs the "
+            "`blochsimulator` package."
+        )
+    if result_kind in ("cartesian_2d", "cartesian_3d", "csi"):
+        return (
+            "## Reconstruction method (Cartesian)\n\n"
+            "The ADC samples lie on the Cartesian grid. The stored images are "
+            "the centred inverse FFT of the label-sorted k-space. No density "
+            "compensation or NUFFT is needed. This changes once samples move "
+            "off the grid, for example with ramp sampling or simulated gradient "
+            "errors, and for spiral or radial readouts:\n\n" + _NON_CARTESIAN_NUFFT_NOTE
+        )
+    return (
+        "## Reconstruction methods\n\n"
+        "No reconstruction layout was stored with this result. A Cartesian "
+        "readout can be sorted and FFT-reconstructed with the cells above. For "
+        "a non-Cartesian readout (spiral, radial, rosette), use the NUFFT "
+        "instead:\n\n"
+        + _NON_CARTESIAN_NUFFT_NOTE
+        + "\n\nThe `kx`/`ky`/`kz` coordinates are the accumulated ADC gradient "
+        "moments. They still contain the moment at the excitation. "
+        "`blochsimulator.sequence.kspace_trajectory.calculate_kspace(program)` "
+        "returns the excitation-referenced trajectory of the `.seq` file. "
+        "`blochsimulator.sequence.infer_spiral_acquisition(program)` builds "
+        "the spiral layout for undeclared spirals."
+    )
+
+
+def _sequence_result_spiral_methods_code() -> str:
+    """Return the spiral NUFFT/CG/linear comparison of one exported frame."""
+    return dedent(
+        r"""
+        # Needs the blochsimulator package (pip install blochsimulator).
+        from blochsimulator.sequence.reconstruction import (
+            reconstruct_spiral_frames,
+            spiral_acquisition_from_metadata,
+        )
+
+        frame = 0  # index along spiral_frame
+        metadata_json = ds.attrs['metadata_json']
+        spiral = spiral_acquisition_from_metadata(metadata_json)
+        moments = ds['adc_gradient_moment_cyc_per_m'].transpose(
+            'adc', 'gradient_axis'
+        ).values
+        raw = ds['signal'].values  # (adc,) or (coil, adc); or ds['species_signal']
+        print(f'{spiral.num_frames} spiral frame(s); frame {frame}: '
+              f'{spiral.frame_label(frame)}')
+        print(f'spiral_image was reconstructed with: {spiral.reconstruction_label}')
+
+        trajectory = spiral.trajectory(moments, frame)  # k = M - origin, cycles/m
+        operator = spiral.nufft_operator(trajectory)
+        gap = operator.sampling_gap
+        print(f'Largest k-space gap: {gap:.2f}/FOV (Nyquist sampling: <= 0.5)')
+        if gap > 0.5:
+            alias_free = ' x '.join(f'{fov * 1e3:.0f}' for fov in operator.nyquist_fov_m())
+            print(f'Undersampled: expect aliasing outside about {alias_free} mm.')
+
+        images = {
+            method: reconstruct_spiral_frames(
+                raw, moments, metadata_json, method=method, frames=[frame]
+            )[0]
+            for method in spiral.RECONSTRUCTION_METHODS
+        }
+        stored = ds['spiral_image'].isel(spiral_frame=frame).values
+        print('Recomputed stored method equals spiral_image:',
+              np.allclose(images[spiral.reconstruction_method], stored))
+
+
+        def _magnitude(image):
+            # Root sum of squares over receive coils.
+            if image.ndim == 3:
+                return np.sqrt(np.sum(np.abs(image) ** 2, axis=0))
+            return np.abs(image)
+
+
+        def _edges_mm(centres_m):
+            centres = np.asarray(centres_m) * 1e3
+            step = centres[1] - centres[0] if centres.size > 1 else 1.0
+            return centres[0] - step / 2, centres[-1] + step / 2
+
+
+        extent = (*_edges_mm(ds['spiral_position_x_m']),
+                  *_edges_mm(ds['spiral_position_y_m']))
+        fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+        axes[0].plot(trajectory[:, 0], trajectory[:, 1], lw=0.6)
+        axes[0].set(title=f'Frame {frame} trajectory', xlabel='kx (1/m)',
+                    ylabel='ky (1/m)', aspect='equal')
+        for ax, (method, image) in zip(axes[1:], images.items()):
+            shown = ax.imshow(_magnitude(image), origin='lower', extent=extent,
+                              cmap='gray')
+            ax.set(title=spiral.RECONSTRUCTION_LABELS[method], xlabel='x (mm)',
+                   ylabel='y (mm)')
+            fig.colorbar(shown, ax=ax, shrink=0.8)
+        plt.tight_layout(); plt.show()
+
+        # All frames with one method, shape (frame, [coil,] phase_y, read_x):
+        # all_frames = reconstruct_spiral_frames(raw, moments, metadata_json, method='cg')
+        """
+    ).strip()
+
+
+def _sequence_result_radial_nufft_code() -> str:
+    """Return the NUFFT reconstruction of the first exported radial volume."""
+    return dedent(
+        r"""
+        # Needs the blochsimulator package (pip install blochsimulator).
+        import json
+
+        from blochsimulator.sequence.encoding import offset_applied_in_reconstruction
+        from blochsimulator.sequence.nufft import NUFFTOperator
+
+        radial = ds['radial_3d_image']
+        matrix = ds.sizes['radial_x']
+        fov_m = float(str(ds.attrs['radial_fov_m']).split(',')[0])
+        outer = [dim for dim in radial.dims
+                 if dim in ('slice', 'echo', 'repetition', 'segment')]
+        selected = np.ones(ds.sizes['adc'], dtype=bool)
+        for dim in outer:  # the first value of every outer axis
+            selected &= ds[f'{dim}_index'].values == radial[dim].values[0]
+        selected = np.flatnonzero(selected)
+        moments = ds['adc_gradient_moment_cyc_per_m'].transpose(
+            'adc', 'gradient_axis'
+        ).values[selected]
+        events = ds['adc_event_index'].values[selected]
+        k = moments.copy()
+        for event in np.unique(events):
+            # Like the stored gridding: centre every spoke on its midpoint.
+            rows = events == event
+            k[rows] -= 0.5 * (moments[rows][0] + moments[rows][-1])
+        raw = ds['signal'].values[..., selected]
+        definitions = json.loads(ds.attrs['metadata_json']).get(
+            'sequence_definitions', {}
+        )
+        if offset_applied_in_reconstruction(definitions):
+            centre = np.array([float(ds[f'radial_position_{axis}_m'][matrix // 2])
+                               for axis in 'xyz'])
+            raw = raw * np.exp(2j * np.pi * (k @ centre))
+
+        operator = NUFFTOperator(k, (matrix,) * 3, (fov_m,) * 3)
+        print(f'Largest k-space gap: {operator.sampling_gap:.2f}/FOV '
+              '(Nyquist sampling: <= 0.5)')
+        if operator.sampling_gap > 0.5:
+            print('Too few spokes: expect streaks and aliasing outside about '
+                  f'{operator.nyquist_fov_m()[0] * 1e3:.0f} mm.')
+        # The operator returns (x, y, z); the exported volume is (z, y, x).
+        nufft_volume = np.swapaxes(operator.reconstruct(raw), -1, -3)
+        gridded_volume = radial.isel({dim: 0 for dim in outer}).values
+
+
+        def _central_planes(volume):
+            volume = np.abs(volume)
+            if volume.ndim == 4:  # root sum of squares over coils
+                volume = np.sqrt(np.sum(volume ** 2, axis=0))
+            volume = volume / max(volume.max(), 1e-30)
+            centre = matrix // 2
+            return (volume[centre], volume[:, centre], volume[:, :, centre])
+
+
+        fig, axes = plt.subplots(2, 3, figsize=(11, 7))
+        for row, (label, volume) in enumerate((
+            ('trilinear gridding (stored)', gridded_volume),
+            ('Kaiser-Bessel NUFFT', nufft_volume),
+        )):
+            for ax, plane, title in zip(axes[row], _central_planes(volume),
+                                        ('axial (z centre)', 'coronal (y centre)',
+                                         'sagittal (x centre)')):
+                ax.imshow(plane, origin='lower', cmap='gray', vmin=0, vmax=1)
+                ax.set_title(f'{label}\n{title}', fontsize=9); ax.axis('off')
+        plt.tight_layout(); plt.show()
+        """
+    ).strip()
+
+
 def _sequence_result_checkpoint_code() -> str:
     """Return the optional true phantom-grid Mxy checkpoint example."""
     return dedent(
@@ -4050,6 +4265,9 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
             "usual starting point for a measured pixel signal.\n"
             "- `species_cartesian_image` contains the same reconstruction separated "
             "by the `pool` coordinate when pool-resolved simulation was enabled.\n"
+            "- Non-Cartesian readouts store `spiral_image` (NUFFT by default) or "
+            "`radial_3d_image` (trilinear gridding) instead. Their "
+            "reconstruction methods are explained in their own section.\n"
             "- `checkpoint_magnetization`, when present, contains true voxel-grid "
             "$M_x$, $M_y$, and $M_z$ at explicitly configured times.\n"
             "- `final_magnetization` contains the voxel-grid state after the sequence.\n\n"
@@ -4136,6 +4354,14 @@ def export_sequence_result_notebook(filename: str, data_filename: str) -> Path:
                 ),
             ]
         )
+
+    cells.append(
+        new_markdown_cell(_sequence_result_reconstruction_methods_markdown(result_kind))
+    )
+    if result_kind == "spiral_2d":
+        cells.append(new_code_cell(_sequence_result_spiral_methods_code()))
+    elif result_kind == "radial_3d":
+        cells.append(new_code_cell(_sequence_result_radial_nufft_code()))
 
     cells.extend(
         [

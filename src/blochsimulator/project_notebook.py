@@ -149,6 +149,74 @@ if hasattr(result, "signal"):
         _cell(
             "markdown",
             """
+## Image reconstruction: Cartesian FFT or non-Cartesian NUFFT
+
+`result.to_xarray()` holds the reconstructed images next to the raw `signal`.
+How they were reconstructed depends on the readout trajectory:
+
+- **Cartesian** (FLASH, EPI, bSSFP, CSI): the samples lie on the k-space grid.
+  `cartesian_image` is the centred inverse FFT of the label-sorted k-space.
+- **Spiral** (non-Cartesian): `spiral_image` uses the method of the spiral
+  layout, by default the density-compensated **NUFFT**. `"cg"` (iterative
+  CG-NUFFT) and `"linear"` (linear gridding + FFT) are the alternatives.
+- **3D radial** (non-Cartesian): `radial_3d_image` uses density-compensated
+  trilinear gridding. `NUFFTOperator` reconstructs the same spokes with a
+  Kaiser–Bessel NUFFT.
+
+Do not place non-Cartesian samples into an FFT as they come. A NUFFT
+(`blochsimulator.sequence.nufft.NUFFTOperator(k_cyc_per_m, matrix, fov_m)`)
+interpolates them onto an oversampled grid after density compensation. Its
+`sampling_gap` is the largest gap between samples in units of 1/FOV. Above
+0.5 the trajectory is undersampled and aliases outside `nyquist_fov_m()`.
+`blochsimulator.sequence.kspace_trajectory.calculate_kspace(program)` gives
+the trajectory of any sequence.
+""",
+        ),
+        _cell(
+            "code",
+            """
+from blochsimulator.sequence import infer_spiral_acquisition
+
+if hasattr(result, "to_xarray"):
+    dataset = result.to_xarray()
+    for name in ("cartesian_image", "cartesian_3d_image", "spiral_image",
+                 "radial_3d_image", "csi_spatial_fid"):
+        if name in dataset:
+            print(f"{name}: dims={dataset[name].dims} shape={dataset[name].shape}")
+
+layouts = ("spiral_acquisition", "cartesian_acquisition", "cartesian_acquisition_frames",
+           "cartesian_acquisition_volumes", "spectroscopic_acquisition")
+spiral = getattr(result, "spiral_acquisition", None)
+if hasattr(result, "signal") and not any(result.metadata.get(key) for key in layouts):
+    try:  # older projects of undeclared spirals carry no layout
+        spiral = infer_spiral_acquisition(program)
+    except (KeyError, ValueError):
+        spiral = None
+if spiral is not None:
+    frame = 0
+    trajectory = spiral.trajectory(result.adc_gradient_moment_cyc_per_m, frame)
+    operator = spiral.nufft_operator(trajectory)
+    print(f"Spiral, stored method: {spiral.reconstruction_label}")
+    print(f"Largest k-space gap: {operator.sampling_gap:.2f}/FOV (Nyquist: <= 0.5)")
+    if operator.sampling_gap > 0.5:
+        alias_free = " x ".join(f"{fov * 1e3:.0f}" for fov in operator.nyquist_fov_m())
+        print(f"Undersampled: expect aliasing outside about {alias_free} mm.")
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    axes[0].plot(trajectory[:, 0], trajectory[:, 1], lw=0.6)
+    axes[0].set(title="Trajectory", xlabel="kx (1/m)", ylabel="ky (1/m)", aspect="equal")
+    for ax, method in zip(axes[1:], spiral.RECONSTRUCTION_METHODS):
+        image = spiral.reconstruct(result, frame, method=method)
+        if image.ndim == 3:  # root sum of squares over receive coils
+            image = np.sqrt(np.sum(np.abs(image) ** 2, axis=0))
+        ax.imshow(np.abs(image), origin="lower", cmap="gray")
+        ax.set_title(spiral.RECONSTRUCTION_LABELS[method])
+        ax.axis("off")
+    fig.tight_layout()
+""",
+        ),
+        _cell(
+            "markdown",
+            """
 ## All runs of the loop
 
 Projects are loaded one after another and only the derived arrays are kept,
