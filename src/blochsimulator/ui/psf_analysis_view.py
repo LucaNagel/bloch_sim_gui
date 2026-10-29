@@ -919,8 +919,10 @@ class PSFAnalysisView(QWidget):
                         1.0, angle=0, pen=pg.mkPen("#334155", style=Qt.DashLine)
                     )
                 )
+            self._limit_zoom(plot, [y], 5.0 if phase else 0.05)
             return
         plot.setLabel("bottom", "k [Δk]")
+        drawn = []
         for role, k, values in self._modulation_lines(psf):
             order = np.argsort(k)
             y = (
@@ -938,12 +940,29 @@ class PSFAnalysisView(QWidget):
                 symbolBrush=pg.mkBrush(ROLE_COLORS[role]),
                 name=_role_label(role, psf.encoding_frame),
             )
+            drawn.append(y)
         if not phase:
             plot.addItem(
                 pg.InfiniteLine(
                     1.0, angle=0, pen=pg.mkPen("#334155", style=Qt.DashLine)
                 )
             )
+        self._limit_zoom(plot, drawn, 5.0 if phase else 0.05)
+
+    @staticmethod
+    def _limit_zoom(plot, values, half_span):
+        """Keep at least ``2 half_span`` of y range around nearly flat data.
+
+        Auto-range would otherwise zoom into rounding noise, e.g. the
+        constant weight of a source without relaxation.
+        """
+        values = np.concatenate([np.ravel(value) for value in values] or [[]])
+        values = values[np.isfinite(values)]
+        if values.size and np.ptp(values) < half_span:
+            centre = 0.5 * (values.min() + values.max())
+            plot.setYRange(centre - half_span, centre + half_span, padding=0.0)
+        else:
+            plot.enableAutoRange(axis="y")
 
     def _render_slice_profile(self, psf):
         plot = self.slice_plot
