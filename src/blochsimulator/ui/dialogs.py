@@ -169,7 +169,7 @@ class SettingsDialog(QDialog):
         workspace_defaults: Optional[WorkspaceDefaults] = None,
         interface_style: str = "automatic",
         sequence_section_titles_bold: bool = True,
-        sequence_timing_visible: bool = True,
+        sequence_timing_visible: bool = False,
         color_accents: bool = True,
         signal_unit: str = "physical",
     ):

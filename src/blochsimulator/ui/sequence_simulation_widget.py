@@ -63,6 +63,7 @@ from ..default_phantoms import (
     DEFAULT_COMPOUNDS,
     build_default_phantom,
     default_phantom_grid,
+    default_single_voxel_grid,
     is_default_phantom,
 )
 from ..phantom import Phantom
@@ -227,6 +228,7 @@ from .volume_viewer import (
 from .widgets import (
     IMAGE_CANVAS_BACKGROUND,
     compact_image_histogram,
+    install_tab_bar_wheel_scroll,
     style_image_item,
 )
 from .default_settings import WorkspaceDefaults, load_kernel_settings
@@ -517,6 +519,8 @@ class _SequenceOverviewPlot(pg.PlotItem):
         self.vb.setBorder(pg.mkPen("#607078"))
         self.setMouseEnabled(x=False, y=False)
         self.disableAutoRange()
+        # It shows the whole sequence, including its trailing silence.
+        self.vb.auto_data_limits = False
         self.region = pg.LinearRegionItem(
             values=(0.0, 1.0),
             brush=pg.mkBrush(128, 203, 235, 65),
@@ -1832,9 +1836,9 @@ class SequenceSimulationWidget(QWidget):
             else True
         )
         self._sequence_timing_visible = (
-            bool(settings.value("interface/show_sequence_timing", True, type=bool))
+            bool(settings.value("interface/show_sequence_timing_row", False, type=bool))
             if settings is not None
-            else True
+            else False
         )
         self.spoiler_mode = spoiler_mode
         self.subvoxel_spin_counts = (
@@ -4357,10 +4361,11 @@ class SequenceSimulationWidget(QWidget):
         self._add_shared_rf_controls(
             ss_form,
             "ss_bssfp",
-            pulse_type="Gaussian",
+            pulse_type="SLR",
             duration_ms=2.33,
             sinc_lobes=3,
             apodization=0.0,
+            slr_sharpness=1,
             label_prefix="Spectral RF",
         )
         _add_form_section(ss_form, "Readout and timing")
@@ -4833,6 +4838,52 @@ class SequenceSimulationWidget(QWidget):
         self._auto_spin_grid_pending = False
         self._auto_spin_grid_history = []
         self._auto_spin_grid_time = 0.0
+        self.ideal_crusher_banner = QFrame()
+        self.ideal_crusher_banner.setObjectName("ideal_crusher_banner")
+        self.ideal_crusher_banner.setStyleSheet(
+            "QFrame#ideal_crusher_banner {background: #fef3c7; "
+            "border: 1px solid #f59e0b; border-radius: 4px;}"
+            "QFrame#ideal_crusher_banner QLabel {color: #78350f;}"
+        )
+        crusher_banner_layout = QVBoxLayout(self.ideal_crusher_banner)
+        self.ideal_crusher_banner_label = QLabel(
+            "Gradient spoiling simulates every crusher with subvoxel spins and "
+            "is much slower. For sequences generated here, the ideal crusher "
+            "is usually sufficient."
+        )
+        self.ideal_crusher_banner_label.setWordWrap(True)
+        crusher_banner_layout.addWidget(self.ideal_crusher_banner_label)
+        crusher_banner_buttons = QHBoxLayout()
+        crusher_banner_layout.addLayout(crusher_banner_buttons)
+        self.ideal_crusher_accept_button = QPushButton("Use ideal crusher")
+        self.ideal_crusher_accept_button.setToolTip(
+            "Switch the spoiler simulation to ideal crushers and remember it."
+        )
+        self.ideal_crusher_accept_button.clicked.connect(self._accept_ideal_crusher)
+        crusher_banner_buttons.addWidget(self.ideal_crusher_accept_button)
+        self.ideal_crusher_settings_link = QLabel(
+            "<a href='settings'>Open Settings</a>"
+        )
+        self.ideal_crusher_settings_link.setTextInteractionFlags(
+            Qt.LinksAccessibleByMouse
+        )
+        self.ideal_crusher_settings_link.linkActivated.connect(
+            lambda _link: self._show_simulation_settings()
+        )
+        crusher_banner_buttons.addWidget(self.ideal_crusher_settings_link)
+        crusher_banner_buttons.addStretch()
+        self.ideal_crusher_dismiss_button = QPushButton("Keep gradient spoiling")
+        self.ideal_crusher_dismiss_button.setToolTip(
+            "Hide this reminder until the application is restarted."
+        )
+        self.ideal_crusher_dismiss_button.clicked.connect(
+            self._dismiss_ideal_crusher_reminder
+        )
+        crusher_banner_buttons.addWidget(self.ideal_crusher_dismiss_button)
+        self._ideal_crusher_reminder_dismissed = False
+        # Lives above the scroll area so the reminder stays visible while the
+        # sequence settings are hidden.
+        control_column_layout.insertWidget(0, self.ideal_crusher_banner)
         self._update_spoiling_quality_visibility()
         controls_layout.addWidget(self.spoiling_quality_group)
 
@@ -6060,6 +6111,21 @@ class SequenceSimulationWidget(QWidget):
         view_mode_row.addStretch()
         views = QTabWidget()
         self.views = views
+        install_tab_bar_wheel_scroll(views)
+        # The sequence parameter column takes a large share of the window, so
+        # each tab remembers its own choice: only the Geometry tab starts with
+        # the column shown, the others offer this button to bring it back.
+        self._sequence_settings_shown_by_tab = {}
+        self.sequence_settings_toggle = QPushButton("Show sequence settings")
+        self.sequence_settings_toggle.setObjectName("sequence_settings_toggle")
+        self.sequence_settings_toggle.setCheckable(True)
+        self.sequence_settings_toggle.setToolTip(
+            "Show or hide the sequence parameter column next to the views"
+        )
+        self.sequence_settings_toggle.toggled.connect(
+            self._explorer_sequence_settings_requested
+        )
+        views.setCornerWidget(self.sequence_settings_toggle, Qt.TopRightCorner)
         views_font = views.tabBar().font()
         views_font.setBold(True)
         views.tabBar().setFont(views_font)
@@ -6124,6 +6190,15 @@ class SequenceSimulationWidget(QWidget):
         self.gradient_plot.setLabel("left", "Gradient", "T/m")
         self.gradient_plot.setLabel("bottom", "Time", "ms")
         self.gradient_plot.addLegend()
+        # These plots only hold the visible time window, so their zoom range
+        # is bounded by the sequence duration, not by the data currently
+        # drawn.
+        for view_box in (
+            self.rf_plot.getViewBox(),
+            self.gradient_plot.getViewBox(),
+            self._rf_phase_view,
+        ):
+            view_box.auto_data_limits = False
         self.rf_overview = _SequenceOverviewPlot(self.rf_plot)
         self.gradient_overview = _SequenceOverviewPlot(self.gradient_plot)
         zero_line_pen = pg.mkPen("#757575", width=1)
@@ -6157,7 +6232,7 @@ class SequenceSimulationWidget(QWidget):
         self.geometry_viewer.geometry_offset_requested.connect(
             self._geometry_offset_requested
         )
-        self.geometry_tab_index = views.addTab(self.geometry_viewer, "Geometry")
+        self.geometry_tab_index = views.addTab(self.geometry_viewer, "Setup")
         views.setTabToolTip(
             self.geometry_tab_index,
             "Check object, simulated grid, sequence FOV and slices before running.",
@@ -6225,12 +6300,11 @@ class SequenceSimulationWidget(QWidget):
         self.reconstruction_explorer_tab_index = views.addTab(
             self.reconstruction_explorer, "Reconstruction Explorer"
         )
-        # Browsing results does not need the sequence parameters, so the
-        # Explorer collapses them unless the user asks to keep them shown.
-        self._explorer_shows_sequence_settings = False
         self.reconstruction_explorer.sequence_settings_visibility_requested.connect(
             self._explorer_sequence_settings_requested
         )
+        self._sequence_settings_shown_by_tab[self.geometry_tab_index] = True
+        self._update_control_column_visibility()
         views.setTabToolTip(
             self.reconstruction_explorer_tab_index,
             "Browse reconstructed 2D, 3D, dynamic, and spectroscopic results.",
@@ -6330,6 +6404,7 @@ class SequenceSimulationWidget(QWidget):
         )
         probe_layout.addWidget(self.probe_time_control)
         self.probe_views = QTabWidget()
+        install_tab_bar_wheel_scroll(self.probe_views)
         self.probe_spectrum_viewer = SequenceProbeSpectrumViewer()
         self.probe_spatial_viewer = SequenceProbeSpatialViewer()
         self.probe_magnetization_viewer = MagnetizationViewer()
@@ -6362,6 +6437,7 @@ class SequenceSimulationWidget(QWidget):
         self.probe_views.currentChanged.connect(self._probe_view_changed)
         probe_layout.addWidget(self.probe_views, 1)
         spin_probe_index = views.addTab(probe_page, "Spin Probe")
+        self.spin_probe_tab_index = spin_probe_index
         views.setTabToolTip(
             spin_probe_index,
             "Run and inspect spectral or geometry spin probes.",
@@ -8225,6 +8301,29 @@ class SequenceSimulationWidget(QWidget):
                     self.nucleus.setCurrentIndex(nucleus_index)
                 self._apply_probe_defaults_from_phantom(phantom)
 
+    def _update_probe_button_hints(self, probe_selected):
+        """Say on the probe buttons why they are dimmed."""
+        if not probe_selected:
+            hint = (
+                "Select <b>Spin probe</b> as <b>Source</b> under Simulation "
+                "object to run a probe."
+            )
+        elif self.program is None:
+            hint = "Generate or load a sequence first."
+        else:
+            hint = ""
+        for button, action in (
+            (
+                self.run_probe_button,
+                "Probe the sequence response over a range of frequency offsets.",
+            ),
+            (
+                self.run_geometry_probe_button,
+                "Probe the sequence response over a range of positions.",
+            ),
+        ):
+            button.setToolTip(action if not hint else f"{action}<br><br>{hint}")
+
     def _update_run_action_availability(self):
         """Dim actions that do not apply to the selected simulation object."""
         probe_selected = self.object_source.currentIndex() == 2
@@ -8238,6 +8337,7 @@ class SequenceSimulationWidget(QWidget):
         self.run_geometry_probe_button.setEnabled(
             probe_selected and self.program is not None and idle
         )
+        self._update_probe_button_hints(probe_selected)
         self.run_button.setEnabled(
             not probe_selected and self.program is not None and idle
         )
@@ -8285,6 +8385,18 @@ class SequenceSimulationWidget(QWidget):
         )
         if geometry is None:
             side_m, cells = default_phantom_grid()
+        elif (
+            self.program.metadata.get("definitions", {}).get("TrajectoryType")
+            == "single_voxel_press"
+        ):
+            # PRESS encodes no grid: the sphere is sized around the selected
+            # voxel so the whole voxel lies inside the object.
+            center = tuple(getattr(geometry, "in_plane_center_m", None) or (0.0,) * 2)
+            slices = tuple(geometry.slice_positions_m) or (0.0,)
+            side_m, cells = default_single_voxel_grid(
+                (*geometry.fov_m[:2], geometry.slice_thickness_m),
+                (*center[:2], max(slices, key=abs)),
+            )
         else:
             side_m, cells = default_phantom_grid(
                 geometry.fov_m,
@@ -8785,6 +8897,7 @@ class SequenceSimulationWidget(QWidget):
         source_index = self.sequence_source.currentIndex()
         source_changed = source_index != self._selected_sequence_source_index
         self._selected_sequence_source_index = source_index
+        self._update_ideal_crusher_reminder()
         self.fid_group.setVisible(source_index == self.INTERNAL_SOURCE)
         self.fid_group.setEnabled(source_index == self.INTERNAL_SOURCE)
         epi_selected = source_index == self.EPI_SOURCE
@@ -10820,6 +10933,32 @@ class SequenceSimulationWidget(QWidget):
         """Show physical spoiler diagnostics only for gradient simulation."""
         if hasattr(self, "spoiling_quality_group"):
             self.spoiling_quality_group.setVisible(self.spoiler_mode == "gradient")
+        self._update_ideal_crusher_reminder()
+
+    def _update_ideal_crusher_reminder(self):
+        """Suggest the ideal crusher when a generated sequence uses gradients."""
+        banner = getattr(self, "ideal_crusher_banner", None)
+        source = getattr(self, "sequence_source", None)
+        if banner is None or source is None:
+            return
+        banner.setVisible(
+            self.spoiler_mode == "gradient"
+            and source.currentIndex() in self.GENERATED_SOURCES
+            and not self._ideal_crusher_reminder_dismissed
+        )
+
+    def _accept_ideal_crusher(self):
+        """Switch to ideal crushers and persist the choice like Settings does."""
+        if self.app_settings is not None:
+            self.app_settings.setValue("sequence/spoiler_mode", "ideal")
+            self.app_settings.sync()
+        self.set_spoiler_configuration(
+            "ideal", (1, 1, 1), self.subvoxel_sampling_method
+        )
+
+    def _dismiss_ideal_crusher_reminder(self):
+        self._ideal_crusher_reminder_dismissed = True
+        self._update_ideal_crusher_reminder()
 
     def _ss_bssfp_effective_spoiler_cycles_xyz(self):
         voxel_sizes = np.asarray(self._ss_bssfp_reference_voxel_sizes_m())
@@ -13885,14 +14024,31 @@ class SequenceSimulationWidget(QWidget):
             self._schedule_geometry_refresh()
         self._update_control_column_visibility()
 
+    def _sequence_settings_shown(self):
+        return self._sequence_settings_shown_by_tab.get(
+            self.views.currentIndex(), False
+        )
+
     def _update_control_column_visibility(self):
-        exploring = self.views.currentIndex() == self.reconstruction_explorer_tab_index
-        visible = not exploring or self._explorer_shows_sequence_settings
+        visible = self._sequence_settings_shown()
+        # Hide the whole column (run controls included) so the views get the
+        # full width, as the Reconstruction Explorer always did.
         self.control_column.setVisible(visible)
+        blocked = self.sequence_settings_toggle.blockSignals(True)
+        self.sequence_settings_toggle.setChecked(visible)
+        self.sequence_settings_toggle.blockSignals(blocked)
+        self.sequence_settings_toggle.setText(
+            "Hide sequence settings" if visible else "Show sequence settings"
+        )
+        # The Explorer carries its own button next to the simulation selector.
+        self.sequence_settings_toggle.setVisible(
+            self.views.currentIndex() != self.reconstruction_explorer_tab_index
+        )
         self.reconstruction_explorer.set_sequence_settings_visible(visible)
 
     def _explorer_sequence_settings_requested(self, visible):
-        self._explorer_shows_sequence_settings = bool(visible)
+        """Show or hide the parameter column for the current tab."""
+        self._sequence_settings_shown_by_tab[self.views.currentIndex()] = bool(visible)
         self._update_control_column_visibility()
 
     def _update_geometry_stale_notice(self, previewing=None):
@@ -13903,9 +14059,14 @@ class SequenceSimulationWidget(QWidget):
             self._sequence_generation_pending
             and self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES
         )
+        planned = self._planned_sequence_geometry()
         if previewing is None:
-            previewing = self._planned_sequence_geometry() is not None
+            previewing = planned is not None
         if previewing:
+            if stale and self._geometry_matches_sequence(planned):
+                # Timing-only edits such as TE or TR leave FOV and slices
+                # as drawn, so the views are not outdated.
+                stale = False
             if self.program is None:
                 message = (
                     "No sequence has been generated yet; the views show the FOV "
@@ -13923,6 +14084,17 @@ class SequenceSimulationWidget(QWidget):
         else:
             message = STALE_SEQUENCE_MESSAGE
         self.geometry_viewer.set_stale(stale, message)
+
+    def _geometry_matches_sequence(self, planned):
+        """Return whether the planned FOV and slices equal the shown ones."""
+        if planned is None or self.program is None:
+            return False
+        generated = self._sequence_geometry()
+        if generated is None or not planned.covers_same_region(generated):
+            return False
+        if planned.matrix is None or generated.matrix is None:
+            return planned.matrix is None and generated.matrix is None
+        return tuple(planned.matrix) == tuple(generated.matrix)
 
     def _geometry_update_requested(self):
         self._generate_sequence_clicked()
@@ -14763,6 +14935,7 @@ class SequenceSimulationWidget(QWidget):
         self.run_probe_button.setEnabled(False)
         self.run_geometry_probe_button.setEnabled(False)
         self.cancel_probe_button.setEnabled(True)
+        self._mark_result_tab_ready(self.spin_probe_tab_index, False)
         self.probe_status.setText(f"Preparing {label} probe…")
         self.probe_result = None
         self.probe_empty_hint.setVisible(False)
@@ -14865,6 +15038,7 @@ class SequenceSimulationWidget(QWidget):
         self.run_geometry_probe_button.setEnabled(probe_selected)
         self.cancel_probe_button.setEnabled(False)
         self.probe_status.setText("Spin probe complete")
+        self._mark_result_tab_ready(self.spin_probe_tab_index, True)
         self._update_probe_stale_warning()
         self._show_probe_result()
         self.export_button.setEnabled(True)
@@ -16079,6 +16253,7 @@ class SequenceSimulationWidget(QWidget):
         self.magnetization_animation = None
         self._split_csi_data = None
         self.signal_plot.clear()
+        self.signal_plot.setLimits(xMin=None, xMax=None)
         self.signal_plot.setTitle("Received ADC signal — current simulation")
         for plot in (self.signal_plot, self.split_signal_plot):
             self._set_signal_axis(plot, SignalDisplay("simulation"))
@@ -16152,7 +16327,9 @@ class SequenceSimulationWidget(QWidget):
     def _show_live_signal(self, signal, adc_times, visible_samples, preview_summary):
         """Plot only ADC data produced by the simulation currently running."""
         self.signal_plot.clear()
+        self.signal_plot.setLimits(xMin=None, xMax=None)
         self.signal_plot.setTitle("Live received ADC signal")
+        self.signal_plot.setLimits(xMin=0.0)
         self._set_signal_axis(self.signal_plot, SignalDisplay("simulation"))
         self.signal_plot.setLabel("bottom", "Time", "ms")
         visible_samples = min(int(visible_samples), int(adc_times.size))
@@ -16301,6 +16478,7 @@ class SequenceSimulationWidget(QWidget):
         display = signal_display(result, self.signal_unit)
         result = display_result(result, display)
         self.signal_plot.clear()
+        self.signal_plot.setLimits(xMin=None, xMax=None)
         self.signal_plot.setTitle("Received ADC signal")
         self.signal_plot.setLabel("bottom", "Time", "ms")
         self._set_signal_axis(self.signal_plot, display)
@@ -16366,6 +16544,12 @@ class SequenceSimulationWidget(QWidget):
                     pen=pg.mkPen(colors[pool_index % len(colors)], width=2),
                     name=f"|{name}|",
                 )
+        # Zooming out stops at the measurement, from 0 to its end.
+        measurement_ms = 1000.0 * float(result.metadata.get("duration_s") or 0.0)
+        if np.size(plot_time):
+            self.signal_plot.setLimits(
+                xMin=0.0, xMax=max(measurement_ms, float(np.max(plot_time)))
+            )
         self.spectrum_info.setText(display.note or display.description)
 
     def _finished(self, result, *, record_run=True):
@@ -16587,11 +16771,13 @@ class SequenceSimulationWidget(QWidget):
 
     def _mark_reconstruction_ready(self, ready):
         """Colour the Reconstruction Explorer tab green while it shows a new result."""
+        self._mark_result_tab_ready(self.reconstruction_explorer_tab_index, ready)
+
+    def _mark_result_tab_ready(self, index, ready):
+        """Colour a result tab green while it shows a new result."""
         color = QColor(RESULT_READY_TAB_COLOR) if ready else QColor()
         # An invalid colour returns the tab to the style's text colour.
-        self.views.tabBar().setTabTextColor(
-            self.reconstruction_explorer_tab_index, color
-        )
+        self.views.tabBar().setTabTextColor(index, color)
 
     def _retain_session_simulation_run(self, run):
         register = getattr(self.window(), "register_sequence_simulation_run", None)
@@ -17046,11 +17232,13 @@ class SequenceSimulationWidget(QWidget):
             x_values = csi.spectral_time_s * 1000.0
             self.split_signal_plot.setTitle("Spatially reconstructed voxel FID")
             self.split_signal_plot.setLabel("bottom", "Time", "ms")
+            self.split_signal_plot.setLimits(xMin=0.0)
         else:
             voxel_signal = spectra[..., y_index, x_index, :]
             x_values = csi.frequency_hz
             self.split_signal_plot.setTitle("Spatially reconstructed voxel spectrum")
             self.split_signal_plot.setLabel("bottom", "Frequency", "Hz")
+            self.split_signal_plot.setLimits(xMin=None)
         if voxel_signal.ndim == 2:
             magnitude = np.sqrt(np.sum(np.abs(voxel_signal) ** 2, axis=0))
             self.split_signal_plot.plot(
@@ -17127,6 +17315,7 @@ class SequenceSimulationWidget(QWidget):
             self.signal_plot.clear()
             self.signal_plot.setTitle("Spatially reconstructed CSI spectrum")
             self.signal_plot.setLabel("bottom", "Frequency", "Hz")
+            self.signal_plot.setLimits(xMin=None, xMax=None)
             if voxel_spectrum.ndim == 2:
                 magnitude = np.sqrt(np.sum(np.abs(voxel_spectrum) ** 2, axis=0))
                 self.signal_plot.plot(

@@ -1456,8 +1456,10 @@ class BlochSimulatorGUI(QMainWindow):
                 QLabel("Open this tab to initialize the Phantom workspace.")
             )
             phantom_layout.addStretch()
+            self.phantom_subtabs = QTabWidget()
+            self.phantom_subtabs.addTab(self.phantom_placeholder, "Phantom")
             self.phantom_tab_index = self.tab_widget.addTab(
-                self.phantom_placeholder, "Phantom"
+                self.phantom_subtabs, "Phantom"
             )
             self.tab_widget.currentChanged.connect(self._ensure_phantom_workspace)
         else:
@@ -1474,26 +1476,31 @@ class BlochSimulatorGUI(QMainWindow):
             QLabel("Open this tab to initialize the transmit/receive B1 workspace.")
         )
         b1_layout.addStretch()
-        self.b1_tab_index = self.tab_widget.addTab(self.b1_placeholder, "B1 Fields")
+        self.b1_subtabs = QTabWidget()
+        self.b1_subtabs.addTab(self.b1_placeholder, "B1 Fields")
+        self.b1_tab_index = self.tab_widget.addTab(self.b1_subtabs, "B1 Fields")
         self.tab_widget.currentChanged.connect(self._ensure_b1_workspace)
 
-        # === PHANTOM + B1 COMBINATION TAB ===
+        # === PHANTOM + B1 COMBINATION ===
+        # A sub-tab of both Phantom and B1 Fields. There is one combination
+        # view; it moves into whichever of the two sub-tabs is shown.
         self.b1_combo_widget = None
-        self.b1_combo_placeholder = QWidget()
-        self.b1_combo_placeholder.setSizePolicy(
-            QSizePolicy.Ignored, QSizePolicy.Ignored
-        )
-        combo_layout = QVBoxLayout(self.b1_combo_placeholder)
-        combo_layout.setContentsMargins(0, 0, 0, 0)
-        combo_layout.addWidget(
-            QLabel("Open this tab to initialize the Phantom/B1 slice view.")
-        )
-        combo_layout.addStretch()
-        self.b1_combo_tab_index = self.tab_widget.addTab(
-            self.b1_combo_placeholder, "Phantom + B1"
-        )
-        self.tab_widget.currentChanged.connect(self._ensure_b1_combo_workspace)
+        self._b1_combo_hosts = {}
+        for subtabs in self._b1_combo_subtab_widgets():
+            host = QWidget()
+            host_layout = QVBoxLayout(host)
+            host_layout.setContentsMargins(0, 0, 0, 0)
+            subtabs.addTab(host, "Phantom + B1")
+            subtabs.setTabToolTip(
+                1,
+                "Step through axial, coronal, and sagittal B1 maps with the "
+                "phantom outline overlaid.",
+            )
+            self._b1_combo_hosts[subtabs] = host
+            subtabs.currentChanged.connect(self._b1_subtab_changed)
+        self._b1_subtab_index = 0
         # Connected after the lazy builders so the opened workspace exists.
+        self.tab_widget.currentChanged.connect(self._place_b1_combo_workspace)
         self.tab_widget.currentChanged.connect(self._show_default_phantom_preview)
 
         self.receiver_noise_workspace = None
@@ -1980,39 +1987,65 @@ class BlochSimulatorGUI(QMainWindow):
         )
         self._connect_sequence_b1_display()
 
-    def _ensure_b1_combo_workspace(self, index: int):
-        """Create the combined B1/phantom slice view only when its tab is opened."""
+    def _b1_combo_subtab_widgets(self):
+        """The Phantom and B1 Fields sub-tab bars that hold Phantom + B1."""
+        subtabs = [getattr(self, "phantom_subtabs", None), self.b1_subtabs]
+        return [widget for widget in subtabs if widget is not None]
+
+    def _shown_b1_combo_host(self):
+        """The Phantom + B1 sub-tab page on screen, or None."""
+        current = self.tab_widget.currentWidget()
+        host = self._b1_combo_hosts.get(current)
+        if host is None or current.currentWidget() is not host:
+            return None
+        return host
+
+    def _b1_subtab_changed(self, index: int):
+        subtabs = self.sender()
         if (
-            index != getattr(self, "b1_combo_tab_index", -1)
-            or self.b1_combo_widget is not None
+            subtabs is self.b1_subtabs
+            and self._b1_subtab_index == 0
+            and index != 0
+            and self.b1_widget is not None
+            and not self.b1_widget.confirm_pending_changes()
         ):
+            blocked = subtabs.blockSignals(True)
+            subtabs.setCurrentIndex(0)
+            subtabs.blockSignals(blocked)
             return
-        layout = self.b1_combo_placeholder.layout()
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.hide()
-                widget.deleteLater()
-        self.b1_combo_widget = B1PhantomCombinationWidget(self)
-        layout.addWidget(self.b1_combo_widget)
-        phantom_widget = getattr(self, "phantom_widget", None)
-        self.b1_combo_widget.set_phantom(
-            None if phantom_widget is None else phantom_widget.current_phantom
-        )
-        b1_widget = getattr(self, "b1_widget", None)
-        self.b1_combo_widget.set_fields(
-            None if b1_widget is None else b1_widget.tx_field,
-            None if b1_widget is None else b1_widget.rx_field,
-        )
-        self._connect_sequence_b1_display()
+        if subtabs is self.b1_subtabs:
+            self._b1_subtab_index = index
+        self._place_b1_combo_workspace()
+        self._show_default_phantom_preview(self.tab_widget.currentIndex())
+
+    def _place_b1_combo_workspace(self, *_):
+        """Create the combined B1/phantom view when shown and move it there."""
+        host = self._shown_b1_combo_host()
+        if host is None:
+            return
+        if self.b1_combo_widget is None:
+            self.b1_combo_widget = B1PhantomCombinationWidget(self)
+            phantom_widget = getattr(self, "phantom_widget", None)
+            self.b1_combo_widget.set_phantom(
+                None if phantom_widget is None else phantom_widget.current_phantom
+            )
+            b1_widget = getattr(self, "b1_widget", None)
+            self.b1_combo_widget.set_fields(
+                None if b1_widget is None else b1_widget.tx_field,
+                None if b1_widget is None else b1_widget.rx_field,
+            )
+            self._connect_sequence_b1_display()
+        if self.b1_combo_widget.parent() is not host:
+            host.layout().addWidget(self.b1_combo_widget)
+            self.b1_combo_widget.show()
 
     def _show_default_phantom_preview(self, index: int):
         """Show the default sphere the sequence simulates while none is chosen."""
-        if index not in (
-            getattr(self, "phantom_tab_index", -1),
-            getattr(self, "b1_combo_tab_index", -1),
-        ):
+        combo_shown = self._shown_b1_combo_host() is not None
+        designer_shown = (
+            index == getattr(self, "phantom_tab_index", -1) and not combo_shown
+        )
+        if not (designer_shown or combo_shown):
             return
         phantom_widget = getattr(self, "phantom_widget", None)
         if phantom_widget is not None and phantom_widget.current_phantom is not None:
@@ -2025,10 +2058,10 @@ class BlochSimulatorGUI(QMainWindow):
         phantom = sequence_widget._default_sequence_phantom()
         if phantom is None:
             return
-        if index == self.phantom_tab_index and phantom_widget is not None:
+        if designer_shown and phantom_widget is not None:
             phantom_widget.show_default_phantom(phantom)
         combo_widget = getattr(self, "b1_combo_widget", None)
-        if index == self.b1_combo_tab_index and combo_widget is not None:
+        if combo_shown and combo_widget is not None:
             if combo_widget.phantom is not phantom:
                 combo_widget.set_phantom(phantom)
 
@@ -2292,10 +2325,6 @@ class BlochSimulatorGUI(QMainWindow):
             "B1 Fields": (
                 "Define, load, stretch, rotate, preview, and apply transmit B1+ "
                 "and receive B1− fields."
-            ),
-            "Phantom + B1": (
-                "Step through axial, coronal, and sagittal B1 maps with the phantom "
-                "outline overlaid."
             ),
             "Simulations": (
                 "Switch between completed sequence simulations retained for this "
@@ -6062,7 +6091,6 @@ class BlochSimulatorGUI(QMainWindow):
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
                 self.b1_tab_index,
-                self.b1_combo_tab_index,
                 self.receiver_noise_tab_index,
                 self.spoiling_analysis_tab_index,
                 self.psf_analysis_tab_index,
@@ -6102,7 +6130,6 @@ class BlochSimulatorGUI(QMainWindow):
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
                 self.b1_tab_index,
-                self.b1_combo_tab_index,
                 self.receiver_noise_tab_index,
                 self.psf_analysis_tab_index,
                 self.kspace_tab_index,
@@ -6126,7 +6153,6 @@ class BlochSimulatorGUI(QMainWindow):
                     self.sequence_simulation_tab_index,
                     self.phantom_tab_index,
                     self.b1_tab_index,
-                    self.b1_combo_tab_index,
                     self.receiver_noise_tab_index,
                     self.spoiling_analysis_tab_index,
                     self.psf_analysis_tab_index,
@@ -6154,7 +6180,6 @@ class BlochSimulatorGUI(QMainWindow):
             self._set_main_tab_visible(self.sequence_simulation_tab_index, False)
             self._set_main_tab_visible(self.phantom_tab_index, False)
             self._set_main_tab_visible(self.b1_tab_index, False)
-            self._set_main_tab_visible(self.b1_combo_tab_index, False)
             self._set_main_tab_visible(self.receiver_noise_tab_index, False)
             self._set_main_tab_visible(self.spoiling_analysis_tab_index, False)
             self._set_main_tab_visible(self.psf_analysis_tab_index, False)
@@ -6363,7 +6388,7 @@ class BlochSimulatorGUI(QMainWindow):
             signal_unit=self.app_settings.value("sequence/signal_unit", "physical"),
             sequence_section_titles_bold=previous_sequence_section_titles_bold,
             sequence_timing_visible=self.app_settings.value(
-                "interface/show_sequence_timing", True, type=bool
+                "interface/show_sequence_timing_row", False, type=bool
             ),
             color_accents=self._load_color_accents(),
         )
@@ -6408,7 +6433,7 @@ class BlochSimulatorGUI(QMainWindow):
         live_progress_enabled = dialog.sequence_live_progress_enabled()
         sequence_timing_visible = bool(dialog.sequence_timing_visible())
         self.app_settings.setValue(
-            "interface/show_sequence_timing", sequence_timing_visible
+            "interface/show_sequence_timing_row", sequence_timing_visible
         )
         self.app_settings.setValue(
             "sequence/live_progress_enabled", live_progress_enabled
@@ -7458,6 +7483,9 @@ class BlochSimulatorGUI(QMainWindow):
                         state.get("reconstruction_view", {})
                     )
                 saved_view_name = str(state.get("sequence_view_name", ""))
+                # The Geometry tab was renamed to Setup.
+                if saved_view_name == "Geometry":
+                    saved_view_name = "Setup"
                 saved_view_index = -1
                 if saved_view_name:
                     for index in range(sequence_widget.views.count()):
@@ -7481,7 +7509,7 @@ class BlochSimulatorGUI(QMainWindow):
                             saved_view_index += 1
                         legacy_names = (
                             "Sequence",
-                            "Geometry",
+                            "Setup",
                             "Signal",
                             "2D k-space / Reconstruction",
                             "Reconstruction Explorer",

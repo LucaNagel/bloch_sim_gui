@@ -2475,7 +2475,8 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     assert int(window.app_settings.value("memory/animation_replay_mib")) == 2048
     assert window.app_settings.value("interface/style") == "fusion"
     assert (
-        window.app_settings.value("interface/show_sequence_timing", type=bool) is False
+        window.app_settings.value("interface/show_sequence_timing_row", type=bool)
+        is False
     )
     window.sequence_simulation_widget.set_sequence_timing_visible.assert_called_once_with(
         False
@@ -2562,16 +2563,16 @@ def test_changing_only_spoiler_settings_preserves_active_sequence_parameters(
 
 def test_settings_dialog_sequence_timing_preference(tmp_path):
     dialog = SettingsDialog(MemoryPolicy(), tmp_path, tooltips_enabled=True)
-    assert dialog.sequence_timing_visible() is True
+    assert dialog.sequence_timing_visible() is False
     checkbox = dialog.sequence_timing_checkbox
     interface_tab = dialog.tabs.widget(dialog.tabs.count() - 1)
     assert interface_tab.isAncestorOf(checkbox)
-    checkbox.setChecked(False)
-    assert dialog.sequence_timing_visible() is False
+    checkbox.setChecked(True)
+    assert dialog.sequence_timing_visible() is True
     reopened = SettingsDialog(
-        MemoryPolicy(), tmp_path, tooltips_enabled=True, sequence_timing_visible=False
+        MemoryPolicy(), tmp_path, tooltips_enabled=True, sequence_timing_visible=True
     )
-    assert reopened.sequence_timing_visible() is False
+    assert reopened.sequence_timing_visible() is True
 
 
 def test_settings_dialog_saves_sequence_reference_defaults_per_nucleus(tmp_path):

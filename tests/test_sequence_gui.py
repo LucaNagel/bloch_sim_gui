@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from blochsimulator.default_phantoms import default_compound
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.magnetization_viewer import MagnetizationViewer
 from blochsimulator.ui.sequence_simulation_widget import (
@@ -175,7 +176,7 @@ def test_sequence_tab_order_and_log_shares_application_history(qt_application):
     ]
     assert visible_tabs == [
         "Sequence",
-        "Geometry",
+        "Setup",
         "Reconstruction Explorer",
         "Spin Probe",
         "Signal",
@@ -745,7 +746,7 @@ def test_session_simulations_tab_is_next_to_phantom_b1_and_accepts_runs():
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
 
-    assert window.receiver_noise_tab_index == window.b1_combo_tab_index + 1
+    assert window.receiver_noise_tab_index == window.b1_tab_index + 1
     assert window.spoiling_analysis_tab_index == window.receiver_noise_tab_index + 1
     assert window.psf_analysis_tab_index == window.spoiling_analysis_tab_index + 1
     assert window.kspace_tab_index == window.psf_analysis_tab_index + 1
@@ -996,7 +997,13 @@ def test_completed_spin_probe_is_retained_and_can_be_reopened(tmp_path, monkeypa
     window = BlochSimulatorGUI()
     window.set_workspace_mode("sequence")
     widget = window.sequence_simulation_widget
+    widget.object_source.setCurrentIndex(0)
+    # Dimmed probe buttons say which source they need.
+    assert not widget.run_probe_button.isEnabled()
+    assert "Spin probe" in widget.run_probe_button.toolTip()
     widget.object_source.setCurrentIndex(2)
+    tab_bar = widget.views.tabBar()
+    assert not tab_bar.tabTextColor(widget.spin_probe_tab_index).isValid()
     result = SequenceProbeResult(
         time_s=np.array([0.0, 0.01]),
         positions_m=np.array([[0.0, 0.0, 0.0]]),
@@ -1010,6 +1017,7 @@ def test_completed_spin_probe_is_retained_and_can_be_reopened(tmp_path, monkeypa
     )
 
     widget._probe_finished(result, np.array([-100.0, 100.0]), "Hz", "spectral")
+    assert tab_bar.tabTextColor(widget.spin_probe_tab_index).isValid()
 
     retained = window.simulation_explorer.runs
     assert len(retained) == 1
@@ -3588,6 +3596,7 @@ def test_default_flash_sequence_reports_time_per_image(qt_application):
     widget = SequenceSimulationWidget()
     assert widget.sequence_source.currentIndex() == widget.FLASH_SOURCE
     assert widget._ensure_current_generated_sequence(), widget._generation_error
+    widget.set_sequence_timing_visible(True)
     widget._show_program()
     assert "Time per image:" in widget.sequence_timing_summary.text()
 
@@ -3597,6 +3606,8 @@ def test_sequence_preview_timing_refresh_and_saved_visibility(tmp_path, qt_appli
     parent = QWidget()
     parent.app_settings = settings
     widget = SequenceSimulationWidget(parent)
+    assert widget.sequence_timing_summary.isHidden()  # hidden by default
+    widget.set_sequence_timing_visible(True)
     widget.program = SequenceProgram(
         (), duration_s=0.06, metadata={"definitions": {"TE": 0.02, "TR": 0.06}}
     )
@@ -3617,7 +3628,7 @@ def test_sequence_preview_timing_refresh_and_saved_visibility(tmp_path, qt_appli
     assert not widget.sequence_timing_summary.isHidden()
     assert widget.sequence_timing_summary.text().count("not specified") == 2
 
-    settings.setValue("interface/show_sequence_timing", False)
+    settings.setValue("interface/show_sequence_timing_row", False)
     settings.sync()
     reopened = SequenceSimulationWidget(parent)
     assert reopened.sequence_timing_summary.isHidden()
@@ -4065,19 +4076,42 @@ def test_reconstruction_explorer_hides_2d_tab_and_sequence_settings(qt_applicati
     assert not widget.views.isTabVisible(widget.two_d_result_tab_index)
     assert widget.csi_slice_thickness_mm.value() == pytest.approx(3.0)
 
+    # The Geometry tab starts with the sequence settings, the others without.
+    qt_application.processEvents()
+    assert widget.views.currentIndex() == widget.geometry_tab_index
+    assert widget.control_column.isVisible()
+    assert widget.run_button.isVisible()
     widget.views.setCurrentIndex(widget.reconstruction_explorer_tab_index)
     qt_application.processEvents()
+    # The whole column collapses and the Explorer offers its own button.
     assert not widget.control_column.isVisible()
+    assert not widget.run_button.isVisible()
+    assert not widget.sequence_settings_toggle.isVisible()
     assert explorer.controls_scroll.isVisible()
 
     explorer.sequence_settings_button.click()
     qt_application.processEvents()
     assert widget.control_column.isVisible()
 
-    explorer.sequence_settings_button.click()
+    # Each tab keeps its own choice.
     widget.views.setCurrentIndex(widget.log_tab_index)
     qt_application.processEvents()
+    assert not widget.control_column.isVisible()
+    assert widget.sequence_settings_toggle.isVisible()
+    assert widget.sequence_settings_toggle.text() == "Show sequence settings"
+    widget.sequence_settings_toggle.click()
+    qt_application.processEvents()
     assert widget.control_column.isVisible()
+    assert widget.sequence_settings_toggle.text() == "Hide sequence settings"
+    widget.views.setCurrentIndex(widget.geometry_tab_index)
+    qt_application.processEvents()
+    widget.sequence_settings_toggle.click()
+    qt_application.processEvents()
+    assert not widget.control_column.isVisible()
+    widget.views.setCurrentIndex(widget.reconstruction_explorer_tab_index)
+    qt_application.processEvents()
+    assert widget.control_column.isVisible()
+    assert explorer.sequence_settings_button.isChecked()
 
 
 def test_phantom_designer_starts_from_default_sphere(qt_application):
@@ -4088,11 +4122,28 @@ def test_phantom_designer_starts_from_default_sphere(qt_application):
     phantom_widget = window.phantom_widget.phantom_creator
     assert phantom_widget.current_phantom is None
 
-    phantom_widget._open_spectral_designer()
+    # The default sphere counts as loaded: it is edited, not recreated.
+    assert not phantom_widget.edit_btn.isHidden()
+    assert phantom_widget.edit_btn.isEnabled()
+    phantom_widget.edit_current_phantom()
     dialog = phantom_widget._retained_spectral_designer_dialogs[-1]
     try:
         assert dialog.design.shapes
         assert dialog.design.nucleus == phantom_widget.get_nucleus()
+        compound = default_compound(dialog.design.nucleus)
+        positions = [
+            dialog.design.spectral_reference_ppm + peak.frequency_ppm
+            for peak in dialog.design.shapes[0].peaks
+        ]
+        assert positions == pytest.approx([compound.chemical_shift_ppm])
+    finally:
+        dialog.reject()
+
+    # Create New starts from an empty design instead of the default sphere.
+    phantom_widget._open_spectral_designer()
+    dialog = phantom_widget._retained_spectral_designer_dialogs[-1]
+    try:
+        assert not dialog.design.name.startswith("Default sphere")
     finally:
         dialog.reject()
 
@@ -4177,3 +4228,47 @@ def test_typing_zero_bisects_to_the_shortest_buildable_bssfp_tr():
     with pytest.raises(Exception):
         make_pulseq_bssfp(**widget._bssfp_pulseq_parameters())
     widget.close()
+
+
+def test_ss_bssfp_defaults_to_slr_sharpness_one():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+
+    assert widget.ss_bssfp_rf_pulse_type.currentText() == "SLR"
+    assert widget.ss_bssfp_rf_slr_sharpness.value() == 1
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_ideal_crusher_reminder_for_generated_sequences_with_gradient_spoiling():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.show()
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
+    widget.set_spoiler_configuration("ideal", (1, 1, 1))
+    assert not widget.ideal_crusher_banner.isVisible()
+
+    widget.set_spoiler_configuration("gradient", (1, 1, 9))
+    assert widget.ideal_crusher_banner.isVisible()
+
+    # Sequences that are not generated here keep their own spoilers.
+    widget.sequence_source.setCurrentIndex(widget.PULSEQ_SOURCE)
+    assert not widget.ideal_crusher_banner.isVisible()
+
+    widget.sequence_source.setCurrentIndex(widget.FLASH_SOURCE)
+    assert widget.ideal_crusher_banner.isVisible()
+    widget.ideal_crusher_accept_button.click()
+    assert widget.spoiler_mode == "ideal"
+    assert widget.subvoxel_spin_counts == (1, 1, 1)
+    assert not widget.ideal_crusher_banner.isVisible()
+
+    widget.set_spoiler_configuration("gradient", (1, 1, 9))
+    widget.ideal_crusher_dismiss_button.click()
+    assert widget.spoiler_mode == "gradient"
+    assert not widget.ideal_crusher_banner.isVisible()
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()

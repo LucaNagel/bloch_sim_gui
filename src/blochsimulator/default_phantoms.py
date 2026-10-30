@@ -1,7 +1,9 @@
 """Nucleus-specific default phantom used when no phantom has been loaded.
 
-The Sequence workspace falls back to a single on-resonance sphere so a
-generated sequence can be run immediately.  The sphere sits in a cubic grid
+The Sequence workspace falls back to a single sphere so a generated sequence
+can be run immediately.  Its resonance sits at the compound's chemical shift
+(e.g. [1-13C]pyruvate at 171.076 ppm) or, without a preset, at the sequence
+reference.  The sphere sits in a cubic grid
 that fits inside the sequence FOV and whose cells are no wider than the
 sequence pixels, so neither the aliasing nor the resolution warning fires
 for the default object.
@@ -25,6 +27,8 @@ MIN_DEFAULT_PHANTOM_MATRIX = 32
 MAX_DEFAULT_PHANTOM_MATRIX = 128
 MAX_DEFAULT_SLICE_AXIS_MATRIX = 256
 CELLS_PER_SLICE_THICKNESS = 2
+SINGLE_VOXEL_SPHERE_MARGIN = 1.5
+CELLS_PER_VOXEL = 8
 DEFAULT_PHANTOM_FOV_M = 0.22
 DEFAULT_SPECTRAL_BANDWIDTH_PPM = 5.0
 DEFAULT_SPECTRAL_POINTS = 257
@@ -37,12 +41,19 @@ class DefaultCompound:
     name: str
     t1_s: float
     t2_star_s: float
+    # Absolute shift; None places the resonance at the sequence reference.
+    chemical_shift_ppm: Optional[float] = None
 
 
 def _preset_compound(nucleus, key):
     for preset in METABOLITE_PRESETS_BY_NUCLEUS.get(nucleus, ()):
         if preset.key == key:
-            return DefaultCompound(preset.name, preset.t1_s, preset.t2_star_s)
+            return DefaultCompound(
+                preset.name,
+                preset.t1_s,
+                preset.t2_star_s,
+                float(preset.chemical_shift_ppm),
+            )
     raise KeyError(f"missing {nucleus} metabolite preset {key!r}")
 
 
@@ -102,6 +113,32 @@ def default_phantom_grid(
     return side_m, tuple(shape)
 
 
+def default_single_voxel_grid(voxel_size_m, voxel_center_m=(0.0, 0.0, 0.0)):
+    """Return a grid whose centred sphere encloses a single spectroscopy voxel.
+
+    ``voxel_size_m`` and ``voxel_center_m`` are the voxel's edge lengths and
+    centre along its own axes.  The sphere radius is
+    ``SINGLE_VOXEL_SPHERE_MARGIN`` times the distance from the grid centre to
+    the farthest voxel corner, so the whole voxel lies inside the object, and
+    each voxel edge spans at least ``CELLS_PER_VOXEL`` cells.
+    """
+    size = np.abs(np.asarray(tuple(voxel_size_m), dtype=float))
+    center = np.abs(np.asarray(tuple(voxel_center_m), dtype=float))
+    if (
+        size.size == 0
+        or center.size != size.size
+        or not np.all(np.isfinite(size))
+        or not np.all(np.isfinite(center))
+        or np.any(size <= 0)
+    ):
+        return DEFAULT_PHANTOM_FOV_M, (DEFAULT_PHANTOM_MATRIX,) * 3
+    corner_m = float(np.linalg.norm(center + 0.5 * size))
+    radius_m = SINGLE_VOXEL_SPHERE_MARGIN * corner_m
+    side_m = 2.0 * radius_m / DEFAULT_SPHERE_DIAMETER_FRACTION
+    cells = _cells(side_m, float(np.min(size)) / CELLS_PER_VOXEL)
+    return side_m, (cells,) * 3
+
+
 def _isotropic_grid(sequence_fov_m, sequence_matrix, encoding_matrix):
     if sequence_fov_m is None or sequence_matrix is None:
         return DEFAULT_PHANTOM_FOV_M, DEFAULT_PHANTOM_MATRIX
@@ -132,17 +169,23 @@ def default_phantom_design(
     side_m: float = DEFAULT_PHANTOM_FOV_M,
     matrix=DEFAULT_PHANTOM_MATRIX,
 ) -> PhantomDesign:
-    """Design one centred sphere whose resonance is at the sequence reference."""
+    """Design one centred sphere holding the nucleus' default compound."""
     compound = default_compound(nucleus)
     diameter = DEFAULT_SPHERE_DIAMETER_FRACTION
+    reference_ppm = float(sequence_reference_ppm)
+    shift_ppm = (
+        reference_ppm
+        if compound.chemical_shift_ppm is None
+        else compound.chemical_shift_ppm
+    )
     return PhantomDesign(
         name=f"Default sphere ({nucleus} {compound.name.lower()})",
         shape=tuple(int(value) for value in np.broadcast_to(matrix, 3)),
         fov_m=(float(side_m),) * 3,
         field_strength_t=float(field_strength_t),
         nucleus=nucleus,
-        spectral_reference_ppm=float(sequence_reference_ppm),
-        spectral_window_center_ppm=float(sequence_reference_ppm),
+        spectral_reference_ppm=reference_ppm,
+        spectral_window_center_ppm=shift_ppm,
         spectral_bandwidth_ppm=DEFAULT_SPECTRAL_BANDWIDTH_PPM,
         spectral_points=DEFAULT_SPECTRAL_POINTS,
         supersampling_enabled=True,
@@ -158,7 +201,7 @@ def default_phantom_design(
                     SpectralPeakDefinition(
                         name=compound.name,
                         amplitude=1.0,
-                        frequency_ppm=0.0,
+                        frequency_ppm=shift_ppm - reference_ppm,
                         t2_star_s=compound.t2_star_s,
                         t1_s=compound.t1_s,
                     )

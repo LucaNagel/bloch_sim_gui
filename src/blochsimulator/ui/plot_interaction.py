@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
@@ -43,3 +44,116 @@ def install_axis_constrained_zoom():
 
     wheel_event._blochsimulator_axis_zoom = True
     pg.ViewBox.wheelEvent = wheel_event
+
+
+# Fraction of the data extent that zooming out may add on each side. The X
+# margin is small so that a time axis stays within 0 to the measurement time.
+_DATA_LIMIT_X_MARGIN = 0.05
+_DATA_LIMIT_Y_MARGIN = 0.5
+
+
+def _data_limits(view_box):
+    """Return (xLimits, yLimits) from the plotted data, ``None`` where unknown."""
+    if not getattr(view_box, "auto_data_limits", True):
+        return (None, None), (None, None)
+    # With a locked aspect ratio the widget shape sets one axis from the
+    # other: an X limit then crops Y (and vice versa), so images keep
+    # pyqtgraph's unrestricted zoom.
+    if view_box.state.get("aspectLocked"):
+        return (None, None), (None, None)
+    items = [item for item in view_box.addedItems if item.isVisible()]
+    if not items:
+        return (None, None), (None, None)
+    try:
+        bounds = view_box.childrenBounds()
+    except Exception:
+        return (None, None), (None, None)
+    images_only = all(isinstance(item, pg.ImageItem) for item in items)
+    limits = []
+    for axis_bounds, margin, enabled in (
+        (bounds[0], _DATA_LIMIT_X_MARGIN, True),
+        (bounds[1], _DATA_LIMIT_Y_MARGIN, images_only),
+    ):
+        low, high = (None, None) if axis_bounds is None else axis_bounds
+        if (
+            not enabled
+            or low is None
+            or high is None
+            or not np.isfinite(low)
+            or not np.isfinite(high)
+            or high <= low
+        ):
+            limits.append((None, None))
+            continue
+        pad = (high - low) * margin
+        limits.append((low - pad, high + pad))
+    return limits[0], limits[1]
+
+
+def install_data_range_zoom_limit():
+    """Keep zoom and pan of every ViewBox within the range of its data.
+
+    Zooming out of a plot shows nothing new beyond the data (for a time axis
+    the measurement), so the view range stops a small margin outside it.
+    Explicit ``setLimits`` still apply; the tighter limit wins. An
+    aspect-locked ViewBox, or one with ``auto_data_limits = False``, keeps
+    pyqtgraph's unrestricted zoom.
+    """
+    current = pg.ViewBox._effectiveLimits
+    if getattr(current, "_blochsimulator_data_limits", False):
+        return
+
+    def effective_limits(view_box):
+        explicit = current(view_box)
+        automatic = _data_limits(view_box)
+        merged = []
+        for (low, high), (auto_low, auto_high) in zip(explicit, automatic):
+            if auto_low is not None:
+                low = auto_low if low is None else max(low, auto_low)
+            if auto_high is not None:
+                high = auto_high if high is None else min(high, auto_high)
+            merged.append((low, high))
+        return tuple(merged)
+
+    effective_limits._blochsimulator_data_limits = True
+    pg.ViewBox._effectiveLimits = effective_limits
+
+
+class AxisZoomPlotWidget(pg.PlotWidget):
+    """A plot that zooms only through its axes, never by scrolling over the data.
+
+    Scrolling or swiping over the plot area is passed on to the enclosing
+    scroll area, so moving down a page of plots cannot zoom one by accident.
+    The wheel over an axis zooms that axis; Shift or Alt over the plot area
+    still zooms X or Y.
+    """
+
+    AXIS_ONLY_ZOOM_TOOLTIP = (
+        "Scroll over the horizontal or vertical axis to zoom that axis. "
+        "Scrolling over the plot itself scrolls the page."
+    )
+
+    def wheelEvent(self, event):
+        over_axis = any(
+            isinstance(item, pg.AxisItem) for item in self.items(event.pos())
+        )
+        if over_axis or zoom_axis_for_modifiers(event.modifiers()) is not None:
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class StaticPlotWidget(pg.PlotWidget):
+    """A plot that always shows what the program set: no zoom, pan or menu.
+
+    Scrolling or swiping over it is passed on to the enclosing scroll area.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setMouseEnabled(x=False, y=False)
+        self.setMenuEnabled(False)
+        self.hideButtons()
+
+    def wheelEvent(self, event):
+        event.ignore()

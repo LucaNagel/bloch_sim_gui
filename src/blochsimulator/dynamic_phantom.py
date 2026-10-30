@@ -139,9 +139,17 @@ class KineticRegionDefinition:
         if not np.isfinite(self.kpl_s_inv) or self.kpl_s_inv < 0:
             raise ValueError("kPL must be finite and non-negative")
 
-    def rasterize(self, shape: Tuple[int, int, int]) -> np.ndarray:
+    def rasterize(self, shape: Tuple[int, int, int], coordinates=None) -> np.ndarray:
+        """Rasterize on ``shape``; ``coordinates`` gives other voxel centres.
+
+        ``coordinates`` holds one array of normalized voxel centres per axis,
+        e.g. those of a simulated sub-region of a larger design.
+        """
         self.validate()
-        coordinates = [(np.arange(count, dtype=float) + 0.5) / count for count in shape]
+        if coordinates is None:
+            coordinates = [
+                (np.arange(count, dtype=float) + 0.5) / count for count in shape
+            ]
         x, y, z = np.meshgrid(*coordinates, indexing="ij")
         center = np.asarray(self.center, dtype=float)
         half = np.asarray(self.size, dtype=float) / 2.0
@@ -1326,9 +1334,23 @@ class DynamicSpectralPhantom:
         if not isinstance(design_data, dict) or not design_data.get("dynamic_enabled"):
             return self
         designed_names = []
+        ppm_range = design_data.get("simulation_ppm_range")
+        reference_ppm = float(design_data.get("spectral_reference_ppm", 0.0) or 0.0)
         for shape in design_data.get("shapes", ()):
             for peak in shape.get("peaks", ()):
                 name = str(peak.get("name", "")).strip()
+                if ppm_range is not None:
+                    # Peaks outside the simulated ppm range are left out on
+                    # purpose; only the kinetic pools are always built.
+                    position = reference_ppm + float(peak.get("frequency_ppm", 0.0))
+                    kinetic_names = (
+                        design_data.get("pyruvate_peak_name"),
+                        design_data.get("lactate_peak_name"),
+                    )
+                    if name not in kinetic_names and not (
+                        float(ppm_range[0]) <= position <= float(ppm_range[1])
+                    ):
+                        continue
                 if name and name not in designed_names:
                     designed_names.append(name)
         existing_names = {pool.name for pool in self.pools}

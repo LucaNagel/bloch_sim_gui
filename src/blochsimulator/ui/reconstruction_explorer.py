@@ -12,6 +12,7 @@ from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -26,6 +27,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -58,7 +60,7 @@ from .sequence_geometry_viewer import (
     object_sections,
     projected_outline_mm,
 )
-from .volume_viewer import VolumeViewerWidget
+from .volume_viewer import VolumeViewerWidget, _SliceScrollViewBox
 from .widgets import IMAGE_CANVAS_BACKGROUND, style_image_item
 
 
@@ -71,6 +73,8 @@ _OVERVIEW_MIN_HEIGHT = 150
 # Share of the result height the voxel plot gets when it appears.
 _VOXEL_PLOT_SHARE = 0.4
 _VOXEL_PLOT_MIN_HEIGHT = 160
+# Echo trains this long are EPSI readouts whose spectrum is shown first.
+_EPSI_MIN_ECHOES = 8
 # Interval between repetitions while the frame bar plays them.
 _PLAY_INTERVAL_MS = 500
 # Metabolite colours by name prefix, so one metabolite keeps its colour in
@@ -280,12 +284,18 @@ class _DoubleRangeSlider(QWidget):
 
 class _SelectableImagePanel(QWidget):
     pixel_selected = pyqtSignal(int, int)
+    # +1 / -1: an unmodified wheel or two-finger scroll steps the displayed
+    # slice instead of zooming (Shift, Alt and pinch still zoom).
+    slice_scrolled = pyqtSignal(int)
 
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self._shape = (0, 0)
         layout = QVBoxLayout(self)
-        self.plot = pg.PlotWidget(title=title)
+        self.plot = pg.PlotWidget(
+            title=title,
+            viewBox=_SliceScrollViewBox(self.slice_scrolled.emit, enable_menu=True),
+        )
         self.plot.setBackground(IMAGE_CANVAS_BACKGROUND)
         self.plot.setAspectLocked(True)
         self.plot.setLabel("bottom", "x index")
@@ -524,6 +534,8 @@ class SequenceReconstructionExplorer(QWidget):
         self._volume_initialized = False
         self._contrast_domain_cache = {}
         self._time_course_cache = {}
+        # Time course plots on screen: plot -> (dimension, x values, positions).
+        self._time_course_clicks = {}
         self._repetition_labels = {}
         self._metabolite_colors = {}
         # Manual contrast window of each metabolite and the one last shown.
@@ -599,6 +611,13 @@ class SequenceReconstructionExplorer(QWidget):
         self.kspace_panel = _SelectableImagePanel("Gridded k-space")
         self.image_panel = _SelectableImagePanel("Reconstruction")
         self.image_panel.pixel_selected.connect(self._voxel_selected)
+        for panel in (self.kspace_panel, self.image_panel):
+            panel.setToolTip(
+                "Scroll or swipe vertically to step through the slice slider "
+                "below; hold Shift or Alt (or pinch) to zoom."
+            )
+        self.kspace_panel.slice_scrolled.connect(self._scroll_outer_dimension)
+        self.image_panel.slice_scrolled.connect(self._scroll_outer_dimension)
         self.phantom_panel = _SelectableImagePanel("Phantom on the image grid")
         self.phantom_panel.setToolTip(
             "The simulated phantom resampled onto the reconstruction grid: the "
@@ -606,12 +625,25 @@ class SequenceReconstructionExplorer(QWidget):
             "select a voxel."
         )
         self.phantom_panel.pixel_selected.connect(self._voxel_selected)
+        self.phantom_panel.slice_scrolled.connect(self._scroll_outer_dimension)
         self.phantom_panel.hide()
         # Region outlines of the phantom drawn on top of the reconstruction.
         self.image_contours = _ContourOverlay(self.image_panel.plot)
+        # A localized single voxel (PRESS) has no image: its position in the
+        # phantom takes the place of the 1 × 1 k-space and reconstruction.
+        self.voxel_location_view = _PhantomOverview()
+        self.voxel_location_view.setObjectName("reconstruction_voxel_location")
+        self.voxel_location_view.canvas.setToolTip(
+            "Phantom sections through the measured voxel. Magenta outlines the "
+            "voxel the spectrum below comes from."
+        )
+        self.voxel_location_view.hide()
+        self._single_voxel = False
+        self.images_splitter = images
         images.addWidget(self.kspace_panel)
         images.addWidget(self.image_panel)
         images.addWidget(self.phantom_panel)
+        images.addWidget(self.voxel_location_view)
         # The reconstruction is the image of interest; k-space stays as a
         # smaller companion view.
         images.setStretchFactor(0, 2)
@@ -619,17 +651,67 @@ class SequenceReconstructionExplorer(QWidget):
         images.setStretchFactor(2, 3)
         result_splitter.addWidget(images)
         self.spectrum_plot = pg.PlotWidget(title="Selected voxel")
+        self.spectrum_plot.scene().sigMouseClicked.connect(
+            lambda event: self._time_course_clicked(self.spectrum_plot, event)
+        )
         self.spectrum_plot.setLabel("left", "Signal", "a.u.")
         self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
         self.spectrum_plot.addLegend()
         self.spectrum_plot.setMinimumHeight(_VOXEL_PLOT_MIN_HEIGHT)
-        result_splitter.addWidget(self.spectrum_plot)
+        # The voxel plot carries its own mode switch, so FID/echoes and
+        # spectrum toggle without opening the settings column.
+        self.voxel_plot_panel = QWidget()
+        voxel_plot_layout = QVBoxLayout(self.voxel_plot_panel)
+        voxel_plot_layout.setContentsMargins(0, 0, 0, 0)
+        voxel_plot_layout.setSpacing(2)
+        self.voxel_plot_mode_bar = QWidget()
+        self.voxel_plot_mode_layout = QHBoxLayout(self.voxel_plot_mode_bar)
+        self.voxel_plot_mode_layout.setContentsMargins(4, 0, 4, 0)
+        self.voxel_plot_mode_layout.setSpacing(2)
+        self.voxel_plot_mode_layout.addStretch(1)
+        self.voxel_plot_mode_buttons = QButtonGroup(self)
+        self.voxel_plot_mode_buttons.setExclusive(True)
+        self.voxel_plot_mode_buttons.buttonClicked.connect(
+            self._voxel_plot_mode_clicked
+        )
+        voxel_plot_layout.addWidget(self.voxel_plot_mode_bar)
+        voxel_plot_layout.addWidget(self.spectrum_plot, 1)
+        result_splitter.addWidget(self.voxel_plot_panel)
         result_splitter.setStretchFactor(0, 3)
         result_splitter.setStretchFactor(1, 2)
         self._voxel_plot_share = _VOXEL_PLOT_SHARE
         result_splitter.splitterMoved.connect(self._voxel_plot_resized)
         two_d_layout.addWidget(result_splitter, 1)
         self.pages.addWidget(self.two_d_page)
+
+        # Acquisitions without spatial encoding, such as a single pulse: the
+        # signal of the one voxel is shown as FID and spectrum.
+        self.signal_page = QWidget()
+        signal_layout = QVBoxLayout(self.signal_page)
+        signal_layout.setContentsMargins(0, 0, 0, 0)
+        signal_event_row = QHBoxLayout()
+        self.signal_event_label = QLabel("Excitation")
+        self.signal_event_spin = QSpinBox()
+        self.signal_event_spin.setToolTip(
+            "Excitation whose spectrum is shown; the FID plot covers all of them"
+        )
+        self.signal_event_spin.valueChanged.connect(self._refresh)
+        signal_event_row.addWidget(self.signal_event_label)
+        signal_event_row.addWidget(self.signal_event_spin)
+        signal_event_row.addStretch(1)
+        signal_layout.addLayout(signal_event_row)
+        self.signal_fid_plot = pg.PlotWidget(title="FID")
+        self.signal_spectrum_plot = pg.PlotWidget(title="Spectrum")
+        for plot, axis, unit in (
+            (self.signal_fid_plot, "Time", "ms"),
+            (self.signal_spectrum_plot, "Frequency", "Hz"),
+        ):
+            plot.setLabel("left", "Signal", "a.u.")
+            plot.setLabel("bottom", axis, unit)
+            plot.addLegend()
+            plot.setMinimumHeight(_VOXEL_PLOT_MIN_HEIGHT)
+            signal_layout.addWidget(plot, 1)
+        self.pages.addWidget(self.signal_page)
 
         self.three_d_page = QWidget()
         three_d_layout = QVBoxLayout(self.three_d_page)
@@ -668,6 +750,9 @@ class SequenceReconstructionExplorer(QWidget):
         self.volume_splitter.setChildrenCollapsible(False)
         self.volume_splitter.addWidget(self.volume_pages)
         self.volume_plot = pg.PlotWidget(title="Selected voxel")
+        self.volume_plot.scene().sigMouseClicked.connect(
+            lambda event: self._time_course_clicked(self.volume_plot, event)
+        )
         self.volume_plot.setObjectName("reconstruction_volume_voxel_plot")
         self.volume_plot.addLegend()
         self.volume_plot.setMinimumHeight(_VOXEL_PLOT_MIN_HEIGHT)
@@ -934,11 +1019,14 @@ class SequenceReconstructionExplorer(QWidget):
         self._volume_initialized = False
         self._contrast_domain_cache.clear()
         self._time_course_cache.clear()
+        self._time_course_clicks.clear()
         self.play_button.setChecked(False)
         self.frame_bar.hide()
         self.kspace_panel.clear()
         self.image_panel.clear()
         self.spectrum_plot.clear()
+        self.signal_fid_plot.clear()
+        self.signal_spectrum_plot.clear()
         self.volume_plot.clear()
         self.volume_plot.hide()
         self._set_phantom(None)
@@ -1358,6 +1446,21 @@ class SequenceReconstructionExplorer(QWidget):
         else:
             self._play_timer.stop()
 
+    def _scroll_outer_dimension(self, step):
+        """Step the slice slider (else the first browse slider) by ``step``."""
+        controls = [
+            (name, slider)
+            for name, slider in self.outer_controls.items()
+            if isinstance(slider, QSlider) and slider.isEnabled()
+        ]
+        if not controls:
+            return
+        preferred = [item for item in controls if item[0] in ("slice", "partition")]
+        slider = (preferred or controls)[0][1]
+        slider.setValue(
+            int(np.clip(slider.value() + int(np.sign(step)), 0, slider.maximum()))
+        )
+
     def _play_step(self):
         slider = self.outer_controls.get("repetition")
         if slider is None or not slider.isEnabled() or self.model is None:
@@ -1373,6 +1476,14 @@ class SequenceReconstructionExplorer(QWidget):
             if is_csi:
                 self.voxel_plot_combo.addItem("Spectrum", "spectrum")
                 self.voxel_plot_combo.addItem("FID", "fid")
+            echoes = self._echo_dimension()
+            if echoes is not None:
+                modes = [("Echoes", "echoes"), ("Spectrum", "echo_spectrum")]
+                # A few MGE echoes resolve no spectrum; an EPSI train does.
+                if len(echoes.values) >= _EPSI_MIN_ECHOES:
+                    modes.reverse()
+                for label, mode in modes:
+                    self.voxel_plot_combo.addItem(label, mode)
             if self._time_course_dimension() is not None:
                 self.voxel_plot_combo.addItem("Time course", "time_course")
             index = self.voxel_plot_combo.findData(previous)
@@ -1382,10 +1493,56 @@ class SequenceReconstructionExplorer(QWidget):
         available = self.voxel_plot_combo.count() > 0
         self.voxel_plot_label.setVisible(available)
         self.voxel_plot_combo.setVisible(available)
-        reappearing = available and self.spectrum_plot.isHidden()
-        self.spectrum_plot.setVisible(available)
+        self._populate_voxel_plot_mode_buttons()
+        reappearing = available and self.voxel_plot_panel.isHidden()
+        self.voxel_plot_panel.setVisible(available)
         if reappearing:
             self._restore_voxel_plot_height()
+
+    def _populate_voxel_plot_mode_buttons(self):
+        """Mirror the voxel plot modes as toggle buttons above the plot."""
+        for button in self.voxel_plot_mode_buttons.buttons():
+            self.voxel_plot_mode_buttons.removeButton(button)
+            self.voxel_plot_mode_layout.removeWidget(button)
+            button.deleteLater()
+        count = self.voxel_plot_combo.count()
+        for index in range(count):
+            button = QToolButton()
+            button.setText(self.voxel_plot_combo.itemText(index))
+            button.setCheckable(True)
+            button.setAutoRaise(True)
+            button.setChecked(index == self.voxel_plot_combo.currentIndex())
+            self.voxel_plot_mode_buttons.addButton(button, index)
+            self.voxel_plot_mode_layout.insertWidget(index, button)
+        self.voxel_plot_mode_bar.setVisible(count > 1)
+
+    def _voxel_plot_mode_clicked(self, button):
+        self.voxel_plot_combo.setCurrentIndex(self.voxel_plot_mode_buttons.id(button))
+
+    def _sync_voxel_plot_mode_buttons(self):
+        button = self.voxel_plot_mode_buttons.button(
+            self.voxel_plot_combo.currentIndex()
+        )
+        if button is not None and not button.isChecked():
+            button.setChecked(True)
+
+    def _echo_dimension(self):
+        """Return the echo train of a multi-echo (MGE/EPSI) 2D result."""
+        if self.model is None or self.model.kind == "csi":
+            return None
+        if self.model.kind in {"cartesian_3d", "radial_3d"}:
+            return None
+        return next(
+            (item for item in self.model.outer_dimensions if item.name == "echo"),
+            None,
+        )
+
+    def _echo_times_s(self, dimension):
+        """Return the echo times, from the sequence or the first ADC samples."""
+        times = self.model._numeric_attr(self.model.dataset.attrs.get("echo_times_s"))
+        if len(times) == len(dimension.values):
+            return np.asarray(times, dtype=float)
+        return self.model.outer_dimension_times_s(dimension.name)
 
     def _restore_voxel_plot_height(self):
         # A splitter gives a re-shown widget only its minimum height.
@@ -1409,6 +1566,7 @@ class SequenceReconstructionExplorer(QWidget):
         )
 
     def _voxel_plot_changed(self, *_):
+        self._sync_voxel_plot_mode_buttons()
         if self._updating or self.model is None:
             return
         mode, pool_index = self._selected_data_mode()
@@ -1545,6 +1703,9 @@ class SequenceReconstructionExplorer(QWidget):
             return
         try:
             model = self.model
+            if model.kind == "raw_signal":
+                self._refresh_acquisition_signal()
+                return
             image_data, mode, pool_index, effective_coil_mode = self._selected_image()
             component = str(self.component_combo.currentData() or "magnitude")
             display = model.display_values(image_data, component)
@@ -1651,10 +1812,12 @@ class SequenceReconstructionExplorer(QWidget):
             )
             metabolite = self._current_metabolite()
             metabolite_note = "" if metabolite is None else f" · {metabolite}"
-            self.summary.setText(
-                f"{model.kind.replace('_', ' ').title()} reconstruction"
-                f"{source}{metabolite_note}{ideal_note}"
+            kind = (
+                "Single-voxel spectroscopy"
+                if self._single_voxel and self.pages.currentWidget() is self.two_d_page
+                else f"{model.kind.replace('_', ' ').title()} reconstruction"
             )
+            self.summary.setText(f"{kind}{source}{metabolite_note}{ideal_note}")
             self._update_metabolite_annotation()
             self.export_button.setEnabled(self._current_display is not None)
             echo_control = self.outer_controls.get("echo")
@@ -1669,6 +1832,68 @@ class SequenceReconstructionExplorer(QWidget):
             self.summary.setText(f"Reconstruction unavailable: {exc}")
             self._current_display = None
             self.export_button.setEnabled(False)
+
+    def _refresh_acquisition_signal(self):
+        """Show the FID and spectrum of an acquisition without image encoding."""
+        model = self.model
+        mode, index = self._selected_data_mode()
+        pool = mode == "pool"
+        signal = np.asarray(
+            model.acquisition_signal(
+                pool_index=index if pool else None,
+                coil_mode=str(self.coil_combo.currentData() or "rss"),
+            )
+        ).reshape(-1)
+        times = np.asarray(model.dataset.coords["adc_time_s"].values, dtype=float)
+        events = model.acquisition_events()
+        event_values = list(dict.fromkeys(events.tolist()))
+        self.signal_event_label.setVisible(len(event_values) > 1)
+        self.signal_event_spin.setVisible(len(event_values) > 1)
+        blocked = self.signal_event_spin.blockSignals(True)
+        self.signal_event_spin.setRange(1, max(1, len(event_values)))
+        self.signal_event_spin.blockSignals(blocked)
+        selected = event_values[self.signal_event_spin.value() - 1]
+        rows = np.flatnonzero(events == selected)
+
+        self.signal_fid_plot.clear()
+        self.signal_spectrum_plot.clear()
+        self.signal_fid_plot.setLimits(xMin=None, xMax=None)
+        measurement_ms = 1e3 * float(model.dataset.attrs.get("duration_s") or 0.0)
+        time_ms = times * 1e3
+        for plot, x, values in (
+            (self.signal_fid_plot, time_ms, signal),
+            *self._signal_spectrum(times[rows], signal[rows]),
+        ):
+            plot.plot(x, np.abs(values), pen="w", name="Magnitude")
+            plot.plot(x, values.real, pen="g", name="Real")
+            plot.plot(x, values.imag, pen="r", name="Imaginary")
+        if time_ms.size:
+            # Zooming out of the FID stops at the measurement.
+            self.signal_fid_plot.setLimits(
+                xMin=0.0, xMax=max(measurement_ms, float(time_ms.max()))
+            )
+        self.signal_fid_plot.setTitle("FID")
+        label = "" if not pool else f" · {model.pool_names[index]}"
+        self.signal_spectrum_plot.setTitle(f"Spectrum{label}")
+        self.pages.setCurrentWidget(self.signal_page)
+        source = f" · {Path(self.source).name}" if self.source else ""
+        self.summary.setText(
+            f"Single-voxel acquisition{source}{label}: no spatial encoding, so the "
+            "FID and its spectrum are shown instead of an image"
+        )
+        self._current_display = None
+        self.export_button.setEnabled(False)
+
+    def _signal_spectrum(self, times, values):
+        """Return ``[(plot, frequency_hz, spectrum)]`` of one excitation's FID."""
+        if values.size < 2:
+            return []
+        dwell = float(np.median(np.diff(times)))
+        if not dwell > 0:
+            return []
+        frequency = np.fft.fftshift(np.fft.fftfreq(values.size, dwell))
+        spectrum = np.fft.fftshift(np.fft.fft(values))
+        return [(self.signal_spectrum_plot, frequency, spectrum)]
 
     def _refresh_two_dimensional(
         self,
@@ -1731,9 +1956,13 @@ class SequenceReconstructionExplorer(QWidget):
             int(np.clip(self._voxel[1], 0, image_values.shape[0] - 1)),
         )
         self.image_panel.set_selected_pixel(*self._voxel)
+        self._single_voxel = image_values.shape == (1, 1)
+        for panel in (self.kspace_panel, self.image_panel):
+            panel.setVisible(not self._single_voxel)
         self.pages.setCurrentWidget(self.two_d_page)
         self._current_display = image_values
         self._refresh_phantom_planar()
+        self._update_single_voxel_views()
         self._refresh_voxel_plot(mode, pool_index, effective_coil_mode)
 
     def _contrast_mode_changed(self, automatic):
@@ -1866,10 +2095,15 @@ class SequenceReconstructionExplorer(QWidget):
     def _refresh_voxel_plot(self, mode, pool_index, coil_mode):
         plot_mode = self.voxel_plot_combo.currentData()
         self.spectrum_plot.clear()
+        self.spectrum_plot.setLimits(xMin=None)
+        self._time_course_clicks.pop(self.spectrum_plot, None)
+        self.spectrum_plot.setToolTip("")
         if plot_mode is None or self.pages.currentWidget() is not self.two_d_page:
             return
         if plot_mode == "time_course":
             self._plot_time_course(mode, pool_index)
+        elif plot_mode in {"echoes", "echo_spectrum"}:
+            self._plot_echo_voxel(plot_mode, mode, pool_index)
         else:
             self._plot_csi_voxel(plot_mode, mode, pool_index, coil_mode)
 
@@ -1895,6 +2129,7 @@ class SequenceReconstructionExplorer(QWidget):
         if plot_mode == "fid":
             axis = axis * 1e3
             self.spectrum_plot.setLabel("bottom", "Time", "ms")
+            self.spectrum_plot.setLimits(xMin=0.0)
         else:
             self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
         self.spectrum_plot.setLabel("left", "Signal", "a.u.")
@@ -1903,6 +2138,104 @@ class SequenceReconstructionExplorer(QWidget):
         self.spectrum_plot.plot(axis, values.imag, pen="r", name="Imaginary")
         title = "FID" if plot_mode == "fid" else "Spectrum"
         self.spectrum_plot.setTitle(f"{title} · voxel x={x}, y={y}")
+
+    def _echo_series(self, dimension, mode, pool_index, coil_mode):
+        """Return the complex value of the selected voxel at every echo."""
+        model = self.model
+        pool = mode == "pool"
+        x, y = self._voxel
+        values = []
+        for value in dimension.values:
+            selections = self._selections()
+            selections[dimension.name] = value
+            data = model.select(
+                model.image_name(pool=pool),
+                selections,
+                pool_index=pool_index if pool else None,
+                coil_mode=coil_mode,
+                **self._average_kwargs(),
+            )
+            plane = np.asarray(data.transpose(*self._image_dims))
+            values.append(plane[y, x])
+        return np.asarray(values, dtype=complex)
+
+    def _plot_echo_voxel(self, plot_mode, mode, pool_index):
+        """Plot the echo train of the selected voxel or its spectrum."""
+        plot = self.spectrum_plot
+        dimension = self._echo_dimension()
+        x, y = self._voxel
+        if dimension is None or mode == "ideal":
+            plot.setTitle("Echo signal is not defined for IDEAL species estimates")
+            return
+        # A root-sum-of-squares drops the phase the echo spectrum needs.
+        coil_mode = str(self.coil_combo.currentData() or "rss")
+        if coil_mode == "rss":
+            coil_mode = "sum"
+        values = self._echo_series(dimension, mode, pool_index, coil_mode)
+        times = self._echo_times_s(dimension)
+        plot.setLabel("left", "Signal", "a.u.")
+        if plot_mode == "echoes":
+            if times is None:
+                axis = np.arange(values.size, dtype=float)
+                plot.setLabel("bottom", "Echo")
+            else:
+                axis = np.asarray(times, dtype=float) * 1e3
+                plot.setLabel("bottom", "Echo time", "ms")
+            for component, pen in (
+                (np.abs(values), "w"),
+                (values.real, "g"),
+                (values.imag, "r"),
+            ):
+                name = {"w": "Magnitude", "g": "Real", "r": "Imaginary"}[pen]
+                plot.plot(
+                    axis,
+                    component,
+                    pen=pen,
+                    symbol="o",
+                    symbolSize=4,
+                    symbolPen=pen,
+                    symbolBrush=pen,
+                    name=name,
+                )
+            echoes = list(dimension.values)
+            current = self._selections().get(dimension.name)
+            if current in echoes:
+                plot.addItem(
+                    pg.InfiniteLine(
+                        axis[echoes.index(current)],
+                        angle=90,
+                        pen=pg.mkPen(255, 0, 255, width=1),
+                    )
+                )
+            plot.setTitle(f"Echoes · voxel x={x}, y={y}")
+            self._time_course_clicks[plot] = (
+                dimension.name,
+                axis,
+                list(range(len(echoes))),
+            )
+            plot.setToolTip("Click into the echo train to show that echo.")
+            return
+        spacing = (
+            float(np.median(np.diff(times)))
+            if times is not None and len(times) > 1
+            else 0.0
+        )
+        spectrum = np.fft.fftshift(np.fft.fft(values))
+        if spacing > 0.0:
+            frequency = np.fft.fftshift(np.fft.fftfreq(values.size, spacing))
+            plot.setLabel("bottom", "Frequency", "Hz")
+        else:
+            frequency = np.arange(values.size, dtype=float) - values.size // 2
+            plot.setLabel("bottom", "Spectral point")
+        plot.plot(frequency, np.abs(spectrum), pen="w", name="Magnitude")
+        plot.plot(frequency, spectrum.real, pen="g", name="Real")
+        plot.plot(frequency, spectrum.imag, pen="r", name="Imaginary")
+        resolution = (
+            f" · {1.0 / (values.size * spacing):.3g} Hz resolution"
+            if spacing > 0.0
+            else ""
+        )
+        plot.setTitle(f"Echo spectrum · voxel x={x}, y={y}{resolution}")
 
     def _time_course_planes(self, dimension):
         """Return the displayed image of every repetition, cached per view.
@@ -1989,8 +2322,10 @@ class SequenceReconstructionExplorer(QWidget):
         component = self.component_combo.currentText()
         plot.setLabel("left", component, "a.u.")
         repetitions = list(dimension.values)
+        shown = list(range(len(repetitions)))
         if self._repetition_labels:
             selected = self._metabolite_filter_value()
+            shown = []
             for label, color in self._metabolite_colors.items():
                 if selected is not None and label != selected:
                     continue
@@ -1999,6 +2334,7 @@ class SequenceReconstructionExplorer(QWidget):
                     for position, value in enumerate(repetitions)
                     if self._repetition_labels.get(value) == label
                 ]
+                shown.extend(rows)
                 plot.plot(
                     axis[rows],
                     values[rows],
@@ -2029,11 +2365,38 @@ class SequenceReconstructionExplorer(QWidget):
                 )
             )
         plot.setTitle(f"Time course · voxel {location}")
+        # Repetitions and times start at zero.
+        plot.setLimits(xMin=0.0)
+        # A click picks the nearest plotted repetition.
+        self._time_course_clicks[plot] = (dimension.name, axis, sorted(shown))
+        plot.setToolTip("Click into the time course to show that repetition.")
+
+    def _time_course_clicked(self, plot, event):
+        """Select the repetition nearest to a click into a time course."""
+        target = self._time_course_clicks.get(plot)
+        if target is None or event.button() != Qt.LeftButton:
+            return
+        name, axis, shown = target
+        control = self.outer_controls.get(name)
+        view_box = plot.getViewBox()
+        if (
+            not shown
+            or not isinstance(control, QSlider)
+            or not control.isEnabled()
+            or not view_box.sceneBoundingRect().contains(event.scenePos())
+        ):
+            return
+        x = view_box.mapSceneToView(event.scenePos()).x()
+        nearest = min(shown, key=lambda position: abs(axis[position] - x))
+        event.accept()
+        control.setValue(int(nearest))
 
     def _refresh_volume_plot(self):
         """Show the time course of the voxel selected in the 3D image."""
         plot = self.volume_plot
         plot.clear()
+        self._time_course_clicks.pop(plot, None)
+        plot.setToolTip("")
         available = (
             self.model is not None
             and self._time_course_dimension() is not None
@@ -2089,6 +2452,7 @@ class SequenceReconstructionExplorer(QWidget):
         for _viewer, _plane, item in self._volume_contour_items:
             item.clear()
         self.phantom_overview.clear()
+        self.voxel_location_view.clear()
         self.phantom_legend.setText("")
         self.phantom_composition.setText("")
         self._set_phantom_tab_visible(False)
@@ -2155,7 +2519,7 @@ class SequenceReconstructionExplorer(QWidget):
             return
         self.phantom_note.setText("")
         rows, cols = int(grid.shape[0]), int(grid.shape[1])
-        if self.phantom_show.isChecked():
+        if self.phantom_show.isChecked() and not self._single_voxel:
             self.phantom_panel.set_rgba(
                 resampled_rgba(resampled), (rows, cols), grid_description(grid)
             )
@@ -2265,6 +2629,16 @@ class SequenceReconstructionExplorer(QWidget):
                 ),
             )
 
+    def _update_single_voxel_views(self):
+        """Show the voxel in the phantom instead of a 1 × 1 image."""
+        located = self._single_voxel and self._phantom_grid is not None
+        self.voxel_location_view.setVisible(located)
+        if not located:
+            self.voxel_location_view.clear()
+        # Without a phantom a single voxel has nothing to show above its
+        # spectrum.
+        self.images_splitter.setVisible(not self._single_voxel or located)
+
     def _update_phantom_selection(self):
         grid = self._phantom_grid
         if grid is None or self._phantom is None:
@@ -2283,6 +2657,10 @@ class SequenceReconstructionExplorer(QWidget):
         contrast = self._phantom_contrast
         try:
             self.phantom_overview.set_view(self._phantom, contrast, grid.box(), box)
+            if self._single_voxel:
+                self.voxel_location_view.set_view(
+                    self._phantom, contrast, grid.box(), box
+                )
             composition = voxel_composition(
                 self._phantom, box, self._phantom_contrasts, contrast
             )

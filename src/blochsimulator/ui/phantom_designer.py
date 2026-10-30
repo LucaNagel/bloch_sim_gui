@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import html
 import os
 from pathlib import Path
 from typing import Optional
@@ -60,6 +61,12 @@ from ..sequence.snr_budget import format_amount
 from ..spectral_phantom import SpectralPhantom
 from ..units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm, thermal_polarization
 from .volume_viewer import PhantomInspectorWidget
+from .sequence_geometry_viewer import (
+    OrientedBox,
+    projected_outline_mm,
+    sequence_overhang_m,
+    sequence_overhang_note,
+)
 from .default_settings import WorkspaceDefaults
 from .styles import BOLD_GROUP_TITLES_STYLE
 from .widgets import ExplicitAcceptDialog
@@ -596,6 +603,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self._b0_shape_cache = None
         self._rois = []
         self._projection_items = []
+        self._sequence_geometry = None
         self._build_ui()
         self._load_design_into_ui()
         self.set_sequence_geometry(sequence_geometry)
@@ -697,6 +705,14 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             "Calibrated receiver noise and physical signal units use this amount."
         )
         geometry_layout.addWidget(self.object_amount_info)
+        self.simulation_region_summary = QLabel()
+        self.simulation_region_summary.setObjectName(
+            "phantom_simulation_region_summary"
+        )
+        self.simulation_region_summary.setWordWrap(True)
+        self.simulation_region_summary.setStyleSheet("color: #2563eb;")
+        self.simulation_region_summary.hide()
+        geometry_layout.addWidget(self.simulation_region_summary)
         # Keep the compact controls together at the top of the group.  Without
         # an explicit trailing stretch, the configuration row's height is
         # distributed between the matrix and supersampling layouts.
@@ -1089,6 +1105,13 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         splitter.setStretchFactor(2, 1)
         splitter.setSizes([330, 470, 600])
         self.tabs.addTab(draw_page, "Draw and edit")
+        self.region_page = self._build_region_page()
+        self.tabs.addTab(self.region_page, "Simulated region")
+        self.tabs.setTabToolTip(
+            self.tabs.indexOf(self.region_page),
+            "Simulate only part of the phantom: a smaller FOV around the "
+            "isocentre and/or a ppm range of its peaks.",
+        )
 
         self.tabs.addTab(self._build_b0_page(), "B0")
         self.tabs.addTab(self._build_kinetics_page(), "Kinetics / kPL")
@@ -1116,6 +1139,164 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         buttons.rejected.connect(self.reject)
         action_row.addWidget(buttons)
         root.addLayout(action_row)
+
+    def _build_region_page(self):
+        """Controls that crop the simulated part of the designed phantom."""
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        controls = QWidget()
+        controls.setMinimumWidth(380)
+        controls.setMaximumWidth(480)
+        controls_layout = QVBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        intro = QLabel(
+            "'Draw and edit' defines the whole phantom. Here you choose which "
+            "part of it the sequence simulates, e.g. a few slices of a long "
+            "cylinder. The simulated FOV is centred on the isocentre and keeps "
+            "the phantom's voxel size."
+        )
+        intro.setWordWrap(True)
+        controls_layout.addWidget(intro)
+
+        spatial_group = QGroupBox("Spatial region")
+        spatial_layout = QVBoxLayout(spatial_group)
+        self.simulation_fov_enabled = QCheckBox("Simulate only a region of the phantom")
+        self.simulation_fov_enabled.setObjectName("phantom_simulation_fov_enabled")
+        spatial_layout.addWidget(self.simulation_fov_enabled)
+        region_grid = QGridLayout()
+        region_grid.setHorizontalSpacing(10)
+        region_grid.addWidget(QLabel("Simulated FOV"), 0, 1)
+        position_heading = QLabel("Phantom position")
+        position_heading.setToolTip(
+            "Centre of the phantom relative to the simulated FOV centre "
+            "(the isocentre), like the mouse position of the mouse phantom"
+        )
+        region_grid.addWidget(position_heading, 0, 2)
+        self.simulation_fov_spins = []
+        self.simulation_offset_spins = []
+        for row, axis in enumerate("XYZ", start=1):
+            fov = QDoubleSpinBox()
+            fov.setRange(0.01, 1000.0)
+            fov.setDecimals(3)
+            fov.setSuffix(" mm")
+            fov.setObjectName(f"phantom_simulation_fov_{axis.lower()}")
+            offset = QDoubleSpinBox()
+            offset.setRange(-1000.0, 1000.0)
+            offset.setDecimals(3)
+            offset.setSuffix(" mm")
+            offset.setObjectName(f"phantom_simulation_offset_{axis.lower()}")
+            self.simulation_fov_spins.append(fov)
+            self.simulation_offset_spins.append(offset)
+            label = QLabel(axis)
+            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            region_grid.addWidget(label, row, 0)
+            region_grid.addWidget(fov, row, 1)
+            region_grid.addWidget(offset, row, 2)
+        spatial_layout.addLayout(region_grid)
+        self.fit_simulation_fov_button = QPushButton("Fit to sequence FOV")
+        self.fit_simulation_fov_button.setObjectName("phantom_fit_simulation_fov")
+        self.fit_simulation_fov_button.setToolTip(
+            "Set the simulated FOV to the smallest box around the isocentre "
+            "that holds the sequence FOV, its offsets and its slice package. "
+            "The slice direction keeps half a slice thickness on each side "
+            "for the slice-profile transition."
+        )
+        self.fit_simulation_fov_button.clicked.connect(self._fit_simulation_fov)
+        spatial_layout.addWidget(self.fit_simulation_fov_button)
+        self.simulation_region_info = QLabel()
+        self.simulation_region_info.setObjectName("phantom_simulation_region_info")
+        self.simulation_region_info.setWordWrap(True)
+        spatial_layout.addWidget(self.simulation_region_info)
+        self.simulation_fov_warning = QLabel()
+        self.simulation_fov_warning.setObjectName("phantom_simulation_fov_warning")
+        self.simulation_fov_warning.setWordWrap(True)
+        self.simulation_fov_warning.setStyleSheet(
+            "color: #78350f; background: #fef3c7; border: 1px solid #f59e0b; "
+            "border-radius: 4px; padding: 4px;"
+        )
+        self.simulation_fov_warning.hide()
+        spatial_layout.addWidget(self.simulation_fov_warning)
+        controls_layout.addWidget(spatial_group)
+
+        spectral_group = QGroupBox("Spectral range")
+        spectral_layout = QVBoxLayout(spectral_group)
+        self.simulation_ppm_enabled = QCheckBox(
+            "Simulate only peaks inside a ppm range"
+        )
+        self.simulation_ppm_enabled.setObjectName("phantom_simulation_ppm_enabled")
+        spectral_layout.addWidget(self.simulation_ppm_enabled)
+        ppm_row = QHBoxLayout()
+        self.simulation_ppm_low = self._number_spin(-10000.0, 10000.0, 0.0, " ppm")
+        self.simulation_ppm_high = self._number_spin(-10000.0, 10000.0, 0.0, " ppm")
+        self.simulation_ppm_low.setObjectName("phantom_simulation_ppm_low")
+        self.simulation_ppm_high.setObjectName("phantom_simulation_ppm_high")
+        ppm_row.addWidget(QLabel("From"))
+        ppm_row.addWidget(self.simulation_ppm_low, 1)
+        ppm_row.addWidget(QLabel("to"))
+        ppm_row.addWidget(self.simulation_ppm_high, 1)
+        spectral_layout.addLayout(ppm_row)
+        self.fit_ppm_range_button = QPushButton("Use spectrum window")
+        self.fit_ppm_range_button.setToolTip(
+            "Set the range to the sampled spectral window (Spectrum centre ± "
+            "bandwidth / 2) of 'Draw and edit'"
+        )
+        self.fit_ppm_range_button.clicked.connect(self._fit_simulation_ppm_range)
+        spectral_layout.addWidget(self.fit_ppm_range_button)
+        self.simulation_ppm_info = QLabel()
+        self.simulation_ppm_info.setObjectName("phantom_simulation_ppm_info")
+        self.simulation_ppm_info.setWordWrap(True)
+        self.simulation_ppm_info.setTextFormat(Qt.RichText)
+        spectral_layout.addWidget(self.simulation_ppm_info)
+        controls_layout.addWidget(spectral_group)
+        controls_layout.addStretch(1)
+        layout.addWidget(controls, 0)
+
+        previews = QGridLayout()
+        self.region_plots = []
+        self._region_items = []
+        for index, (horizontal, vertical) in enumerate(((0, 1), (0, 2), (1, 2))):
+            plot = pg.PlotWidget(title=f"{'XYZ'[horizontal]}–{'XYZ'[vertical]}")
+            plot.setAspectLocked(True)
+            plot.showGrid(x=True, y=True, alpha=0.2)
+            plot.setLabel("bottom", "xyz"[horizontal], units="mm")
+            plot.setLabel("left", "xyz"[vertical], units="mm")
+            plot.setMinimumSize(220, 200)
+            self.region_plots.append(((horizontal, vertical), plot))
+            previews.addWidget(plot, index // 2, index % 2)
+        self.region_spectrum_plot = pg.PlotWidget(title="Peaks")
+        self.region_spectrum_plot.setLabel("bottom", "Frequency", units="ppm")
+        self.region_spectrum_plot.hideAxis("left")
+        self.region_spectrum_plot.setMinimumSize(220, 200)
+        self.simulation_ppm_region = pg.LinearRegionItem(
+            brush=pg.mkBrush(80, 200, 120, 50)
+        )
+        self.simulation_ppm_region.setZValue(-10)
+        self.simulation_ppm_region.sigRegionChangeFinished.connect(
+            self._simulation_ppm_region_dragged
+        )
+        self.region_spectrum_plot.addItem(self.simulation_ppm_region)
+        self._region_peak_items = []
+        previews.addWidget(self.region_spectrum_plot, 1, 1)
+        legend = QLabel(
+            "<span style='color:#f0f0f0'>■</span> whole phantom &nbsp; "
+            "<span style='color:#50c878'>■</span> simulated FOV &nbsp; "
+            "<span style='color:#ff9632'>■</span> sequence FOV"
+        )
+        legend.setTextFormat(Qt.RichText)
+        preview_column = QVBoxLayout()
+        preview_column.addLayout(previews, 1)
+        preview_column.addWidget(legend)
+        layout.addLayout(preview_column, 1)
+
+        self.simulation_fov_enabled.toggled.connect(self._simulation_region_changed)
+        self.simulation_ppm_enabled.toggled.connect(self._simulation_region_changed)
+        for spin in (*self.simulation_fov_spins, *self.simulation_offset_spins):
+            spin.valueChanged.connect(self._simulation_region_changed)
+        for spin in (self.simulation_ppm_low, self.simulation_ppm_high):
+            spin.valueChanged.connect(self._simulation_region_changed)
+        for spin in (*self.matrix_spins, *self.fov_spins):
+            spin.valueChanged.connect(self._update_simulation_region_summary)
+        return page
 
     def _build_b0_page(self):
         b0_page = QWidget()
@@ -1880,6 +2061,8 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             preview_design = replace(
                 self.design,
                 shape=tuple(min(int(count), 48) for count in self.design.shape),
+                # The B0 tab shows the whole phantom, not the simulated region.
+                simulation_fov_m=None,
                 supersampling_enabled=False,
                 shapes=list(self.design.shapes),
                 kinetic_regions=[],
@@ -2143,6 +2326,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
 
     def set_sequence_geometry(self, geometry):
         """Point the "From seq." buttons at the given sequence geometry."""
+        self._sequence_geometry = geometry
         self._sequence_axis_grids = sequence_axis_grids(geometry)
         for axis, (button, grid) in enumerate(
             zip(self.sequence_grid_buttons, self._sequence_axis_grids)
@@ -2162,6 +2346,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
                 "sequence pixel are a good compromise between simulation speed "
                 "and image quality. FOV offsets are not copied."
             )
+        self._simulation_region_changed()
 
     def _copy_sequence_axis(self, axis):
         grid = self._sequence_axis_grids[axis]
@@ -2174,6 +2359,285 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         )
         self.fov_spins[axis].setValue(fov_m * 1000.0)
 
+    def _simulation_region_values(self):
+        """Return the simulated FOV, phantom position and ppm range in the UI."""
+        simulation_fov_m = None
+        offset_m = (0.0, 0.0, 0.0)
+        if self.simulation_fov_enabled.isChecked():
+            simulation_fov_m = tuple(
+                spin.value() / 1000.0 for spin in self.simulation_fov_spins
+            )
+            offset_m = tuple(
+                spin.value() / 1000.0 for spin in self.simulation_offset_spins
+            )
+        ppm_range = None
+        if self.simulation_ppm_enabled.isChecked():
+            ppm_range = (
+                float(self.simulation_ppm_low.value()),
+                float(self.simulation_ppm_high.value()),
+            )
+        return simulation_fov_m, offset_m, ppm_range
+
+    def _load_simulation_region_into_ui(self):
+        design = self.design
+        enabled = design.simulation_fov_m is not None
+        self.simulation_fov_enabled.setChecked(enabled)
+        for spin, value in zip(self.simulation_fov_spins, design.simulated_fov_m):
+            spin.setValue(float(value) * 1000.0)
+        for spin, value in zip(
+            self.simulation_offset_spins,
+            design.simulation_offset_m if enabled else (0.0, 0.0, 0.0),
+        ):
+            spin.setValue(float(value) * 1000.0)
+        ppm_range = design.simulation_ppm_range
+        self.simulation_ppm_enabled.setChecked(ppm_range is not None)
+        if ppm_range is None:
+            centre = design.effective_spectral_window_center_ppm
+            half = 0.5 * float(design.spectral_bandwidth_ppm)
+            ppm_range = (centre - half, centre + half)
+        self.simulation_ppm_low.setValue(float(ppm_range[0]))
+        self.simulation_ppm_high.setValue(float(ppm_range[1]))
+
+    def _simulation_region_changed(self, *_):
+        if self._updating:
+            return
+        for spin in (*self.simulation_fov_spins, *self.simulation_offset_spins):
+            spin.setEnabled(self.simulation_fov_enabled.isChecked())
+        self.fit_simulation_fov_button.setEnabled(
+            self.simulation_fov_enabled.isChecked()
+            and self._sequence_geometry is not None
+            and self._sequence_geometry.fov_m is not None
+        )
+        for spin in (self.simulation_ppm_low, self.simulation_ppm_high):
+            spin.setEnabled(self.simulation_ppm_enabled.isChecked())
+        self.fit_ppm_range_button.setEnabled(self.simulation_ppm_enabled.isChecked())
+        self._inspector_preview_dirty = True
+        self._update_simulation_region_summary()
+        if self.tabs.currentWidget() is self.region_page:
+            self._update_region_preview()
+
+    def _simulation_grid(self):
+        """Return the simulated FOV (m) and matrix for the current UI values."""
+        fov_m = np.array([spin.value() / 1000.0 for spin in self.fov_spins])
+        matrix = np.array([spin.value() for spin in self.matrix_spins])
+        simulation_fov_m, _offset, _ppm = self._simulation_region_values()
+        if simulation_fov_m is None:
+            return fov_m, matrix
+        region = np.asarray(simulation_fov_m, dtype=float)
+        counts = np.maximum(1, np.rint(matrix * region / fov_m)).astype(int)
+        return region, counts
+
+    def _update_simulation_region_summary(self, *_):
+        """One line in 'Draw and edit' saying that only a region is simulated."""
+        simulation_fov_m, _offset, ppm_range = self._simulation_region_values()
+        parts = []
+        if simulation_fov_m is not None:
+            region, counts = self._simulation_grid()
+            parts.append(
+                "FOV "
+                + " × ".join(f"{value * 1000:.4g}" for value in region)
+                + " mm (matrix "
+                + " × ".join(str(int(value)) for value in counts)
+                + ")"
+            )
+        if ppm_range is not None:
+            parts.append(f"{ppm_range[0]:.4g}–{ppm_range[1]:.4g} ppm")
+        self.simulation_region_summary.setText(
+            "Simulated region: " + ", ".join(parts) if parts else ""
+        )
+        self.simulation_region_summary.setVisible(bool(parts))
+
+    def _sequence_fit_extent_m(self):
+        """Half-extent around the isocentre that holds the sequence FOV."""
+        geometry = self._sequence_geometry
+        if geometry is None or geometry.fov_m is None:
+            return None
+        box = geometry.fov_box(0.0)
+        if box is None:
+            return None
+        corners = box.corners()
+        half = np.max(np.abs(corners), axis=0)
+        if geometry.is_2d and geometry.slice_thickness_m:
+            # Spins just outside the nominal slices still see the slice
+            # profile's transition band.
+            normal = np.abs(np.asarray(geometry.frame, dtype=float)[:, 2])
+            half = half + 0.5 * float(geometry.slice_thickness_m) * normal
+        return half
+
+    def _fit_simulation_fov(self):
+        half = self._sequence_fit_extent_m()
+        if half is None:
+            return
+        for spin, value in zip(self.simulation_fov_spins, half):
+            if value > 0.0:
+                spin.setValue(2000.0 * float(value))
+
+    def _fit_simulation_ppm_range(self):
+        centre = float(self.spectral_window_center_ppm.value())
+        half = 0.5 * float(self.spectral_bandwidth_ppm.value())
+        self.simulation_ppm_low.setValue(centre - half)
+        self.simulation_ppm_high.setValue(centre + half)
+
+    def _simulation_ppm_region_dragged(self):
+        if self._updating:
+            return
+        low, high = self.simulation_ppm_region.getRegion()
+        if not self.simulation_ppm_enabled.isChecked():
+            self.simulation_ppm_enabled.setChecked(True)
+        self.simulation_ppm_low.setValue(float(low))
+        self.simulation_ppm_high.setValue(float(high))
+
+    def _designed_peak_positions(self):
+        """Return (name, absolute ppm) of every distinct peak in the design."""
+        reference = float(self.spectral_reference_ppm.value())
+        peaks = []
+        for item in self.design.shapes:
+            for peak in item.peaks:
+                entry = (peak.name, reference + float(peak.frequency_ppm))
+                if not any(
+                    name == entry[0] and np.isclose(ppm, entry[1])
+                    for name, ppm in peaks
+                ):
+                    peaks.append(entry)
+        return peaks
+
+    def _update_region_preview(self):
+        """Draw phantom, simulated FOV and sequence FOV; list kept peaks."""
+        for plot, item in self._region_items:
+            plot.removeItem(item)
+        self._region_items = []
+        fov_mm = np.array([spin.value() for spin in self.fov_spins])
+        simulation_fov_m, offset_m, ppm_range = self._simulation_region_values()
+        offset_mm = np.asarray(offset_m, dtype=float) * 1000.0
+        region_m, counts = self._simulation_grid()
+        phantom_box = OrientedBox(tuple(offset_m), tuple(fov_mm / 1000.0))
+        region_box = OrientedBox((0.0, 0.0, 0.0), tuple(region_m))
+        sequence_box = (
+            None
+            if self._sequence_geometry is None or self._sequence_geometry.fov_m is None
+            else self._sequence_geometry.fov_box(0.0)
+        )
+        for plane, plot in self.region_plots:
+
+            def add(item, plot=plot):
+                plot.addItem(item)
+                self._region_items.append((plot, item))
+
+            for index, shape in enumerate(self.design.shapes):
+                x, y = _shape_projection(shape, tuple(fov_mm), plane)
+                add(
+                    pg.PlotDataItem(
+                        (np.asarray(x) - 0.5) * fov_mm[plane[0]] + offset_mm[plane[0]],
+                        (np.asarray(y) - 0.5) * fov_mm[plane[1]] + offset_mm[plane[1]],
+                        pen=pg.mkPen(
+                            pg.intColor(index, hues=max(1, len(self.design.shapes))),
+                            width=2,
+                        ),
+                    )
+                )
+            for box, color, style, width in (
+                (phantom_box, (240, 240, 240), Qt.SolidLine, 2),
+                (region_box, (80, 200, 120), Qt.DashLine, 3),
+                (sequence_box, (255, 150, 50), Qt.SolidLine, 2),
+            ):
+                if box is None:
+                    continue
+                outline = projected_outline_mm(box, plane)
+                add(
+                    pg.PlotDataItem(
+                        outline[:, 0],
+                        outline[:, 1],
+                        pen=pg.mkPen(color, width=width, style=style),
+                    )
+                )
+            plot.enableAutoRange()
+
+        voxel = region_m / counts * 1000.0
+        whole = " × ".join(str(spin.value()) for spin in self.matrix_spins)
+        info = (
+            "Simulated matrix "
+            + " × ".join(str(int(value)) for value in counts)
+            + f" ({int(np.prod(counts))} voxels), voxel "
+            + " × ".join(f"{value:.3g}" for value in voxel)
+            + f" mm. Whole phantom: {whole}."
+        )
+        if self._sequence_geometry is None or self._sequence_geometry.fov_m is None:
+            info += " The current sequence has no encoded FOV to compare with."
+        self.simulation_region_info.setText(info)
+        note = sequence_overhang_note(
+            sequence_overhang_m(self._sequence_geometry, region_box)
+        )
+        self.simulation_fov_warning.setText("" if note is None else note)
+        self.simulation_fov_warning.setVisible(note is not None)
+
+        for item in self._region_peak_items:
+            self.region_spectrum_plot.removeItem(item)
+        self._region_peak_items = []
+        peaks = self._designed_peak_positions()
+        kinetic_names = (
+            (
+                self.pyruvate_peak_name.text().strip(),
+                self.lactate_peak_name.text().strip(),
+            )
+            if self.dynamic_enabled.isChecked()
+            else ()
+        )
+        kept, dropped = [], []
+        for name, ppm in peaks:
+            inside = ppm_range is None or ppm_range[0] <= ppm <= ppm_range[1]
+            (kept if inside or name in kinetic_names else dropped).append((name, ppm))
+            line = pg.InfiniteLine(
+                pos=ppm,
+                angle=90,
+                pen=pg.mkPen((80, 200, 120) if inside else (150, 150, 150), width=2),
+                label=name,
+                labelOpts={
+                    "position": 0.9,
+                    "rotateAxis": (1, 0),
+                    "anchors": [(0, 0), (0, 0)],
+                },
+            )
+            self.region_spectrum_plot.addItem(line)
+            self._region_peak_items.append(line)
+        self._updating, updating = True, self._updating
+        try:
+            self.simulation_ppm_region.setRegion(
+                (self.simulation_ppm_low.value(), self.simulation_ppm_high.value())
+            )
+        finally:
+            self._updating = updating
+        self.simulation_ppm_region.setVisible(ppm_range is not None)
+        positions = [ppm for _name, ppm in peaks]
+        if ppm_range is not None:
+            positions.extend(ppm_range)
+        if positions:
+            self.region_spectrum_plot.setXRange(
+                min(positions) - 2.0, max(positions) + 2.0, padding=0.05
+            )
+
+        def listed(entries):
+            return ", ".join(
+                f"{html.escape(name)} ({ppm:.4g} ppm)" for name, ppm in entries
+            )
+
+        text = f"<b>Simulated:</b> {listed(kept) or 'none'}"
+        if dropped:
+            text += f"<br><b>Left out:</b> {listed(dropped)}"
+        if ppm_range is not None and any(
+            name in kinetic_names and not (ppm_range[0] <= ppm <= ppm_range[1])
+            for name, ppm in peaks
+        ):
+            text += (
+                "<br>Pyruvate and lactate stay in a dynamic phantom because "
+                "the kinetics need both pools."
+            )
+        if not kept:
+            text += (
+                "<br><span style='color:#b91c1c'>No peak lies in the range; "
+                "the phantom cannot be built.</span>"
+            )
+        self.simulation_ppm_info.setText(text)
+
     def _load_design_into_ui(self):
         self._updating = True
         self.name_edit.setText(self.design.name)
@@ -2181,6 +2645,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             widget.setValue(int(value))
         for widget, value in zip(self.fov_spins, self.design.fov_m):
             widget.setValue(float(value) * 1000.0)
+        self._load_simulation_region_into_ui()
         self.field_strength_t.setValue(float(self.design.field_strength_t))
         self.temperature_c.setValue(self.design.temperature_k - 273.15)
         self.isotope_enrichment.setValue(100.0 * self.design.isotope_enrichment)
@@ -2240,6 +2705,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self._populate_b0_offset_table()
         self._b0_shape_cache = None
         self._updating = False
+        self._simulation_region_changed()
         self._refresh_metabolite_presets()
         if self.tabs.currentWidget() is self.b0_page:
             self._refresh_b0_preview()
@@ -3455,6 +3921,11 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.design.field_strength_t = self.field_strength_t.value()
         self.design.temperature_k = self.temperature_c.value() + 273.15
         self.design.isotope_enrichment = self.isotope_enrichment.value() / 100.0
+        (
+            self.design.simulation_fov_m,
+            self.design.simulation_offset_m,
+            self.design.simulation_ppm_range,
+        ) = self._simulation_region_values()
         self.design.nucleus = self.nucleus.currentData()
         self.design.spectral_reference_ppm = self.spectral_reference_ppm.value()
         self.design.spectral_window_center_ppm = self.spectral_window_center_ppm.value()
@@ -3498,6 +3969,9 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         )
 
     def _tab_changed(self, index):
+        if self.tabs.widget(index) is self.region_page:
+            self._sync_global()
+            self._update_region_preview()
         if self.tabs.widget(index) is self.b0_page:
             self._populate_b0_offset_table()
             self._b0_shape_cache = None

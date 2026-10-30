@@ -6,6 +6,75 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Reconstruction Explorer: repetitions are browsed by clicking the time course
+  or stepping the frame bar, and metabolites are labelled with colours and
+  contrast. Voxel plots of echo trains (EPSI, MGE) show the complex echo train
+  ("Echoes") and its Fourier transform ("Spectrum"). The voxel plot has mode
+  buttons for Spectrum, FID and Time course, so CSI switches without the
+  settings column.
+- Explorer shows FID and spectrum for unencoded acquisitions such as the
+  internal single pulse instead of an empty reconstruction.
+- Spiral reconstruction in the Reconstruction Explorer with density-compensated
+  NUFFT, CG-NUFFT or linear gridding, optionally on k - Δk for the gradient
+  errors of the k-space tab.
+- k-Space Trajectory tab in the sequence workspace: k-space per readout or
+  frame, gradient/RF/ADC timeline, k(t), sampling PSF, and gradient delay, scale
+  and eddy-current settings applied live against the ideal trajectory.
+- Spiral trajectory designer ("Design…" next to the spiral revolutions) with
+  gradient and slew limits of the imaged nucleus, the gridding PSF, Apply to the
+  sequence and Export as `.npz`.
+- `nufft.py` with a Kaiser–Bessel NUFFT, Pipe–Menon density compensation and CG
+  reconstruction; spirals without a declared acquisition are detected from the
+  trajectory. The export notebooks explain which reconstruction fits each
+  readout and rerun spiral and radial reconstructions
+  (`spiral_acquisition_from_metadata`, `reconstruct_spiral_frames`).
+- PSF Analysis handles 2D spiral frames (point-source signal gridded with the
+  Pipe–Menon weights) and the gradient-error modes of the k-space tab.
+- Phantom designer: a "Simulated region" tab simulates only part of the phantom
+  (FOV around the isocentre and a ppm range), the default sphere is editable,
+  and a warning shows when the sequence FOV reaches beyond the simulated phantom
+  FOV.
+- Ideal-crusher banner when a generated sequence runs with gradient spoiling.
+- Bruker loader reads the applied gain (`ACQ_CalibratedRG`) and warns below
+  RG 10; SNR budget flags whole-object FID or brightest voxel below SNR 1 with
+  the averaging needed for SNR 3.
+
+### Changed
+
+- The Geometry tab is called Setup and zooms freely. Phantom + B1 is a sub-tab of
+  both Phantom and B1 Fields.
+- Sequence settings are shown per tab and hidden by default. Tab bars scroll
+  with two-finger gestures, and trackpad slice scrolling accumulates before a
+  slice step.
+- The "Sequence parameters changed" notice in Setup appears only when FOV,
+  matrix, slices or offsets change, not for timing edits such as TE or TR.
+- Analysis plots (PSF, spin probe, signal, Explorer) cannot be zoomed beyond the
+  data range. PSF plots are static.
+- SS-bSSFP defaults to the SLR pulse with sharpness 1.
+- The default scanner profile has gradient limits of 400 mT/m and 3000 T/m/s.
+  The advanced 13C bSSFP builders default to 400 mT/m and 4000 T/m/s.
+
+### Fixed
+
+- Sequence gradients use the gyromagnetic ratio of the imaged nucleus. 13C
+  sequences had about four times the physical gradient limit, and unknown
+  nuclei are rejected.
+- Readout ramps are at least the ADC dead time, and bSSFP keeps a centred ADC
+  at any bandwidth.
+- ADC time tolerance scales with scan duration, so long multi-repetition scans
+  no longer fall back to a wrong Cartesian reconstruction.
+- Loaded results saved without an acquisition layout get the inferred one, so
+  spirals saved before undeclared-spiral detection no longer show as a 1×N
+  image.
+- PSF Analysis no longer fails with `NoneType` after switching the k-space
+  plane.
+- Noise scans with non-white noise use the spectral-median sigma.
+- The PSF k-space modulation plot keeps a minimum y range.
+- Sequence preset files serialise numpy arrays, and pyqtgraph image items guard
+  against degenerate levels.
+
 ## [2.9.5] - 2026-10-26
 
 ### Added
