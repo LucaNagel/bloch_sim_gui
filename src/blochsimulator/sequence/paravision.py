@@ -19,6 +19,23 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import FrozenSet, Optional
 
+# ParaVision writes English names whatever the locale of the exporting machine.
+_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_MONTHS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
 
 @dataclass(frozen=True)
 class ParaVisionProfile:
@@ -106,7 +123,7 @@ class ParaVisionProfile:
         if self.iso_dates:
             millis = f"{moment.microsecond // 1000:03d}"
             return moment.strftime(f"%Y-%m-%dT%H:%M:%S,{millis}%z")
-        return f"{moment:%H:%M:%S} {moment.day:2d} {moment:%b %Y}"
+        return f"{moment:%H:%M:%S} {moment.day:2d} {_MONTHS[moment.month - 1]} {moment.year}"
 
     def format_timestamp(self, moment: datetime) -> str:
         """Return the timestamp of ``$$`` header and footer comments."""
@@ -116,7 +133,8 @@ class ParaVisionProfile:
             hours = offset.total_seconds() / 3600.0 if offset is not None else 0.0
             zone = moment.tzname() or "UTC"
             return (
-                f"{moment:%a %b} {moment.day:2d} {moment:%H:%M:%S %Y} "
+                f"{_DAYS[moment.weekday()]} {_MONTHS[moment.month - 1]} "
+                f"{moment.day:2d} {moment:%H:%M:%S} {moment.year} "
                 f"{zone} (UT{hours:+g}h)"
             )
         millis = f"{moment.microsecond // 1000:03d}"
