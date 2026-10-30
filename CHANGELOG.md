@@ -6,6 +6,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.9.6] - 2026-10-30
+
 ### Added
 
 - Reconstruction Explorer: repetitions are browsed by clicking the time course
@@ -74,6 +76,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 - The PSF k-space modulation plot keeps a minimum y range.
 - Sequence preset files serialise numpy arrays, and pyqtgraph image items guard
   against degenerate levels.
+- ParaVision exports write date stamps with English day and month names
+  whatever the locale of the exporting machine.
 
 ## [2.9.5] - 2026-10-26
 
