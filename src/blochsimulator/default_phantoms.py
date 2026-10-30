@@ -1,7 +1,9 @@
 """Nucleus-specific default phantom used when no phantom has been loaded.
 
-The Sequence workspace falls back to a single on-resonance sphere so a
-generated sequence can be run immediately.  The sphere sits in a cubic grid
+The Sequence workspace falls back to a single sphere so a generated sequence
+can be run immediately.  Its resonance sits at the compound's chemical shift
+(e.g. [1-13C]pyruvate at 171.076 ppm) or, without a preset, at the sequence
+reference.  The sphere sits in a cubic grid
 that fits inside the sequence FOV and whose cells are no wider than the
 sequence pixels, so neither the aliasing nor the resolution warning fires
 for the default object.
@@ -39,12 +41,19 @@ class DefaultCompound:
     name: str
     t1_s: float
     t2_star_s: float
+    # Absolute shift; None places the resonance at the sequence reference.
+    chemical_shift_ppm: Optional[float] = None
 
 
 def _preset_compound(nucleus, key):
     for preset in METABOLITE_PRESETS_BY_NUCLEUS.get(nucleus, ()):
         if preset.key == key:
-            return DefaultCompound(preset.name, preset.t1_s, preset.t2_star_s)
+            return DefaultCompound(
+                preset.name,
+                preset.t1_s,
+                preset.t2_star_s,
+                float(preset.chemical_shift_ppm),
+            )
     raise KeyError(f"missing {nucleus} metabolite preset {key!r}")
 
 
@@ -160,17 +169,23 @@ def default_phantom_design(
     side_m: float = DEFAULT_PHANTOM_FOV_M,
     matrix=DEFAULT_PHANTOM_MATRIX,
 ) -> PhantomDesign:
-    """Design one centred sphere whose resonance is at the sequence reference."""
+    """Design one centred sphere holding the nucleus' default compound."""
     compound = default_compound(nucleus)
     diameter = DEFAULT_SPHERE_DIAMETER_FRACTION
+    reference_ppm = float(sequence_reference_ppm)
+    shift_ppm = (
+        reference_ppm
+        if compound.chemical_shift_ppm is None
+        else compound.chemical_shift_ppm
+    )
     return PhantomDesign(
         name=f"Default sphere ({nucleus} {compound.name.lower()})",
         shape=tuple(int(value) for value in np.broadcast_to(matrix, 3)),
         fov_m=(float(side_m),) * 3,
         field_strength_t=float(field_strength_t),
         nucleus=nucleus,
-        spectral_reference_ppm=float(sequence_reference_ppm),
-        spectral_window_center_ppm=float(sequence_reference_ppm),
+        spectral_reference_ppm=reference_ppm,
+        spectral_window_center_ppm=shift_ppm,
         spectral_bandwidth_ppm=DEFAULT_SPECTRAL_BANDWIDTH_PPM,
         spectral_points=DEFAULT_SPECTRAL_POINTS,
         supersampling_enabled=True,
@@ -186,7 +201,7 @@ def default_phantom_design(
                     SpectralPeakDefinition(
                         name=compound.name,
                         amplitude=1.0,
-                        frequency_ppm=0.0,
+                        frequency_ppm=shift_ppm - reference_ppm,
                         t2_star_s=compound.t2_star_s,
                         t1_s=compound.t1_s,
                     )

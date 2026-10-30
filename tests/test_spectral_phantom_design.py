@@ -726,7 +726,7 @@ def test_designer_b0_tab_edits_pattern_centre_and_shape_offsets():
     assert [spin.value() for spin in dialog.b0_center_spins] == pytest.approx(
         [25.0, 50.0, 50.0]
     )
-    assert dialog.tabs.tabText(1) == "B0"
+    assert dialog.tabs.tabText(dialog.tabs.indexOf(dialog.b0_page)) == "B0"
     dialog.tabs.setCurrentWidget(dialog.b0_page)
     app.processEvents()
     assert "-1 ppm at the centre" in dialog.b0_pattern_info.text()
@@ -1792,7 +1792,7 @@ def test_phantom_tabs_preview_the_sequence_default_sphere(tmp_path):
     app.processEvents()
     assert window.phantom_widget.current_phantom is None
     assert window.phantom_widget.viewer.phantom is default
-    assert "sequence default" in window.phantom_widget.phantom_creator.info_label.text()
+    assert "Sequence default" in window.phantom_widget.phantom_creator.info_label.text()
 
     window.phantom_subtabs.setCurrentIndex(1)
     app.processEvents()
@@ -1818,3 +1818,130 @@ def test_phantom_tabs_preview_the_sequence_default_sphere(tmp_path):
 
     window.close()
     app.processEvents()
+
+
+def test_simulation_region_crops_the_grid_and_the_peaks():
+    design = _spectral_design()
+    # 10 × 10 × 1 mm voxels; simulate 2 × 6 × 2 of them around the isocentre
+    # with the phantom moved +20 mm along x.
+    design.simulation_fov_m = (0.02, 0.06, 0.002)
+    design.simulation_offset_m = (0.02, 0.0, 0.0)
+    water_ppm = float(hz_to_ppm(-100.0, 3.0))
+    design.simulation_ppm_range = (water_ppm - 0.1, water_ppm + 0.1)
+
+    assert design.simulation_shape == (2, 6, 2)
+    mask = design.rasterize_mask(design.shapes[0])
+    assert mask.shape == (2, 6, 2)
+    assert not mask[0].any()
+    assert mask[1].any()
+
+    phantom = design.build()
+    assert phantom.shape == (2, 6, 2)
+    assert np.asarray(phantom.fov) == pytest.approx([0.02, 0.06, 0.002])
+    assert [species.name for species in phantom.species] == ["Object: Water"]
+
+    restored = PhantomDesign.from_dict(design.to_dict())
+    assert restored.simulation_fov_m == pytest.approx(design.simulation_fov_m)
+    assert restored.simulation_offset_m == pytest.approx(design.simulation_offset_m)
+    assert restored.simulation_ppm_range == pytest.approx(design.simulation_ppm_range)
+    assert PhantomDesign.from_phantom(phantom).simulation_fov_m == pytest.approx(
+        design.simulation_fov_m
+    )
+
+    design.simulation_ppm_range = (50.0, 60.0)
+    with pytest.raises(ValueError, match="no peak"):
+        design.build()
+
+
+def test_dynamic_simulation_region_keeps_kinetic_pools_and_is_not_rebuilt():
+    design = PhantomDesign(
+        shape=(4, 2, 1),
+        fov_m=(0.04, 0.02, 0.01),
+        dynamic_enabled=True,
+        supersampling_enabled=False,
+        shapes=[
+            ShapeDefinition(
+                "Object",
+                kind="box",
+                size=(1.0, 1.0, 1.0),
+                t1_s=30.0,
+                peaks=[
+                    SpectralPeakDefinition("Pyruvate", 1.0, 0.0, 1.0),
+                    SpectralPeakDefinition("Lactate", 0.0, 12.0, 1.0),
+                    SpectralPeakDefinition("Urea", 0.5, -8.0, 1.0),
+                ],
+            )
+        ],
+        simulation_ppm_range=(-1.0, 1.0),
+    )
+    phantom = design.build()
+
+    names = [pool.name for pool in phantom.pools]
+    assert "Pyruvate" in names and "Lactate" in names
+    assert "Urea" not in names
+    assert phantom.restore_missing_designed_pools() is phantom
+
+
+def test_default_c13_sphere_puts_pyruvate_at_its_chemical_shift():
+    design = default_phantom_design(
+        "C13", field_strength_t=3.0, sequence_reference_ppm=160.0
+    )
+    peak = design.shapes[0].peaks[0]
+    assert design.spectral_reference_ppm + peak.frequency_ppm == pytest.approx(171.076)
+    assert design.effective_spectral_window_center_ppm == pytest.approx(171.076)
+
+
+def test_designer_region_tab_writes_the_simulated_region(qt_application):
+    geometry = SequenceGeometry(
+        np.eye(3), (0.04, 0.04), (32, 32), (-0.004, 0.0, 0.004), 0.002
+    )
+    dialog = SpectralPhantomDesignerDialog(
+        design=_spectral_design(), sequence_geometry=geometry
+    )
+    try:
+        assert dialog.tabs.tabText(1) == "Simulated region"
+        assert not dialog.simulation_fov_spins[0].isEnabled()
+        dialog.tabs.setCurrentWidget(dialog.region_page)
+        dialog.simulation_fov_enabled.setChecked(True)
+        assert dialog.simulation_fov_spins[0].isEnabled()
+        # The 60 × 60 × 4 mm phantom FOV is smaller than the slice package.
+        assert not dialog.simulation_fov_warning.isHidden()
+        assert "along z" in dialog.simulation_fov_warning.text()
+
+        dialog.fit_simulation_fov_button.click()
+        # Slices span ±5 mm, plus half a slice thickness on each side.
+        assert [spin.value() for spin in dialog.simulation_fov_spins] == (
+            pytest.approx([40.0, 40.0, 12.0])
+        )
+        assert dialog.simulation_fov_warning.isHidden()
+
+        dialog.simulation_ppm_enabled.setChecked(True)
+        water_ppm = float(hz_to_ppm(-100.0, 3.0))
+        dialog.simulation_ppm_low.setValue(water_ppm - 0.1)
+        dialog.simulation_ppm_high.setValue(water_ppm + 0.1)
+        assert "Left out:</b> Metabolite" in dialog.simulation_ppm_info.text()
+        assert "Simulated region" in dialog.simulation_region_summary.text()
+
+        dialog._sync_global()
+        assert dialog.design.simulation_fov_m == pytest.approx((0.04, 0.04, 0.012))
+        # The ppm spin boxes round to 4 decimals.
+        assert dialog.design.simulation_ppm_range == pytest.approx(
+            (water_ppm - 0.1, water_ppm + 0.1), abs=1e-4
+        )
+
+        reopened = SpectralPhantomDesignerDialog(design=dialog.design)
+        try:
+            assert reopened.simulation_fov_enabled.isChecked()
+            assert reopened.simulation_fov_spins[2].value() == pytest.approx(12.0)
+            assert reopened.simulation_ppm_enabled.isChecked()
+        finally:
+            reopened.reject()
+
+        dialog.simulation_fov_enabled.setChecked(False)
+        dialog.simulation_ppm_enabled.setChecked(False)
+        dialog._sync_global()
+        assert dialog.design.simulation_fov_m is None
+        assert dialog.design.simulation_ppm_range is None
+        assert dialog.simulation_region_summary.text() == ""
+    finally:
+        dialog.reject()

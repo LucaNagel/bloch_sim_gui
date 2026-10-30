@@ -314,7 +314,17 @@ def configured_object_box(phantom) -> Optional[OrientedBox]:
     config = getattr(phantom, "config", None)
     size = getattr(config, "mouse_size_m", None)
     if size is None:
-        return None
+        # Phantom Designer objects simulated only in part keep their full FOV.
+        design = getattr(phantom, "metadata", {}).get("phantom_design")
+        if not isinstance(design, dict) or design.get("simulation_fov_m") is None:
+            return None
+        return OrientedBox(
+            tuple(
+                float(value)
+                for value in design.get("simulation_offset_m", (0.0, 0.0, 0.0))
+            ),
+            tuple(float(value) for value in design["fov_m"]),
+        )
     offset = getattr(config, "mouse_offset_m", (0.0, 0.0, 0.0))
     return OrientedBox(
         tuple(float(value) for value in offset),
@@ -707,6 +717,43 @@ def projected_outline_mm(box: OrientedBox, plane: tuple[int, int]) -> np.ndarray
     return convex_hull_2d(corners)
 
 
+def sequence_overhang_m(
+    sequence: Optional[SequenceGeometry], grid_box: Optional[OrientedBox]
+) -> np.ndarray:
+    """Return how far the sequence FOV reaches beyond a box along x, y and z.
+
+    A 2D FOV spans its slice package. Without slices only its plane counts.
+    """
+    overhang = np.zeros(3)
+    if sequence is None or grid_box is None or sequence.fov_m is None:
+        return overhang
+    corners = sequence.fov_box(0.0).corners()
+    grid_center = np.asarray(grid_box.center_m, dtype=float)
+    grid_half = 0.5 * np.asarray(grid_box.size_m, dtype=float)
+    below = (grid_center - grid_half) - corners.min(axis=0)
+    above = corners.max(axis=0) - (grid_center + grid_half)
+    overhang = np.maximum(np.maximum(below, above), 0.0)
+    # Rounding of millimetre inputs is not an overhang.
+    overhang[overhang < 1e-7] = 0.0
+    return overhang
+
+
+def sequence_overhang_note(overhang_m) -> Optional[str]:
+    """Describe a sequence FOV that reaches beyond the simulated phantom."""
+    beyond = [
+        f"{AXES[axis]} ({value * 1000:.3g} mm)"
+        for axis, value in enumerate(np.asarray(overhang_m, dtype=float))
+        if value > 0.0
+    ]
+    if not beyond:
+        return None
+    return (
+        "The sequence FOV reaches beyond the simulated phantom FOV along "
+        f"{', '.join(beyond)}. No spins are simulated there, so any object "
+        "part outside is missing from the signal."
+    )
+
+
 def coverage_notes(
     phantom, sequence: Optional[SequenceGeometry], object_box=None
 ) -> list[str]:
@@ -750,6 +797,9 @@ def coverage_notes(
         return notes
     if grid is None:
         return notes
+    overhang_note = sequence_overhang_note(sequence_overhang_m(sequence, grid))
+    if overhang_note is not None:
+        notes.append(overhang_note)
     frame = np.asarray(sequence.frame, dtype=float)
     required = np.abs(frame).T @ np.asarray(grid.size_m, dtype=float)
     grid_centers = frame.T @ np.asarray(grid.center_m, dtype=float)

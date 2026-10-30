@@ -327,6 +327,14 @@ class PhantomDesign:
     temperature_k: float = 310.15
     # Observed isotope fraction; peak amplitudes are molecule concentrations.
     isotope_enrichment: float = 1.0
+    # Optional simulated region. ``fov_m`` and ``shape`` describe the whole
+    # phantom; when ``simulation_fov_m`` is set only that box, centred on the
+    # scanner isocentre, is rasterized at the phantom's voxel size, and the
+    # phantom centre sits at ``simulation_offset_m`` inside it.
+    simulation_fov_m: Optional[Tuple[float, float, float]] = None
+    simulation_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Optional absolute ppm range (low, high); peaks outside it are left out.
+    simulation_ppm_range: Optional[Tuple[float, float]] = None
 
     def validate(self) -> None:
         if len(self.shape) != 3 or any(
@@ -343,6 +351,23 @@ class PhantomDesign:
             raise ValueError("design temperature must be positive and finite")
         if not 0 < self.isotope_enrichment <= 1:
             raise ValueError("isotope enrichment must be in (0, 1]")
+        if self.simulation_fov_m is not None and (
+            len(self.simulation_fov_m) != 3
+            or not np.all(np.isfinite(self.simulation_fov_m))
+            or np.any(np.asarray(self.simulation_fov_m) <= 0)
+        ):
+            raise ValueError("simulated FOV must contain three positive values")
+        if len(self.simulation_offset_m) != 3 or not np.all(
+            np.isfinite(self.simulation_offset_m)
+        ):
+            raise ValueError("phantom position must contain three finite values")
+        if self.simulation_ppm_range is not None:
+            if len(self.simulation_ppm_range) != 2 or not np.all(
+                np.isfinite(self.simulation_ppm_range)
+            ):
+                raise ValueError("simulated ppm range must contain two finite values")
+            if self.simulation_ppm_range[0] >= self.simulation_ppm_range[1]:
+                raise ValueError("simulated ppm range must run from low to high")
         if self.nucleus is not None and self.nucleus not in NUCLEUS_GAMMA_HZ_PER_T:
             raise ValueError(f"unsupported nucleus {self.nucleus!r}")
         if not np.isfinite(self.spectral_reference_ppm):
@@ -419,6 +444,47 @@ class PhantomDesign:
             item.validate()
 
     @property
+    def simulated_fov_m(self) -> Tuple[float, float, float]:
+        """FOV of the rasterized phantom: the simulated region or the whole."""
+        if self.simulation_fov_m is None:
+            return tuple(float(value) for value in self.fov_m)
+        return tuple(float(value) for value in self.simulation_fov_m)
+
+    @property
+    def simulation_shape(self) -> Tuple[int, int, int]:
+        """Matrix of the rasterized phantom at the phantom's voxel size."""
+        if self.simulation_fov_m is None:
+            return tuple(int(value) for value in self.shape)
+        return tuple(
+            max(1, int(round(int(count) * float(region) / float(fov))))
+            for count, region, fov in zip(self.shape, self.simulation_fov_m, self.fov_m)
+        )
+
+    def _normalized_axes(self, offset=(0.5, 0.5, 0.5)) -> List[np.ndarray]:
+        """Normalized design coordinates of the rasterized voxel (sub)centres."""
+        if self.simulation_fov_m is None:
+            return [
+                (np.arange(count, dtype=float) + offset[axis]) / count
+                for axis, count in enumerate(self.shape)
+            ]
+        axes = []
+        for axis, count in enumerate(self.simulation_shape):
+            region = float(self.simulation_fov_m[axis])
+            physical = (
+                (np.arange(count, dtype=float) + offset[axis]) / count - 0.5
+            ) * region - float(self.simulation_offset_m[axis])
+            axes.append(physical / float(self.fov_m[axis]) + 0.5)
+        return axes
+
+    def includes_peak(self, peak: SpectralPeakDefinition) -> bool:
+        """Return whether a peak lies in the simulated ppm range."""
+        if self.simulation_ppm_range is None:
+            return True
+        low, high = (float(value) for value in self.simulation_ppm_range)
+        position = float(self.spectral_reference_ppm) + float(peak.frequency_ppm)
+        return low <= position <= high
+
+    @property
     def effective_spectral_window_center_ppm(self) -> float:
         """Absolute center of the spectral sampling/preview window."""
         if self.spectral_window_center_ppm is None:
@@ -459,12 +525,11 @@ class PhantomDesign:
         # on row-vector world coordinates therefore applies the inverse R.T.
         rotation = rotation_z @ rotation_y @ rotation_x
         half_size = np.asarray(item.size, dtype=float) * fov / 2.0
-        coverage = np.zeros(self.shape, dtype=float)
+        coverage = np.zeros(self.simulation_shape, dtype=float)
         for offset in offsets:
             axes = [
-                ((np.arange(count, dtype=float) + offset[axis]) / count - centre[axis])
-                * fov[axis]
-                for axis, count in enumerate(self.shape)
+                (normalized - centre[axis]) * fov[axis]
+                for axis, normalized in enumerate(self._normalized_axes(offset))
             ]
             world_x = axes[0][:, None, None]
             world_y = axes[1][None, :, None]
@@ -504,14 +569,17 @@ class PhantomDesign:
         mode = self.b0_inhomogeneity_mode
         amplitude = float(self.b0_inhomogeneity_ppm)
         if mode == "none" or amplitude == 0.0:
-            return np.zeros(self.shape, dtype=float)
+            return np.zeros(self.simulation_shape, dtype=float)
+        # The pattern scale belongs to the whole phantom; a simulated region
+        # samples the same pattern at its own voxel centres.
         unshifted_axes = [
             2.0 * (np.arange(count, dtype=float) + 0.5) / count - 1.0
             for count in self.shape
         ]
+        sampled_axes = [2.0 * axis - 1.0 for axis in self._normalized_axes()]
         shift = 2.0 * np.asarray(self.b0_inhomogeneity_center, dtype=float) - 1.0
         x, y, z = np.meshgrid(
-            *(axis - offset for axis, offset in zip(unshifted_axes, shift)),
+            *(axis - offset for axis, offset in zip(sampled_axes, shift)),
             indexing="ij",
         )
         if mode == "linear_x":
@@ -534,7 +602,7 @@ class PhantomDesign:
             normalized = (
                 radial_distance / edge_distance - 0.5
                 if edge_distance > 0.0
-                else np.zeros(self.shape, dtype=float)
+                else np.zeros(self.simulation_shape, dtype=float)
             )
         return amplitude * normalized
 
@@ -546,14 +614,19 @@ class PhantomDesign:
         properties in the designer, and explicit kinetic regions remain the
         final, highest-priority override.
         """
-        result = np.full(self.shape, float(self.default_kpl_s_inv), dtype=float)
+        result = np.full(
+            self.simulation_shape, float(self.default_kpl_s_inv), dtype=float
+        )
         for item in self.shapes:
             if item.kpl_s_inv is None:
                 continue
             support = np.asarray(self.rasterize_mask(item)) > 0.0
             result[support] = float(item.kpl_s_inv)
+        coordinates = self._normalized_axes()
         for region in self.kinetic_regions:
-            result[region.rasterize(self.shape)] = region.kpl_s_inv
+            result[region.rasterize(self.simulation_shape, coordinates)] = (
+                region.kpl_s_inv
+            )
         return result
 
     def build(self):
@@ -568,7 +641,8 @@ class PhantomDesign:
             raise ValueError("cannot mix ppm and legacy Hz B0 shape definitions")
         if uses_legacy_b0 and self.b0_inhomogeneity_mode != "none":
             raise ValueError("cannot add a ppm B0 inhomogeneity to legacy Hz B0 data")
-        b0_map = np.zeros(self.shape, dtype=float)
+        grid = self.simulation_shape
+        b0_map = np.zeros(grid, dtype=float)
         for item in self.shapes:
             region = self.rasterize_mask(item)
             b0_value = item.b0_hz if uses_legacy_b0 else item.b0_ppm
@@ -579,6 +653,8 @@ class PhantomDesign:
                 # blending partially occupied boundary voxels by volume.
                 b0_map = b0_map * (1.0 - region) + float(b0_value) * region
             for peak in item.peaks:
+                if not self.includes_peak(peak):
+                    continue
                 component_name = f"{item.name}: {peak.name}"
                 species.append(
                     ChemicalSpecies(
@@ -609,15 +685,17 @@ class PhantomDesign:
             additional_names = []
             for item in self.shapes:
                 for peak in item.peaks:
+                    # Pyruvate and lactate stay: the kinetics need both pools.
                     if (
                         peak.name not in kinetic_names
                         and peak.name not in additional_names
+                        and self.includes_peak(peak)
                     ):
                         additional_names.append(peak.name)
             target_names = kinetic_names + tuple(additional_names)
-            maps = {name: np.zeros(self.shape, dtype=float) for name in target_names}
+            maps = {name: np.zeros(grid, dtype=float) for name in target_names}
             spin_density_maps = {
-                name: np.zeros(self.shape, dtype=float) for name in target_names
+                name: np.zeros(grid, dtype=float) for name in target_names
             }
             definitions = {name: [] for name in target_names}
             for item in self.shapes:
@@ -661,13 +739,13 @@ class PhantomDesign:
                         t2_star=first_peak.t2_star_s,
                     )
                 )
-            delivery_map = np.zeros(self.shape, dtype=float)
+            delivery_map = np.zeros(grid, dtype=float)
             for item in self.shapes:
                 if any(peak.name == self.pyruvate_peak_name for peak in item.peaks):
                     delivery_map += self.rasterize_mask(item).astype(float)
             return DynamicSpectralPhantom(
-                shape=tuple(int(value) for value in self.shape),
-                fov=tuple(float(value) for value in self.fov_m),
+                shape=grid,
+                fov=self.simulated_fov_m,
                 pools=tuple(pools),
                 initial_concentration_maps=maps,
                 initial_spin_density_maps=spin_density_maps,
@@ -698,7 +776,7 @@ class PhantomDesign:
                     if self.dynamic_b0_curve is None
                     else DynamicB0(
                         offset_curve_hz=self.dynamic_b0_curve,
-                        spatial_scale_map=np.ones(self.shape, dtype=float),
+                        spatial_scale_map=np.ones(grid, dtype=float),
                     )
                 ),
                 metadata={
@@ -707,9 +785,11 @@ class PhantomDesign:
                     "isotope_enrichment": self.isotope_enrichment,
                 },
             )
+        if not species:
+            raise ValueError("no peak lies inside the simulated ppm range")
         return SpectralPhantom(
-            shape=tuple(int(value) for value in self.shape),
-            fov=tuple(float(value) for value in self.fov_m),
+            shape=grid,
+            fov=self.simulated_fov_m,
             species=species,
             concentration_maps=concentration_maps,
             initial_mz_maps=initial_mz_maps,
@@ -889,6 +969,20 @@ class PhantomDesign:
                 None
                 if data.get("dynamic_b0_curve") is None
                 else TimeCurve.from_dict(data["dynamic_b0_curve"])
+            ),
+            simulation_fov_m=(
+                None
+                if data.get("simulation_fov_m") is None
+                else tuple(float(value) for value in data["simulation_fov_m"])
+            ),
+            simulation_offset_m=tuple(
+                float(value)
+                for value in data.get("simulation_offset_m", (0.0, 0.0, 0.0))
+            ),
+            simulation_ppm_range=(
+                None
+                if data.get("simulation_ppm_range") is None
+                else tuple(float(value) for value in data["simulation_ppm_range"])
             ),
         )
 

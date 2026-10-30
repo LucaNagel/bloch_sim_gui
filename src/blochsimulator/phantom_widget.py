@@ -128,6 +128,7 @@ class PhantomCreatorWidget(QGroupBox):
         self.current_phantom = None
         # Name of the automatic default sphere shown while nothing is chosen.
         self.default_preview_name = None
+        self.default_preview_phantom = None
         # Spectral designer dialogs contain nested PyQtGraph scenes and signal
         # cycles. Letting the last Python reference disappear after exec_() can
         # defer their destruction until an unrelated GC pass, which is unsafe
@@ -443,10 +444,6 @@ class PhantomCreatorWidget(QGroupBox):
             if sequence_widget is None
             else sequence_widget.sequence_reference_ppm.value()
         )
-        if design is None and self.current_phantom is None:
-            # The sequence already simulates the default sphere; start the
-            # designer from that object so it can be edited like any other.
-            design = self._default_sequence_design(sequence_widget)
         dialog = SpectralPhantomDesignerDialog(
             self,
             design=design,
@@ -542,8 +539,27 @@ class PhantomCreatorWidget(QGroupBox):
         self._set_field_strength(defaults.field_strength_t)
         self.set_nucleus(defaults.phantom_nucleus)
 
+    def _default_preview_design(self):
+        """Design of the sequence's default sphere while no phantom is chosen."""
+        if self.current_phantom is not None:
+            return None
+        sequence_widget = getattr(self.window(), "sequence_simulation_widget", None)
+        design = self._default_sequence_design(sequence_widget)
+        if design is None and self.default_preview_phantom is not None:
+            try:
+                design = PhantomDesign.from_phantom(self.default_preview_phantom)
+            except ValueError:
+                design = None
+        return design
+
     def edit_current_phantom(self):
         """Reopen editable in-memory shape metadata without requiring a save."""
+        if self.current_phantom is None:
+            # The default sphere the sequence simulates counts as loaded.
+            design = self._default_preview_design()
+            if design is not None:
+                self._open_spectral_designer(design=design)
+            return
         if isinstance(self.current_phantom, MousePerfusionPhantom):
             self._open_mouse_designer(
                 config=MousePerfusionConfig.from_dict(
@@ -581,6 +597,12 @@ class PhantomCreatorWidget(QGroupBox):
                 editable = True
             except ValueError:
                 pass
+        elif self.default_preview_phantom is not None:
+            try:
+                PhantomDesign.from_phantom(self.default_preview_phantom)
+                editable = True
+            except ValueError:
+                pass
         self.edit_btn.setVisible(
             editable and self.type_combo.currentText() == expected_type
         )
@@ -588,31 +610,39 @@ class PhantomCreatorWidget(QGroupBox):
 
     def _empty_hint(self) -> str:
         action_text = self.create_btn.text()
-        if self.default_preview_name:
-            return (
-                f"Showing the sequence default: {self.default_preview_name}. "
-                f"Click '{action_text}' to edit or replace it."
-            )
         return f"Click '{action_text}' to begin"
 
-    def show_default_preview(self, name: Optional[str]) -> None:
-        """Describe the automatic default phantom while none is chosen."""
+    def show_default_preview(
+        self, name: Optional[str], phantom: Optional[Phantom] = None
+    ) -> None:
+        """Treat the sequence's automatic default as the loaded phantom."""
         self.default_preview_name = name
+        self.default_preview_phantom = phantom
         if self.current_phantom is None:
-            self.info_label.setText(self._empty_hint())
+            self._update_info()
+            self._update_edit_button()
 
     def _update_info(self):
         """Update info label with phantom details."""
-        if self.current_phantom:
-            p = self.current_phantom
+        p = self.current_phantom
+        if p is None and self.default_preview_phantom is not None:
+            p = self.default_preview_phantom
+        if p is not None:
             t1_active = p.t1_map[p.mask]
             t2_active = p.t2_map[p.mask]
+            default_note = ""
+            if self.current_phantom is None:
+                default_note = (
+                    "<br><i>Sequence default. 'Edit Current...' changes it, "
+                    "'Create New...' starts a new phantom.</i>"
+                )
             self.info_label.setText(
                 f"<b>{p.name}</b><br>"
                 f"Shape: {p.shape}<br>"
                 f"Active voxels: {p.n_active} / {p.nvoxels}<br>"
                 f"T1: {t1_active.min()*1000:.0f} - {t1_active.max()*1000:.0f} ms<br>"
                 f"T2: {t2_active.min()*1000:.0f} - {t2_active.max()*1000:.0f} ms"
+                f"{default_note}"
             )
             self.info_label.setStyleSheet(
                 "color: #006400; padding: 5px; background: #f0fff0; border-radius: 3px;"
@@ -1243,7 +1273,7 @@ class PhantomWidget(QWidget):
             return
         if self.viewer.phantom is not phantom:
             self.viewer.set_phantom(phantom)
-        self.phantom_creator.show_default_preview(phantom.name)
+        self.phantom_creator.show_default_preview(phantom.name, phantom)
 
     def _on_phantom_created(self, phantom: Phantom):
         """Handle new phantom creation."""

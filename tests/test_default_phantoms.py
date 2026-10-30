@@ -17,7 +17,7 @@ def test_every_nucleus_has_a_default_compound():
 
 
 @pytest.mark.parametrize("nucleus", sorted(NUCLEUS_GAMMA_HZ_PER_T))
-def test_default_sphere_is_on_resonance_at_the_sequence_reference(nucleus):
+def test_default_sphere_sits_at_its_compound_shift(nucleus):
     reference_ppm = 171.0 if nucleus == "C13" else 0.0
     phantom = build_default_phantom(
         nucleus,
@@ -30,7 +30,13 @@ def test_default_sphere_is_on_resonance_at_the_sequence_reference(nucleus):
     assert is_default_phantom(phantom)
     assert phantom.nucleus == nucleus
     assert phantom.spectral_reference_ppm == pytest.approx(reference_ppm)
-    assert [species.chemical_shift_ppm for species in phantom.species] == [0.0]
+    # A compound with a known shift (C13 pyruvate, 171.076 ppm) sits there;
+    # the others are on resonance at the sequence reference.
+    shift_ppm = DEFAULT_COMPOUNDS[nucleus].chemical_shift_ppm
+    expected = 0.0 if shift_ppm is None else shift_ppm - reference_ppm
+    assert [species.chemical_shift_ppm for species in phantom.species] == (
+        pytest.approx([expected])
+    )
     assert phantom.shape == (32, 32, 32)
     assert phantom.fov == pytest.approx((0.1, 0.1, 0.1))
     # A centred sphere with 60 % diameter fills about π/6 · 0.6³ of the cube;

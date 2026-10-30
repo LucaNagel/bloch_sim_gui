@@ -28,6 +28,8 @@ from blochsimulator.ui.sequence_geometry_viewer import (
     phantom_grid_box,
     projected_outline_mm,
     sequence_geometry_from_definitions,
+    sequence_overhang_m,
+    sequence_overhang_note,
     SILHOUETTE_COLOR,
 )
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
@@ -712,3 +714,50 @@ def test_uniform_sphere_with_soft_edges_shows_uniform_sections():
     xy_outside = outside[0][0]
     shown = xy_outside[xy_outside[..., 3] > 0]
     assert shown.size and np.all(shown[:, :3] == SILHOUETTE_COLOR)
+
+
+def test_sequence_overhang_reports_axes_beyond_the_simulated_grid():
+    geometry = SequenceGeometry(
+        np.eye(3), (0.04, 0.02), (16, 16), (-0.004, 0.004), 0.002
+    )
+    grid = OrientedBox((0.0, 0.0, 0.0), (0.032, 0.03, 0.01))
+
+    # x: 20 mm half FOV vs 16 mm; z: the slices end exactly at ±5 mm.
+    overhang = sequence_overhang_m(geometry, grid)
+    assert overhang == pytest.approx([0.004, 0.0, 0.0])
+    note = sequence_overhang_note(overhang)
+    assert note.startswith(
+        "The sequence FOV reaches beyond the simulated phantom FOV along x (4 mm)."
+    )
+    assert sequence_overhang_note(sequence_overhang_m(None, grid)) is None
+
+    phantom = Phantom(
+        shape=(8, 8, 2),
+        fov=(0.032, 0.03, 0.01),
+        t1_map=np.ones((8, 8, 2)),
+        t2_map=np.ones((8, 8, 2)),
+        pd_map=np.ones((8, 8, 2)),
+    )
+    notes = coverage_notes(phantom, geometry, phantom_grid_box(phantom))
+    assert any(note.startswith("The sequence FOV reaches beyond") for note in notes)
+
+
+def test_cropped_designer_phantom_reports_its_whole_object():
+    phantom = Phantom(
+        shape=(4, 4, 2),
+        fov=(0.02, 0.02, 0.01),
+        t1_map=np.ones((4, 4, 2)),
+        t2_map=np.ones((4, 4, 2)),
+        pd_map=np.ones((4, 4, 2)),
+    )
+    assert configured_object_box(phantom) is None
+    phantom.metadata = {
+        "phantom_design": {
+            "fov_m": [0.02, 0.02, 0.1],
+            "simulation_fov_m": [0.02, 0.02, 0.01],
+            "simulation_offset_m": [0.0, 0.0, 0.03],
+        }
+    }
+    box = configured_object_box(phantom)
+    assert box.center_m == pytest.approx((0.0, 0.0, 0.03))
+    assert box.size_m == pytest.approx((0.02, 0.02, 0.1))

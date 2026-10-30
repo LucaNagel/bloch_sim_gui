@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from blochsimulator.default_phantoms import default_compound
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.magnetization_viewer import MagnetizationViewer
 from blochsimulator.ui.sequence_simulation_widget import (
@@ -4121,11 +4122,28 @@ def test_phantom_designer_starts_from_default_sphere(qt_application):
     phantom_widget = window.phantom_widget.phantom_creator
     assert phantom_widget.current_phantom is None
 
-    phantom_widget._open_spectral_designer()
+    # The default sphere counts as loaded: it is edited, not recreated.
+    assert not phantom_widget.edit_btn.isHidden()
+    assert phantom_widget.edit_btn.isEnabled()
+    phantom_widget.edit_current_phantom()
     dialog = phantom_widget._retained_spectral_designer_dialogs[-1]
     try:
         assert dialog.design.shapes
         assert dialog.design.nucleus == phantom_widget.get_nucleus()
+        compound = default_compound(dialog.design.nucleus)
+        positions = [
+            dialog.design.spectral_reference_ppm + peak.frequency_ppm
+            for peak in dialog.design.shapes[0].peaks
+        ]
+        assert positions == pytest.approx([compound.chemical_shift_ppm])
+    finally:
+        dialog.reject()
+
+    # Create New starts from an empty design instead of the default sphere.
+    phantom_widget._open_spectral_designer()
+    dialog = phantom_widget._retained_spectral_designer_dialogs[-1]
+    try:
+        assert not dialog.design.name.startswith("Default sphere")
     finally:
         dialog.reject()
 
