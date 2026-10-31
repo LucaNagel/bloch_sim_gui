@@ -276,6 +276,78 @@ def test_workspace_reapplies_noise_without_running_bloch_again():
     widget.close()
 
 
+def test_calibrated_noise_rescales_a_relative_result_instead_of_rerunning():
+    obj, program = _inputs()
+    widget = SequenceSimulationWidget()
+    widget.program, widget.phantom = program, obj
+    simulated = widget.simulator.simulate_sequence(program, obj)
+    context = receiver_acquisition_metadata(
+        program,
+        nucleus=widget.nucleus.currentText(),
+        field_strength_t=widget.field_strength_t.value(),
+        phantom=obj,
+        signal_weighting="voxel",
+    )
+    clean = replace(
+        simulated, metadata={**simulated.metadata, "receiver_acquisition": context}
+    )
+    widget._finished(clean, record_run=False)
+    panel = widget.receiver_noise
+    _fill_urea_calibration(panel)
+    widget._capture_noise_calibration()
+    shown = []
+    with patch(
+        "blochsimulator.ui.sequence_simulation_widget.QMessageBox.exec_",
+        lambda dialog: shown.append(dialog.text()),
+    ):
+        with patch.object(widget.simulator, "simulate_sequence") as simulate:
+            panel.apply_button.click()
+        simulate.assert_not_called()
+        assert shown == []
+        assert widget.result.metadata["signal_weighting"] == "voxel_volume"
+        np.testing.assert_allclose(
+            widget.result.signal_noiseless, clean.signal * obj.voxel_volume_m3
+        )
+        assert widget.result.metadata["receiver_noise"]["mode"] == "calibrated"
+        assert "rescaled by the voxel volume" in widget.status.text()
+        # Runs from before the voxel volume was recorded still need a rerun.
+        metadata = dict(clean.metadata)
+        del metadata["phantom_voxel_volume_m3"]
+        widget._finished(replace(clean, metadata=metadata), record_run=False)
+        with patch.object(widget, "_run") as run:
+            panel.apply_button.click()
+        run.assert_not_called()
+    assert len(shown) == 1 and "cannot be converted" in shown[0]
+    widget.close()
+
+
+def test_physical_weighting_is_the_default_for_3d_phantoms():
+    widget = SequenceSimulationWidget()
+    assert widget.signal_weighting.currentIndex() == 1
+    volume = _inputs()[0]
+    plane = Phantom((2, 2), (0.02, 0.02), np.ones((2, 2)), np.ones((2, 2)))
+    assert widget._signal_weighting_mode(volume) == "voxel_volume"
+    # 2D phantoms have no voxel volume and keep the relative sum.
+    assert widget._signal_weighting_mode(plane) == "voxel"
+    widget.signal_weighting.setCurrentIndex(0)
+    assert widget._signal_weighting_mode(volume) == "voxel"
+    # Projects saved with the old labels restore the same choice.
+    from blochsimulator.ui.widget_state import restore_widget_state
+
+    restore_widget_state(
+        widget,
+        {
+            "signal_weighting": {
+                "type": "combo",
+                "index": 1,
+                "text": "Physical voxel volume (3D)",
+            }
+        },
+    )
+    assert widget.signal_weighting.currentIndex() == 1
+    widget.close()
+
+
 def test_workspace_calibration_forces_volume_weighting_and_survives_project(tmp_path):
     window = BlochSimulatorGUI()
     window.set_workspace_mode("sequence")

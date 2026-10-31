@@ -23,6 +23,7 @@ from blochsimulator.sequence import (
     SequenceSimulationResult,
     apply_receiver_noise,
     receiver_acquisition_metadata,
+    with_voxel_volume_weighting,
 )
 from blochsimulator.sequence.receiver import ideal_fid_amplitude
 from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
@@ -493,6 +494,55 @@ def test_noise_propagates_through_kspace_and_image_reconstruction():
     assert np.sum(np.abs(difference) ** 2) == pytest.approx(
         np.sum(np.abs(measured.signal - clean.signal) ** 2)
     )
+
+
+def test_relative_voxel_sum_rescales_exactly_to_physical_voxel_volume():
+    shape = (2, 2, 2)
+    species = [
+        ChemicalSpecies("a", 0, 1e12, 1e12),
+        ChemicalSpecies("b", 30, 1e12, 1e12),
+    ]
+    spectral = SpectralPhantom(
+        shape=shape,
+        fov=(0.02, 0.03, 0.01),
+        species=species,
+        concentration_maps={"a": np.full(shape, 0.3), "b": np.full(shape, 0.7)},
+    )
+    static = phantom(fov=(0.02, 0.03, 0.01))
+    simulator = BlochSimulator(use_parallel=False)
+    calibrated = ReceiverNoise("calibrated", seed=5, calibration=calibration())
+    for obj, simulate in (
+        (static, simulator.simulate_sequence),
+        (spectral, simulator.simulate_spectral_sequence),
+    ):
+        relative, physical = (
+            with_context(simulate(fid_program(), obj, signal_weighting=w), obj=obj)
+            for w in ("voxel", "voxel_volume")
+        )
+        with pytest.raises(ValueError, match="physical units"):
+            apply_receiver_noise(relative, calibrated)
+        rescaled = with_voxel_volume_weighting(relative)
+        np.testing.assert_allclose(rescaled.signal, physical.signal, rtol=1e-12)
+        if physical.species_signal is not None:
+            np.testing.assert_allclose(
+                rescaled.species_signal, physical.species_signal, rtol=1e-12
+            )
+        assert rescaled.metadata["voxel_volume_m3"] == obj.voxel_volume_m3
+        assert rescaled.metadata["receiver_acquisition"][
+            "ideal_fid_amplitude"
+        ] == pytest.approx(
+            physical.metadata["receiver_acquisition"]["ideal_fid_amplitude"]
+        )
+        np.testing.assert_allclose(
+            apply_receiver_noise(rescaled, calibrated).signal,
+            apply_receiver_noise(physical, calibrated).signal,
+            rtol=1e-12,
+        )
+        assert with_voxel_volume_weighting(physical) is physical
+    flat = simulator.simulate_sequence(
+        fid_program(), phantom(shape=(2, 2), fov=(0.02, 0.02)), signal_weighting="voxel"
+    )
+    assert with_voxel_volume_weighting(flat) is None
 
 
 def test_spectral_partitioning_does_not_multiply_noise():

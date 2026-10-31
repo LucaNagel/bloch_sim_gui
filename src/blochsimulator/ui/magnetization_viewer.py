@@ -1,4 +1,5 @@
 from PyQt5.QtWidgets import (
+    QToolButton,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -207,11 +208,14 @@ class MagnetizationViewer(QWidget):
         self.preview_plot.setLabel("bottom", "Time", "ms")
         self.preview_plot.enableAutoRange(x=False, y=False)
         self.preview_plot.setMaximumHeight(180)
+        # Keep the trace readable when the live RF/gradient traces join it.
+        self.preview_plot.setMinimumHeight(110)
         self.preview_mx = self.preview_plot.plot(pen="r")
         self.preview_my = self.preview_plot.plot(pen="g")
         self.preview_mz = self.preview_plot.plot(pen="b")
         self.preview_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("y"))
         self.preview_plot.addItem(self.preview_line)
+        self._init_live_field_plots(layout)
         layout.addWidget(self.preview_plot, stretch=1)
 
         # Time slider for scrubbing animation
@@ -240,13 +244,15 @@ class MagnetizationViewer(QWidget):
         controls_v.setContentsMargins(0, 0, 0, 0)
         view_layout = QHBoxLayout()
         self.view_layout = view_layout
-        view_layout.addWidget(QLabel("View mode:"))
+        self.view_mode_label = QLabel("View mode:")
+        view_layout.addWidget(self.view_mode_label)
         self.view_mode_combo = QComboBox()
         self.view_mode_combo.setObjectName("mag_3d_view_mode")
         self.view_mode_combo.addItems(
             ["All positions x freqs", "Positions @ freq", "Freqs @ position"]
         )
         self.view_mode_combo.currentTextChanged.connect(self._on_view_mode_changed)
+        self.view_mode_label.setBuddy(self.view_mode_combo)
         view_layout.addWidget(self.view_mode_combo)
         self.selector_label = QLabel("All spins")
         view_layout.addWidget(self.selector_label)
@@ -255,8 +261,34 @@ class MagnetizationViewer(QWidget):
         self.selector_slider.setRange(0, 0)
         self.selector_slider.valueChanged.connect(self._on_selector_changed)
         view_layout.addWidget(self.selector_slider, 1)
-        view_layout.addWidget(QLabel("Color palette:"))
+        # The arrangement combo joins this row in _init_spatial_controls.
+        self.plot_options_button = QToolButton()
+        self.plot_options_button.setObjectName("mag_3d_plot_options")
+        self.plot_options_button.setText("Plot options")
+        self.plot_options_button.setCheckable(True)
+        self.plot_options_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.plot_options_button.setArrowType(Qt.RightArrow)
+        self.plot_options_button.setAutoRaise(True)
+        self.plot_options_button.setToolTip(
+            "Show the display options: palette, tip path, mean vector, and for "
+            "spins along their positions the vector length, markers and camera."
+        )
+        self.plot_options_button.toggled.connect(self._toggle_plot_options)
+        controls_v.addLayout(view_layout)
+
+        # Display options, collapsed by default to keep the view uncluttered.
+        self.plot_options_panel = QWidget()
+        self.plot_options_panel.setObjectName("mag_3d_plot_options_panel")
+        options_v = QVBoxLayout(self.plot_options_panel)
+        options_v.setContentsMargins(0, 0, 0, 0)
+        options_v.setSpacing(2)
+        display_layout = QHBoxLayout()
+        self.display_layout = display_layout
+        options_v.addLayout(display_layout)
+        palette_label = QLabel("Color palette:")
+        display_layout.addWidget(palette_label)
         self.vector_palette_combo = QComboBox()
+        palette_label.setBuddy(self.vector_palette_combo)
         self.vector_palette_combo.setObjectName("mag_3d_vector_palette")
         self.vector_palette_combo.addItems(
             ["Rainbow", "White", "Gray"]
@@ -273,8 +305,7 @@ class MagnetizationViewer(QWidget):
         self.vector_palette_combo.currentTextChanged.connect(
             lambda _: self.view_filter_changed.emit()
         )
-        view_layout.addWidget(self.vector_palette_combo)
-        controls_v.addLayout(view_layout)
+        display_layout.addWidget(self.vector_palette_combo)
 
         # Initialize tracking state and path storage BEFORE checkbox initialization
         self.length_scale = 1.0  # Reference magnitude used to normalize vectors in view
@@ -299,7 +330,7 @@ class MagnetizationViewer(QWidget):
         self.track_checkbox.toggled.connect(self._toggle_track_path)
         # Sync internal flag to the initial checkbox state
         self._toggle_track_path(self.track_checkbox.isChecked())
-        view_layout.addWidget(self.track_checkbox)
+        display_layout.addWidget(self.track_checkbox)
         self.spin_display_combo = QComboBox()
         self.spin_display_combo.setObjectName("mag_3d_spin_display_mode")
         self.spin_display_combo.addItems(
@@ -311,9 +342,12 @@ class MagnetizationViewer(QWidget):
         self.spin_display_combo.currentTextChanged.connect(
             self._on_spin_display_mode_changed
         )
-        view_layout.addWidget(self.spin_display_combo)
+        display_layout.addWidget(self.spin_display_combo)
+        display_layout.addStretch()
 
-        self._init_spatial_controls(controls_v)
+        self._init_spatial_controls(options_v, controls_v)
+        controls_v.insertWidget(1, self.plot_options_panel)
+        self.plot_options_panel.setVisible(False)
 
         control_container.setLayout(controls_v)
         self.control_container = control_container
@@ -327,21 +361,59 @@ class MagnetizationViewer(QWidget):
         self._npos = 1
         self._nfreq = 1
         self._update_selector_range()
+        self._update_view_row_visibility()
 
         self.setLayout(layout)
         self.show_equilibrium_magnetization()
 
-    def _init_spatial_controls(self, parent_layout):
-        """Create the controls for arranging spins along their positions."""
-        self.spatial_controls = QWidget()
-        rows = QVBoxLayout(self.spatial_controls)
-        rows.setContentsMargins(0, 0, 0, 0)
-        rows.setSpacing(2)
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        rows.addLayout(row)
-        row.addWidget(QLabel("Arrangement:"))
+    def _init_live_field_plots(self, layout):
+        """RF and gradient traces above the signal trace, shown in live mode."""
+        self.live_fields_widget = QWidget()
+        fields = QVBoxLayout(self.live_fields_widget)
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.setSpacing(0)
+        self.live_b1_plot = pg.PlotWidget()
+        self.live_b1_plot.setLabel("left", "B1", "µT")
+        self.live_gradient_plot = pg.PlotWidget()
+        self.live_gradient_plot.setLabel("left", "G", "mT/m")
+        b1_pen = pg.mkColor(*(int(255 * c) for c in self.B1_COLOR[:3]))
+        self.live_b1x_curve = self.live_b1_plot.plot(pen=pg.mkPen(b1_pen, width=2))
+        self.live_b1y_curve = self.live_b1_plot.plot(
+            pen=pg.mkPen(b1_pen, width=2, style=Qt.DashLine)
+        )
+        self.live_gradient_curves = [
+            self.live_gradient_plot.plot(pen=pg.mkPen(color, width=2))
+            for color in ("r", "g", "b")
+        ]
+        for plot in (self.live_b1_plot, self.live_gradient_plot):
+            plot.setFixedHeight(64)
+            plot.hideAxis("bottom")
+            plot.setMouseEnabled(x=False, y=False)
+            plot.hideButtons()
+            plot.getAxis("left").setWidth(48)
+            plot.setXLink(self.preview_plot)
+            fields.addWidget(plot)
+        self.live_b1_plot.setToolTip(
+            "RF field of the live pulses: solid B1x, dashed B1y (rotating frame)."
+        )
+        self.live_gradient_plot.setToolTip("Live gradients: Gx red, Gy green, Gz blue.")
+        self.preview_plot.getAxis("left").setWidth(48)
+        self.live_fields_widget.setVisible(False)
+        layout.addWidget(self.live_fields_widget)
+
+    def _init_spatial_controls(self, options_layout, controls_layout):
+        """Create the controls for arranging spins along their positions.
+
+        The arrangement sits in the view row, its options in the plot options
+        panel and the volume slice below them, always in reach.
+        """
+        self.arrangement_box = QWidget()
+        arrangement_row = QHBoxLayout(self.arrangement_box)
+        arrangement_row.setContentsMargins(0, 0, 0, 0)
+        arrangement_label = QLabel("Arrangement:")
+        arrangement_row.addWidget(arrangement_label)
         self.arrangement_combo = QComboBox()
+        arrangement_label.setBuddy(self.arrangement_combo)
         self.arrangement_combo.setObjectName("mag_3d_arrangement")
         self.arrangement_combo.addItems(
             [self.ARRANGEMENT_OVERLAID, self.ARRANGEMENT_ALONG_POSITION]
@@ -353,13 +425,27 @@ class MagnetizationViewer(QWidget):
         self.arrangement_combo.currentTextChanged.connect(
             lambda _: self.view_filter_changed.emit()
         )
-        row.addWidget(self.arrangement_combo)
+        arrangement_row.addWidget(self.arrangement_combo)
+        # Takes the free space only while the selector slider is hidden.
+        self.view_layout.addStretch(0)
+        self.view_layout.addWidget(self.arrangement_box)
+        self.view_layout.addWidget(self.plot_options_button)
+        self.arrangement_box.setVisible(False)
+
+        self.spatial_controls = QWidget()
+        rows = QVBoxLayout(self.spatial_controls)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(2)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        rows.addLayout(row)
 
         # Options that only apply to the "Along position" arrangement.
         self.spatial_option_widgets = []
         max_label = QLabel("Max positions:")
         self.max_positions_label = max_label
         self.max_positions_spin = QSpinBox()
+        max_label.setBuddy(self.max_positions_spin)
         self.max_positions_spin.setObjectName("mag_3d_max_positions")
         self.max_positions_spin.setRange(2, 256)
         self.max_positions_spin.setValue(16)
@@ -372,6 +458,7 @@ class MagnetizationViewer(QWidget):
         )
         length_label = QLabel("Vector length:")
         self.vector_length_spin = QDoubleSpinBox()
+        length_label.setBuddy(self.vector_length_spin)
         self.vector_length_spin.setObjectName("mag_3d_vector_length")
         self.vector_length_spin.setRange(0.25, 5.0)
         self.vector_length_spin.setSingleStep(0.1)
@@ -389,6 +476,7 @@ class MagnetizationViewer(QWidget):
         )
         color_label = QLabel("Color by:")
         self.color_by_combo = QComboBox()
+        color_label.setBuddy(self.color_by_combo)
         self.color_by_combo.setObjectName("mag_3d_color_by")
         self.color_by_combo.addItems(["Position", "Phase"])
         self.color_by_combo.setToolTip(
@@ -492,8 +580,10 @@ class MagnetizationViewer(QWidget):
         self.spatial_slice_row = QWidget()
         slice_row = QHBoxLayout(self.spatial_slice_row)
         slice_row.setContentsMargins(0, 0, 0, 0)
-        slice_row.addWidget(QLabel("Slice:"))
+        slice_label = QLabel("Slice:")
+        slice_row.addWidget(slice_label)
         self.slice_axis_combo = QComboBox()
+        slice_label.setBuddy(self.slice_axis_combo)
         self.slice_axis_combo.setObjectName("mag_3d_slice_axis")
         self.slice_axis_combo.addItems([self.SLICE_ALL, *AXIS_NAMES])
         self.slice_axis_combo.setToolTip(
@@ -522,10 +612,10 @@ class MagnetizationViewer(QWidget):
             lambda _: self._redraw_spatial_frame()
         )
         slice_row.addWidget(self.hide_other_slices_checkbox)
-        rows.addWidget(self.spatial_slice_row)
+        controls_layout.addWidget(self.spatial_slice_row)
         self._update_slice_controls()
 
-        parent_layout.addWidget(self.spatial_controls)
+        options_layout.addWidget(self.spatial_controls)
         self.spatial_controls.setVisible(False)
         self.arrangement_combo.currentTextChanged.connect(
             lambda _: self._update_spatial_option_visibility()
@@ -542,10 +632,26 @@ class MagnetizationViewer(QWidget):
             and self._scene_kind() == "volume"
         )
 
+    def _toggle_plot_options(self, shown: bool):
+        self.plot_options_panel.setVisible(shown)
+        self.plot_options_button.setArrowType(Qt.DownArrow if shown else Qt.RightArrow)
+
+    def _update_view_row_visibility(self):
+        """Hide selectors with nothing to choose instead of greying them out."""
+        several = self._npos * self._nfreq > 1 and self.view_mode_combo.isEnabled()
+        self.view_mode_label.setVisible(several)
+        self.view_mode_combo.setVisible(several)
+        self.selector_label.setVisible(several)
+        # Live mode and positions set up before a run need it without data.
+        self.arrangement_box.setVisible(
+            bool(getattr(self, "_spatial_available", False))
+        )
+
     def set_spatial_layout_available(self, available: bool):
         """Show the arrangement controls for viewers that can provide positions."""
         self._spatial_available = bool(available)
         self.spatial_controls.setVisible(self._spatial_available)
+        self._update_view_row_visibility()
         if not self._spatial_available:
             self.set_spatial_groups(None)
 
@@ -1658,12 +1764,39 @@ class MagnetizationViewer(QWidget):
             curve.clear()
         self.preview_plot.setLimits(xMin=None, xMax=None, yMin=-1.1, yMax=1.1)
         self.preview_plot.setYRange(-1.1, 1.1, padding=0)
+        self.set_live_fields(None, 0.0)
+        self.live_fields_widget.setVisible(True)
+
+    def set_live_fields(self, history, time_ms: float):
+        """Draw the live RF and gradient history up to ``time_ms``.
+
+        ``history`` holds rows (time ms, B1x µT, B1y µT, Gx, Gy, Gz mT/m);
+        each field holds until the next row.
+        """
+        rows = np.asarray(history if history is not None else [], dtype=float)
+        curves = [self.live_b1x_curve, self.live_b1y_curve, *self.live_gradient_curves]
+        if rows.ndim != 2 or len(rows) == 0:
+            for curve in curves:
+                curve.clear()
+            return
+        starts = rows[:, 0]
+        ends = np.append(starts[1:], max(float(time_ms), starts[-1]))
+        x = np.column_stack([starts, ends]).ravel()
+        values = np.repeat(rows[:, 1:], 2, axis=0)
+        for column, curve in enumerate(curves):
+            curve.setData(x, values[:, column])
+        for plot, block in (
+            (self.live_b1_plot, values[:, :2]),
+            (self.live_gradient_plot, values[:, 2:]),
+        ):
+            peak = float(np.max(np.abs(block))) if block.size else 0.0
+            peak = peak * 1.15 if peak > 0.0 else 1.0
+            plot.setYRange(-peak, peak, padding=0)
 
     def add_live_trace_point(self, time_ms: float, vector, window_ms: float):
         """Append the mean magnetization at ``time_ms`` and scroll the trace.
 
-        A reset (time running backwards) starts a new trace. Hard pulses do
-        not advance time, so they appear as vertical steps.
+        A reset (time running backwards) starts a new trace.
         """
         trace = getattr(self, "_live_trace", None)
         if trace is None:
@@ -1690,6 +1823,8 @@ class MagnetizationViewer(QWidget):
         """Stop the live trace; the caller restores the run preview."""
         self._live_trace = None
         self.preview_line.setVisible(True)
+        self.live_fields_widget.setVisible(False)
+        self.set_live_fields(None, 0.0)
         for curve in (self.preview_mx, self.preview_my, self.preview_mz):
             curve.clear()
 
@@ -1777,8 +1912,8 @@ class MagnetizationViewer(QWidget):
         enabled = not disable
         self.view_mode_combo.setEnabled(enabled)
         self.selector_slider.setEnabled(enabled)
-        self.arrangement_combo.setEnabled(self._npos > 1)
         self._update_selector_range()
+        self._update_view_row_visibility()
 
     def get_view_mode(self) -> str:
         """Return the current 3D view mode selection."""

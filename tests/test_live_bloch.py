@@ -124,3 +124,62 @@ def test_sequence_matches_the_simulation_kernel():
     np.testing.assert_allclose(
         kernel.reshape(live.magnetization.shape), live.magnetization, atol=5e-3
     )
+
+
+def test_driven_pulse_matches_an_instantaneous_pulse_on_resonance():
+    system = _single_spin()
+    duration = 0.2e-3
+    system.drive(duration, 90.0 / 360.0 / duration, phase_deg=90.0, relax=False)
+    np.testing.assert_allclose(system.magnetization[0, 0], [1, 0, 0], atol=1e-12)
+    assert system.time_s == pytest.approx(duration)
+
+
+def test_driven_pulses_under_gradients_match_the_simulation_kernel():
+    dt = 1e-6
+    duration = 0.2e-3
+    steps = [
+        ("pulse", 90.0, 0.0, [0.0, 0.0, 4.0]),
+        ("gradient", [2.0, 0.0, 1.0], 1e-3),
+        ("pulse", 180.0, 90.0, [1.0, -2.0, 0.0]),
+        ("gradient", [0.0, -3.0, 2.0], 0.4e-3),
+    ]
+    positions = np.array([[4e-3, -2e-3, 3e-3], [-5e-3, 1e-3, 0.0], [0.0, 0.0, 0.0]])
+    offsets = np.array([-400.0, 0.0, 250.0])
+    live = LiveSpinSystem(positions, offsets, KERNEL_GAMMA_HZ_PER_T, 0.5, 0.05)
+    segments = []
+    for step in steps:
+        if step[0] == "pulse":
+            _, flip, phase, gradient = step
+            # Several calls, as the live mode plays a pulse over many ticks.
+            for _ in range(4):
+                live.drive(
+                    duration / 4,
+                    flip / 360.0 / duration,
+                    phase,
+                    np.asarray(gradient) * 1e-3,
+                )
+            b1, _ = _hard_pulse(flip, phase, dt, duration=duration)
+            segments.append((b1, np.tile(np.asarray(gradient) * 0.1, (len(b1), 1))))
+        else:
+            _, gradient, length = step
+            live.evolve(length, np.asarray(gradient) * 1e-3)
+            segments.append(_gradient(gradient, length, dt))
+    b1 = np.concatenate([s[0] for s in segments])
+    gradients = np.concatenate([s[1] for s in segments])
+    time = np.arange(len(b1)) * dt
+    try:
+        result = BlochSimulator().simulate(
+            (b1, gradients, time),
+            TissueParameters(name="test", t1=0.5, t2=0.05),
+            positions=positions,
+            frequencies=offsets,
+            dt=dt,
+            mode=0,
+        )
+    except NotImplementedError:
+        pytest.skip("simulation kernel not built")
+    kernel = np.stack([np.asarray(result[k]) for k in ("mx", "my", "mz")], axis=-1)
+    # The kernel steps the fields in 1 µs; the live mode turns exactly.
+    np.testing.assert_allclose(
+        kernel.reshape(live.magnetization.shape), live.magnetization, atol=2e-3
+    )

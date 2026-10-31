@@ -420,6 +420,29 @@ class TissueParameters:
 
 # Default sequence chunking starts with about 1/64 of the active voxels.
 LEADING_CHUNK_DIVISOR = 64
+# Default sequence chunks hold at most 65,536 spins and, for long runs, about
+# this many spin-interval updates (a few seconds on a laptop), so progress is
+# reported regularly. Smaller chunks than MIN_PROGRESS_CHUNK_SPINS would leave
+# native threads idle.
+MAX_CHUNK_SPINS = 65536
+PROGRESS_CHUNK_UPDATES = 1_000_000_000
+MIN_PROGRESS_CHUNK_SPINS = 4096
+
+
+def default_sequence_chunk_voxels(n_active, spins_per_voxel, n_intervals):
+    """Return the default active-voxel chunk size of a native sequence run.
+
+    The size depends only on the problem, never on timing, so results stay
+    reproducible. Chunks of one run are balanced to nearly equal sizes.
+    """
+    n_active = max(1, int(n_active))
+    spins_per_voxel = max(1, int(spins_per_voxel))
+    memory_voxels = max(1, MAX_CHUNK_SPINS // spins_per_voxel)
+    work_voxels = PROGRESS_CHUNK_UPDATES // (max(1, int(n_intervals)) * spins_per_voxel)
+    floor_voxels = -(-MIN_PROGRESS_CHUNK_SPINS // spins_per_voxel)
+    chunk_voxels = min(n_active, memory_voxels, max(floor_voxels, work_voxels))
+    chunks = -(-n_active // chunk_voxels)
+    return -(-n_active // chunks)
 
 
 def sequence_chunk_bounds(n_active, chunk_voxels, *, leading_chunk=False):
@@ -2539,7 +2562,9 @@ class BlochSimulator:
 
         default_chunking = chunk_voxels is None
         if chunk_voxels is None:
-            chunk_voxels = min(n_active, max(1, 65536 // spins_per_voxel))
+            chunk_voxels = default_sequence_chunk_voxels(
+                n_active, spins_per_voxel, compiled.n_intervals
+            )
         if int(chunk_voxels) != chunk_voxels or chunk_voxels <= 0:
             raise ValueError("chunk_voxels must be a positive integer")
         chunk_voxels = min(int(chunk_voxels), n_active)
@@ -2901,6 +2926,10 @@ class BlochSimulator:
                     phantom.voxel_volume_m3
                     if signal_weighting == "voxel_volume"
                     else None
+                ),
+                # Lets a relative voxel sum be rescaled to physical units later.
+                "phantom_voxel_volume_m3": (
+                    phantom.voxel_volume_m3 if len(phantom.shape) == 3 else None
                 ),
                 "acquisition_dimensions": acquisition_dimensions.to_metadata(),
                 "spectroscopic_acquisition": spectroscopic_metadata,

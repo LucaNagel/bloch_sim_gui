@@ -19,7 +19,7 @@ from uuid import uuid4
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import QProcess, QRectF, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QKeySequence
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -154,6 +154,7 @@ from ..sequence.receiver import (
     apply_receiver_noise,
     ideal_fid_amplitude,
     receiver_acquisition_metadata,
+    with_voxel_volume_weighting,
 )
 from ..sequence.spin_sampling import phantom_voxel_basis_m
 from ..phantom_polarization import rebase_phantom_polarization
@@ -188,6 +189,11 @@ from .spectral_spatial_designer import (
     SpectralSpatialScheduleDialog,
 )
 from .magnetization_viewer import MagnetizationViewer
+from .run_progress import (
+    LoopProgressEstimator,
+    RunProgressEstimator,
+    format_duration as _format_duration,
+)
 from .spectral_target_table import SpectralTargetTable
 from .spin_minimum import ZeroToMinimum, minimum_ms_from_message, spin_boxes
 from .spoiling_analysis_view import SpoilingAnalysisSnapshot, SpoilingAnalysisView
@@ -227,6 +233,8 @@ from .volume_viewer import (
 )
 from .widgets import (
     IMAGE_CANVAS_BACKGROUND,
+    CollapsibleSection,
+    GroupedComboBox,
     compact_image_histogram,
     install_tab_bar_wheel_scroll,
     style_image_item,
@@ -244,21 +252,6 @@ _SPIN_GRID_METHOD_LABELS = {
 }
 
 
-def _format_duration(seconds):
-    """Format a short, stable duration for progress and completion messages."""
-    seconds = max(0.0, float(seconds))
-    if seconds < 1.0:
-        return "<1s"
-    total_seconds = int(math.ceil(seconds))
-    if total_seconds < 60:
-        return f"{total_seconds}s"
-    minutes, remaining_seconds = divmod(total_seconds, 60)
-    if minutes < 60:
-        return f"{minutes}m {remaining_seconds:02d}s"
-    hours, remaining_minutes = divmod(minutes, 60)
-    return f"{hours}h {remaining_minutes:02d}m"
-
-
 def _left_aligned_form(parent=None):
     """Create a form whose parameter names read from the left edge."""
     form = QFormLayout(parent)
@@ -267,6 +260,10 @@ def _left_aligned_form(parent=None):
 
 
 _ENCODING_ORDER_LABELS = {ELLIPTICAL_CENTRIC: "elliptical centric"}
+# Signal weighting choices; index 1 (physical) is the default.
+SIGNAL_WEIGHTING_RELATIVE = "Relative (sum of spin densities)"
+SIGNAL_WEIGHTING_PHYSICAL = "Physical (voxel volume, 3D)"
+
 _ENCODING_ORDER_TOOLTIP = (
     "Chronological phase-encoding order. Linear runs -N/2 ... N/2-1, centric "
     "0, -1, +1, -2, +2, ... . Two axes combine one mode per axis (first-second); "
@@ -316,6 +313,25 @@ def _add_form_section(form: QFormLayout, title: str) -> None:
     label.setFont(font)
     form.addRow(separator)
     form.addRow(label)
+
+
+# Rows that rarely change between scans; they fold into "Advanced".
+_ADVANCED_ROW_PATTERN = re.compile(
+    r"_(read|phase|slice|partition)_gradient_axis$"
+    r"|_rf_spoiling_increment_deg$"
+    r"|_auto_spoiler$"
+    r"|_spoiler_cycles_per_(slice|voxel)$"
+    r"|_spoiler_duration_ms$"
+)
+
+
+def _shown_within(widget: QWidget, ancestor: QWidget) -> bool:
+    """Like ``isVisibleTo`` but a folded section still counts as shown."""
+    while widget is not None and widget is not ancestor:
+        if widget.isHidden() and not widget.property(CollapsibleSection.BODY_PROPERTY):
+            return False
+        widget = widget.parentWidget()
+    return widget is ancestor
 
 
 def _set_form_row_visible(form: QFormLayout, field: QWidget, visible: bool) -> None:
@@ -1653,13 +1669,10 @@ class SequenceSimulationWidget(QWidget):
         self._simulation_started_at_utc = None
         self._probe_started_at = None
         self._probe_started_at_utc = None
-        self._simulation_progress_started_at = None
-        self._simulation_progress_baseline_done = None
-        self._simulation_last_progress_at = None
-        self._simulation_last_progress_done = 0
-        self._simulation_last_progress_total = 1
-        self._simulation_progress_rate = None
-        self._simulation_displayed_fraction = 0.0
+        # Progress estimate of the sequence run or spin probe in the run area.
+        self._run_progress = None
+        self._loop_progress = None
+        self._progress_format_before_save = ""
         self._probe_playback_anchor_wall = None
         self._probe_playback_anchor_time_ms = None
         self._probe_playback_indices = np.zeros(0, dtype=np.int64)
@@ -2022,6 +2035,7 @@ class SequenceSimulationWidget(QWidget):
         accent = RUN_BUTTON_ACCENT_STYLE if self._color_accents else ""
         self.run_button.setStyleSheet(accent + self._inactive_button_style)
         self.progress_accent.set_enabled(self._color_accents)
+        self.loop_progress_accent.set_enabled(self._color_accents)
 
     def set_sequence_timing_visible(self, enabled: bool) -> None:
         """Apply the preview preference immediately without regenerating a sequence."""
@@ -2772,7 +2786,8 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_presets_button.setMenu(self.sequence_presets_menu)
         source_row.addWidget(self.sequence_presets_button)
         sequence_layout.addLayout(source_row)
-        self.sequence_source = QComboBox()
+        self.sequence_source = GroupedComboBox()
+        self.sequence_source.setObjectName("sequence_source")
         self.sequence_source.addItems(
             [
                 "Internal FID",
@@ -2791,14 +2806,16 @@ class SequenceSimulationWidget(QWidget):
                 "Slice-selective FID (spectroscopy)",
             ]
         )
+        self.sequence_source.setItemData(
+            self.PULSEQ_SOURCE,
+            "The Pulseq file loaded last; use Load Pulseq .seq file… to open another",
+            Qt.ToolTipRole,
+        )
         self.sequence_source.currentIndexChanged.connect(self._source_changed)
         self.sequence_source.setToolTip(
-            "Build EPI, EPSI/MGE, CSI, FLASH, Cartesian bSSFP, spectrally "
-            "selective bSSFP, Cartesian or radial multi-echo bSSFP "
-            "interactively, inspect RF + Slice Selection, build single-voxel "
-            "PRESS spectroscopy, slice-selective FID spectroscopy or "
-            "multi-slice inversion recovery for T1 mapping, or load a Pulseq "
-            "file"
+            "Build a sequence interactively (spectroscopy, spectroscopic "
+            "imaging, imaging, bSSFP or an RF + slice-selection check), or "
+            "import one from a Pulseq file or a Python script"
         )
         sequence_layout.addWidget(self.sequence_source)
 
@@ -2887,6 +2904,41 @@ class SequenceSimulationWidget(QWidget):
 
         # Arrange the sequence workflow from source to output in two columns:
         # choose a source, configure generation, generate, then export.
+        self.sequence_source.set_groups(
+            [
+                (
+                    "Spectroscopy",
+                    [self.INTERNAL_SOURCE, self.SLICE_FID_SOURCE, self.PRESS_SOURCE],
+                ),
+                ("Spectroscopic imaging", [self.CSI_SOURCE, self.EPSI_MGE_SOURCE]),
+                (
+                    "Imaging",
+                    [
+                        self.FLASH_SOURCE,
+                        self.EPI_SOURCE,
+                        self.INVERSION_RECOVERY_SOURCE,
+                    ],
+                ),
+                (
+                    "bSSFP",
+                    [
+                        self.BSSFP_SOURCE,
+                        self.SS_BSSFP_SOURCE,
+                        self.ME_BSSFP_SOURCE,
+                        self.RADIAL_ME_BSSFP_SOURCE,
+                    ],
+                ),
+                ("RF pulse", [self.SLICE_SELECTION_SOURCE]),
+                (
+                    "Import",
+                    [
+                        ("Load Pulseq .seq file…", lambda: self._load_pulseq_file()),
+                        ("Run Python script…", lambda: self._run_python_script()),
+                        self.PULSEQ_SOURCE,
+                    ],
+                ),
+            ]
+        )
         generation_grid.addWidget(self.load_pulseq_button, 0, 0)
         generation_grid.addWidget(run_script_button, 0, 1)
         generation_grid.addLayout(time_resolution_row, 1, 0)
@@ -5025,7 +5077,24 @@ class SequenceSimulationWidget(QWidget):
         output_form.addRow("Checkpoints", self.checkpoints)
         self.signal_weighting = QComboBox()
         self.signal_weighting.addItems(
-            ["Relative voxel sum", "Physical voxel volume (3D)"]
+            [SIGNAL_WEIGHTING_RELATIVE, SIGNAL_WEIGHTING_PHYSICAL]
+        )
+        self.signal_weighting.setProperty(
+            "state_aliases",
+            {
+                "Relative voxel sum": SIGNAL_WEIGHTING_RELATIVE,
+                "Physical voxel volume (3D)": SIGNAL_WEIGHTING_PHYSICAL,
+            },
+        )
+        self.signal_weighting.setCurrentIndex(1)
+        self.signal_weighting.setToolTip(
+            "Physical (default): every voxel counts with its volume in m³, so "
+            "the signal is in mol × polarization and calibrated receiver noise "
+            "applies directly. 2D phantoms have no voxel volume and always use "
+            "the relative sum.\n"
+            "Relative: every voxel counts with its spin density alone, so "
+            "signals are of order one whatever the voxel size. A finished "
+            "relative result is rescaled when calibrated noise is applied."
         )
         output_form.addRow("Signal weighting", self.signal_weighting)
         # Keep the combo as the internal frame-to-label mapping used by the
@@ -5247,6 +5316,7 @@ class SequenceSimulationWidget(QWidget):
         self.probe_group.setVisible(False)
         controls_layout.addWidget(self.probe_group)
         controls_layout.addStretch()
+        self._fold_advanced_rows()
 
         run_panel = QGroupBox("Run")
         run_panel_layout = QVBoxLayout(run_panel)
@@ -5258,7 +5328,12 @@ class SequenceSimulationWidget(QWidget):
         self.open_parameter_loop_button.clicked.connect(
             self.parameter_loop_requested.emit
         )
-        self.run_button = QPushButton("Seq. Simulation")
+        self.run_button = QPushButton("Run Simulation")
+        self.run_button.setToolTip(
+            "Run the sequence simulation ("
+            + QKeySequence("Ctrl+R").toString(QKeySequence.NativeText)
+            + ")"
+        )
         self.run_button.clicked.connect(self._run)
         probe_button_layout.addWidget(self.open_parameter_loop_button, 1, 0)
         probe_button_layout.addWidget(self.run_button, 1, 1)
@@ -5494,8 +5569,16 @@ class SequenceSimulationWidget(QWidget):
         self.progress.setTextVisible(True)
         self.progress.setFormat("Not started")
         self.progress_accent = ProgressAccent(self.progress, self._color_accents)
+        # Parameter loops add a second bar for the whole loop.
+        self.loop_progress = QProgressBar()
+        self.loop_progress.setTextVisible(True)
+        self.loop_progress.hide()
+        self.loop_progress_accent = ProgressAccent(
+            self.loop_progress, self._color_accents
+        )
         self.set_color_accents(self._color_accents)
         run_panel_layout.addWidget(self.progress)
+        run_panel_layout.addWidget(self.loop_progress)
         self.export_button = QPushButton("Export results…")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_results)
@@ -6515,11 +6598,12 @@ class SequenceSimulationWidget(QWidget):
             self.magnetization_animation_viewer.storage_dtype_combo
         )
         self.animation_tab_index = views.addTab(
-            self.magnetization_animation_viewer, "3D Magnetization Animation"
+            self.magnetization_animation_viewer, "3D Animation"
         )
         views.setTabToolTip(
             self.animation_tab_index,
-            "Configure and play a sparse 3D magnetization animation.",
+            "3D Magnetization Animation: configure and play a sparse 3D "
+            "magnetization animation.",
         )
 
         self.log_widget = QTextEdit()
@@ -6592,6 +6676,21 @@ class SequenceSimulationWidget(QWidget):
                     image_view, zoom_label
                 )
             )
+
+    # Earlier names of view tabs, still found in saved projects.
+    RENAMED_VIEW_TABS = {
+        "Geometry": "Setup",
+        "3D Magnetization Animation": "3D Animation",
+    }
+
+    def view_tab_index(self, name):
+        """Return the index of the view tab called ``name``, or -1."""
+        name = str(name or "")
+        name = self.RENAMED_VIEW_TABS.get(name, name)
+        for index in range(self.views.count()):
+            if name and self.views.tabText(index) == name:
+                return index
+        return -1
 
     def apply_focused_workspace_layout(self):
         """Use an adaptive control/viewer split in the focused workspace."""
@@ -7491,6 +7590,57 @@ class SequenceSimulationWidget(QWidget):
         text = html.unescape(re.sub(r"<[^>]+>", "", str(text or "")))
         return " ".join(text.replace("&", "").split())
 
+    def _fold_advanced_rows(self):
+        """Move rarely changed rows of each sequence form into "Advanced".
+
+        Gradient directions and spoiler details keep their labels and stay
+        loopable; the folded state is remembered per sequence group.
+        """
+        rows_by_group = {}
+        for name, widget in vars(self).items():
+            if not isinstance(widget, QWidget) or not _ADVANCED_ROW_PATTERN.search(
+                name
+            ):
+                continue
+            group = widget.parentWidget()
+            form = group.layout() if isinstance(group, QGroupBox) else None
+            if not isinstance(form, QFormLayout):
+                continue
+            row, _role = form.getWidgetPosition(widget)
+            if row >= 0:
+                rows_by_group.setdefault(group, []).append((row, widget))
+        group_names = {
+            id(widget): name
+            for name, widget in vars(self).items()
+            if isinstance(widget, QGroupBox)
+        }
+        self.advanced_sections = {}
+        for group, rows in rows_by_group.items():
+            form = group.layout()
+            body = QWidget()
+            advanced_form = _left_aligned_form(body)
+            advanced_form.setContentsMargins(0, 0, 0, 0)
+            for _row, field in sorted(rows, key=lambda item: item[0]):
+                taken = form.takeRow(field)
+                label = taken.labelItem.widget() if taken.labelItem else None
+                if label is not None:
+                    advanced_form.addRow(label, field)
+                else:
+                    advanced_form.addRow(field)
+            name = group_names.get(id(group), group.objectName() or "sequence")
+            section = CollapsibleSection(
+                body,
+                "Advanced",
+                expanded=False,
+                settings=self.app_settings,
+                key=f"sequence/{name}",
+            )
+            section.header.setToolTip(
+                "Show or hide gradient directions and spoiler details"
+            )
+            form.addRow(section)
+            self.advanced_sections[name] = section
+
     def _form_label_for_parameter(self, group, widget):
         forms = []
         if isinstance(group.layout(), QFormLayout):
@@ -7576,7 +7726,7 @@ class SequenceSimulationWidget(QWidget):
                 continue
             if widget in seen_widgets or not group.isAncestorOf(widget):
                 continue
-            if not widget.isEnabled() or not widget.isVisibleTo(group):
+            if not widget.isEnabled() or not _shown_within(widget, group):
                 continue
             seen_widgets.add(widget)
             label = self._form_label_for_parameter(group, widget)
@@ -8008,6 +8158,12 @@ class SequenceSimulationWidget(QWidget):
         self.run_button.setEnabled(False)
         self.export_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
+        self._loop_progress = LoopProgressEstimator(time.monotonic(), len(values))
+        self.loop_progress.setRange(0, RUN_PROGRESS_SCALE)
+        self.loop_progress.setValue(0)
+        self.loop_progress.show()
+        self.simulation_time_timer.start()
+        self._update_run_progress_display()
         self._run_parameter_loop_iteration()
 
     def _run_parameter_loop_iteration(self):
@@ -8128,6 +8284,8 @@ class SequenceSimulationWidget(QWidget):
             return
         state["completed"] += 1
         state["index"] += 1
+        if self._loop_progress is not None:
+            self._loop_progress.run_finished(time.monotonic())
         if state["cancel_requested"] or state["index"] >= len(state["values"]):
             self._finish_parameter_loop(cancelled=state["cancel_requested"])
         else:
@@ -8161,6 +8319,7 @@ class SequenceSimulationWidget(QWidget):
             self._parameter_loop_save_worker = worker
             self.cancel_button.setEnabled(True)
             self.export_button.setEnabled(False)
+            self._progress_format_before_save = self.progress.format()
             self.progress.setFormat("Saving loop result…")
             self._status_update(f"Saving {filename.name}…")
             worker.start()
@@ -8175,6 +8334,7 @@ class SequenceSimulationWidget(QWidget):
         run, error = worker.simulation_run, worker.error
         worker.simulation_run = None
         worker.deleteLater()
+        self.progress.setFormat(self._progress_format_before_save)
         if error:
             self._parameter_loop_save_failed(run, error)
             return
@@ -8226,6 +8386,25 @@ class SequenceSimulationWidget(QWidget):
                 notebook_note = f"; notebook could not be written: {exc}"
         self._parameter_loop_state = None
         self._parameter_loop_phantom = None
+        loop_progress = self._loop_progress
+        self._loop_progress = None
+        if self._run_progress is None:
+            self.simulation_time_timer.stop()
+        loop_elapsed = (
+            ""
+            if loop_progress is None
+            else " in " + _format_duration(time.monotonic() - loop_progress.started_at)
+        )
+        if error or cancelled:
+            self.loop_progress.setFormat(
+                f"Loop {'stopped' if error else 'cancelled'} after "
+                f"{completed}/{total} runs{loop_elapsed}"
+            )
+        else:
+            self.loop_progress.setValue(self.loop_progress.maximum())
+            self.loop_progress.setFormat(
+                f"Loop complete · {completed}/{total} runs{loop_elapsed}"
+            )
         self._set_parameter_loop_controls_locked(False)
         self._update_run_action_availability()
         QTimer.singleShot(0, self._update_run_action_availability)
@@ -8241,8 +8420,6 @@ class SequenceSimulationWidget(QWidget):
                 f"{notebook_note}"
             )
         else:
-            self.progress.setValue(self.progress.maximum())
-            self.progress.setFormat(f"Loop complete · {completed}/{total} runs")
             if state["output_directory"] is not None:
                 self.status.setText(
                     f"Parameter loop complete — {state['saved']} projects saved to "
@@ -14526,7 +14703,7 @@ class SequenceSimulationWidget(QWidget):
             phantom = None
         return {
             "phantom": phantom,
-            "signal_weighting": self._signal_weighting_mode(),
+            "signal_weighting": self._signal_weighting_mode(phantom),
             "program": self.program,
             "grid": self._sequence_spatial_grid_for_resolution_warning(),
             "result": self.result,
@@ -14943,6 +15120,12 @@ class SequenceSimulationWidget(QWidget):
         self._update_probe_stale_warning()
         self._probe_started_at = time.monotonic()
         self._probe_started_at_utc = datetime.now(timezone.utc)
+        self._run_progress = RunProgressEstimator(self._probe_started_at)
+        if self._parameter_loop_state is None:
+            self._loop_progress = None
+            self.loop_progress.hide()
+        self.simulation_time_timer.start()
+        self._update_run_progress_display()
         self.probe_worker = SequenceProbeThread(
             self.simulator,
             self.program,
@@ -14989,7 +15172,14 @@ class SequenceSimulationWidget(QWidget):
             self._cancel()
 
     def _probe_progress(self, done, total):
+        now = time.monotonic()
+        if self._run_progress is None:
+            self._run_progress = RunProgressEstimator(
+                now if self._probe_started_at is None else self._probe_started_at
+            )
+        self._run_progress.report(done, total, now)
         self.probe_status.setText(f"Probe isochromats {done:,}/{total:,}")
+        self._update_run_progress_display(now=now)
 
     def _probe_status_update(self, message):
         message = str(message)
@@ -15003,6 +15193,7 @@ class SequenceSimulationWidget(QWidget):
         self.cancel_probe_button.setEnabled(False)
         self.probe_status.setText(message)
         self._update_probe_empty_hint()
+        self._show_run_end(self._probe_started_at, False)
         cancelled = message == "Probe simulation cancelled"
         if self._parameter_loop_state is not None:
             self._finish_parameter_loop(
@@ -15020,6 +15211,11 @@ class SequenceSimulationWidget(QWidget):
                 "simulation_wall_time_s",
                 max(0.0, time.monotonic() - self._probe_started_at),
             )
+        self._show_run_end(
+            self._probe_started_at,
+            True,
+            result.metadata.get("simulation_wall_time_s"),
+        )
         result.metadata.setdefault(
             "simulation_finished_at_utc", finished_at.isoformat()
         )
@@ -15645,10 +15841,20 @@ class SequenceSimulationWidget(QWidget):
             )
         self.probe_adc_status.setText("ADC: on" if active else "ADC: off")
 
-    def _signal_weighting_mode(self):
+    def _signal_weighting_mode(self, phantom=None):
+        """Kernel weighting for ``phantom`` (default: the current phantom).
+
+        Physical weighting needs a voxel volume, so 2D phantoms fall back to
+        the relative sum unless calibrated noise demands physical units.
+        """
         if self.receiver_noise.mode.currentData() == "calibrated":
             return "voxel_volume"
-        return "voxel_volume" if self.signal_weighting.currentIndex() == 1 else "voxel"
+        if self.signal_weighting.currentIndex() != 1:
+            return "voxel"
+        phantom = self.phantom if phantom is None else phantom
+        if phantom is not None and len(getattr(phantom, "shape", ())) != 3:
+            return "voxel"
+        return "voxel_volume"
 
     def _receiver_mode_changed(self):
         calibrated = self.receiver_noise.mode.currentData() == "calibrated"
@@ -15739,38 +15945,49 @@ class SequenceSimulationWidget(QWidget):
         except ValueError as exc:
             self._show_receiver_noise_error(str(exc).rstrip("."))
             return
+        result = self.result
+        rescaled = False
         if (
             settings.mode == "calibrated"
-            and self.result.metadata.get("signal_weighting") != "voxel_volume"
+            and result.metadata.get("signal_weighting") != "voxel_volume"
         ):
-            # A relative voxel sum has no physical scale, so calibrated noise
-            # can only be added to a new run with voxel-volume weighting.
-            dialog = QMessageBox(
-                QMessageBox.Information,
-                "Receiver noise",
-                "The current result was simulated with Signal weighting "
-                "'Relative voxel sum'. That signal has no physical scale, so "
-                "calibrated noise (in mol x polarization) cannot be added to "
-                "it.\n\n"
-                "Rerun the simulation with the calibrated noise mode selected. "
-                "Signal weighting then switches to 'Physical voxel volume "
-                "(3D)' and the calibrated noise is applied to the new result.",
-                QMessageBox.Cancel,
-                self,
-            )
-            rerun = dialog.addButton("Run again", QMessageBox.AcceptRole)
-            dialog.setDefaultButton(rerun)
-            dialog.exec_()
-            if dialog.clickedButton() is rerun:
-                self._run()
-            return
+            # The voxel volume is one global factor, so a relative voxel sum
+            # converts exactly to physical units without a new run.
+            physical = with_voxel_volume_weighting(result)
+            if physical is None:
+                dialog = QMessageBox(
+                    QMessageBox.Information,
+                    "Receiver noise",
+                    "Calibrated noise is in mol × polarization, so it needs the "
+                    "signal in physical units. The current result cannot be "
+                    "converted: it comes from a 2D phantom or from an older "
+                    "run that did not record the voxel volume.\n\n"
+                    "Run the simulation again with the calibrated noise mode "
+                    "selected (Signal weighting then switches to 'Physical "
+                    "(voxel volume, 3D)').",
+                    QMessageBox.Cancel,
+                    self,
+                )
+                rerun = dialog.addButton("Run again", QMessageBox.AcceptRole)
+                dialog.setDefaultButton(rerun)
+                dialog.exec_()
+                if dialog.clickedButton() is rerun:
+                    self._run()
+                return
+            result, rescaled = physical, True
         try:
-            result = apply_receiver_noise(self.result, settings)
+            result = apply_receiver_noise(result, settings)
         except Exception as exc:
             self._show_receiver_noise_error(str(exc).rstrip("."))
             return
         animation = self.magnetization_animation
         self._finished(_SequenceSimulationPayload(result, animation), record_run=False)
+        if rescaled:
+            self.status.setText(
+                "Calibrated noise applied; the relative result was rescaled "
+                f"by the voxel volume ({result.metadata['voxel_volume_m3']:.3g} m³) "
+                "to physical units"
+            )
 
     def _confirm_sequence_reference_for_run(self) -> bool:
         """Require confirmation when sequence zero is outside the spectrum."""
@@ -15980,13 +16197,12 @@ class SequenceSimulationWidget(QWidget):
         self._clear_previous_simulation_views()
         self._simulation_started_at = time.monotonic()
         self._simulation_started_at_utc = datetime.now(timezone.utc).isoformat()
-        self._simulation_progress_started_at = None
-        self._simulation_progress_baseline_done = None
-        self._simulation_last_progress_at = None
-        self._simulation_last_progress_done = 0
-        self._simulation_last_progress_total = work_units
-        self._simulation_progress_rate = None
-        self._simulation_displayed_fraction = 0.0
+        self._run_progress = RunProgressEstimator(
+            self._simulation_started_at, work_units
+        )
+        if self._parameter_loop_state is None:
+            self._loop_progress = None
+            self.loop_progress.hide()
         self.simulation_time_timer.start()
         self._update_run_progress_display()
         self._status_update("Preparing and compiling sequence…")
@@ -16027,33 +16243,13 @@ class SequenceSimulationWidget(QWidget):
         self._log_message(f"Sequence simulation: {display_message}")
 
     def _progress(self, done, total):
-        total = max(1, int(total))
-        done = min(total, max(0, int(done)))
         now = time.monotonic()
         if self._simulation_started_at is None:
             self._simulation_started_at = now
-        if (
-            self._simulation_progress_started_at is None
-            or self._simulation_progress_baseline_done is None
-        ):
-            self._simulation_progress_started_at = now
-            self._simulation_progress_baseline_done = done
-        else:
-            completed_work = done - self._simulation_progress_baseline_done
-            measured_s = now - self._simulation_progress_started_at
-            if completed_work > 0 and measured_s > 0.0:
-                # Progress callbacks arrive after uneven voxel chunks.  A rate
-                # based only on the latest chunk lets one unusual chunk move the
-                # ETA abruptly.  The cumulative throughput remains anchored at
-                # the post-compilation baseline and converges as work completes.
-                self._simulation_progress_rate = completed_work / measured_s
-        if (
-            self._simulation_last_progress_at is None
-            or done > self._simulation_last_progress_done
-        ):
-            self._simulation_last_progress_at = now
-        self._simulation_last_progress_done = done
-        self._simulation_last_progress_total = total
+        if self._run_progress is None:
+            self._run_progress = RunProgressEstimator(self._simulation_started_at)
+        self._run_progress.report(done, total, now)
+        done, total = self._run_progress.done, self._run_progress.total
         if isinstance(self.phantom, DynamicSpectralPhantom):
             unit = "Interval"
         else:
@@ -16062,41 +16258,26 @@ class SequenceSimulationWidget(QWidget):
         self._update_run_progress_display(now=now)
 
     def _update_run_progress_display(self, now=None):
-        """Show progress, elapsed time, and remaining time in the progress bar.
+        """Show progress, elapsed time, and remaining time in the progress bars.
 
-        Native chunks report progress rarely, so the done count is extrapolated
-        at the measured rate between callbacks. The bar never moves back and
-        stays below 100% until the run reports completion.
+        The run bar follows the sequence run or spin probe in the run area;
+        the loop bar, shown during parameter loops, covers the whole loop.
         """
-        if self._simulation_started_at is None:
-            return
         now = time.monotonic() if now is None else float(now)
-        elapsed_text = f"{_format_duration(now - self._simulation_started_at)} elapsed"
-        total = max(1, int(self._simulation_last_progress_total))
-        reported_done = min(total, max(0, int(self._simulation_last_progress_done)))
-        done = float(reported_done)
-        rate = self._simulation_progress_rate
-        if reported_done >= total:
-            remaining_text = "finishing…"
-        elif rate is None:
-            remaining_text = "estimating time left…"
-        else:
-            if self._simulation_last_progress_at is not None:
-                done += rate * max(0.0, now - self._simulation_last_progress_at)
-            remaining_s = max(0.0, total - done) / rate
-            remaining_text = (
-                "<1s left"
-                if remaining_s < 1.0
-                else f"~{_format_duration(remaining_s)} left"
-            )
-        fraction = 1.0 if reported_done >= total else min(0.99, done / total)
-        fraction = max(self._simulation_displayed_fraction, fraction)
-        self._simulation_displayed_fraction = fraction
-        self.progress.setRange(0, RUN_PROGRESS_SCALE)
-        self.progress.setValue(int(round(fraction * RUN_PROGRESS_SCALE)))
-        self.progress.setFormat(
-            f"{int(fraction * 100)}% · {elapsed_text} · {remaining_text}"
-        )
+        run = self._run_progress
+        run_fraction, run_remaining_s = 0.0, None
+        if run is not None:
+            run_fraction, text = run.status(now)
+            run_remaining_s = run.remaining_s(now)
+            self.progress.setRange(0, RUN_PROGRESS_SCALE)
+            self.progress.setValue(int(round(run_fraction * RUN_PROGRESS_SCALE)))
+            self.progress.setFormat(text)
+        loop = self._loop_progress
+        if loop is not None and self._parameter_loop_state is not None:
+            fraction, text = loop.status(now, run_fraction, run_remaining_s)
+            self.loop_progress.setRange(0, RUN_PROGRESS_SCALE)
+            self.loop_progress.setValue(int(round(fraction * RUN_PROGRESS_SCALE)))
+            self.loop_progress.setFormat(text)
 
     def _estimated_work_units(self):
         if isinstance(self.phantom, DynamicSpectralPhantom):
@@ -17703,11 +17884,18 @@ class SequenceSimulationWidget(QWidget):
             )
         )
         self.cancel_button.setEnabled(False)
-        self.simulation_time_timer.stop()
+        self._show_run_end(self._simulation_started_at, completed, elapsed_s)
+        self._simulation_started_at = None
+        self._simulation_started_at_utc = None
+
+    def _show_run_end(self, started_at, completed, elapsed_s=None):
+        """Show the outcome of the run in the run area and stop its estimate."""
+        if self._parameter_loop_state is None:
+            self.simulation_time_timer.stop()
+        if elapsed_s is None and started_at is not None:
+            elapsed_s = max(0.0, time.monotonic() - started_at)
         if completed:
             self.progress.setValue(self.progress.maximum())
-            if elapsed_s is None and self._simulation_started_at is not None:
-                elapsed_s = max(0.0, time.monotonic() - self._simulation_started_at)
             if elapsed_s is None:
                 self.progress.setFormat("100% · Complete")
             else:
@@ -17715,11 +17903,6 @@ class SequenceSimulationWidget(QWidget):
                     f"100% · Complete in {_format_duration(elapsed_s)}"
                 )
         else:
-            elapsed_s = (
-                None
-                if self._simulation_started_at is None
-                else max(0.0, time.monotonic() - self._simulation_started_at)
-            )
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
             self.progress.setFormat(
@@ -17727,15 +17910,7 @@ class SequenceSimulationWidget(QWidget):
                 if elapsed_s is None
                 else f"Stopped after {_format_duration(elapsed_s)}"
             )
-        self._simulation_started_at = None
-        self._simulation_started_at_utc = None
-        self._simulation_progress_started_at = None
-        self._simulation_progress_baseline_done = None
-        self._simulation_last_progress_at = None
-        self._simulation_last_progress_done = 0
-        self._simulation_last_progress_total = 1
-        self._simulation_progress_rate = None
-        self._simulation_displayed_fraction = 0.0
+        self._run_progress = None
 
     def export_results(self):
         """Open the sequence export dialog (also used by File > Export)."""

@@ -16,6 +16,7 @@ from blochsimulator.sequence import ADCEvent, BrukerExportOptions, SequenceProgr
 from blochsimulator.sequence.export_bundle import SequenceExportRequest
 from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
+from blochsimulator.ui.run_progress import RunProgressEstimator
 from blochsimulator.ui.sequence_export_dialog import SequenceExportDialog
 from blochsimulator.ui.sequence_simulation_widget import (
     SequenceSimulationThread,
@@ -211,7 +212,7 @@ def test_sequence_progress_estimate_excludes_compile_time_and_uses_run_rate(
     app.processEvents()
 
 
-def test_sequence_progress_uses_cumulative_throughput_for_eta(monkeypatch):
+def test_sequence_progress_eta_follows_the_recent_rate(monkeypatch):
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
     timestamps = iter((100.0, 101.0, 111.0))
@@ -224,10 +225,12 @@ def test_sequence_progress_uses_cumulative_throughput_for_eta(monkeypatch):
     widget._progress(25, 100)
     assert widget.progress.format() == "25% · 1s elapsed · ~3s left"
 
+    # The run slowed down (e.g. a throttling laptop): the fast first second
+    # no longer counts toward the rate.
     widget._progress(50, 100)
 
-    assert widget._simulation_progress_rate == pytest.approx(50.0 / 11.0)
-    assert widget.progress.format() == "50% · 11s elapsed · ~11s left"
+    assert widget._run_progress.rate == pytest.approx(2.5)
+    assert widget.progress.format() == "50% · 11s elapsed · ~20s left"
     assert widget.status.text() == "Voxel 50/100"
     widget.close()
     app.processEvents()
@@ -328,10 +331,9 @@ def test_sequence_progress_extrapolates_between_progress_events():
     app = QApplication.instance() or QApplication([])
     widget = SequenceSimulationWidget()
     widget._simulation_started_at = 100.0
-    widget._simulation_last_progress_at = 110.0
-    widget._simulation_last_progress_done = 20
-    widget._simulation_last_progress_total = 100
-    widget._simulation_progress_rate = 2.0
+    widget._run_progress = RunProgressEstimator(100.0)
+    for time_s, done in ((100.0, 0), (105.0, 10), (110.0, 20)):
+        widget._run_progress.report(done, 100, time_s)
 
     widget._update_run_progress_display(now=115.0)
 
@@ -354,7 +356,7 @@ def test_sequence_progress_never_moves_back_or_completes_early(monkeypatch):
 
     # The extrapolated run would be done by now, but completion is reported.
     widget._update_run_progress_display(now=125.0)
-    assert widget.progress.format() == "99% · 25s elapsed · <1s left"
+    assert widget.progress.format() == "99% · 25s elapsed · almost done…"
     widget._progress(60, 100)
 
     assert widget.progress.value() == 990

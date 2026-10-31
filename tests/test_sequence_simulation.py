@@ -22,7 +22,12 @@ from blochsimulator.sequence import (
     SpinSampling,
     export_bruker_raw,
 )
-from blochsimulator.simulator import resolve_num_threads, sequence_chunk_bounds
+from blochsimulator.simulator import (
+    PROGRESS_CHUNK_UPDATES,
+    default_sequence_chunk_voxels,
+    resolve_num_threads,
+    sequence_chunk_bounds,
+)
 from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
 from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T
 
@@ -579,6 +584,21 @@ def test_sequence_chunk_bounds_start_with_short_leading_chunk():
     assert sequence_chunk_bounds(200, 4, leading_chunk=True) == (
         sequence_chunk_bounds(200, 4)
     )
+
+
+def test_default_chunks_split_long_runs_for_regular_progress():
+    # Short runs keep one chunk of at most 65,536 spins.
+    assert default_sequence_chunk_voxels(31288, 1, 7744) == 31288
+    assert default_sequence_chunk_voxels(200_000, 1, 100) == 50_000
+    # Chunks are balanced: 13 chunks instead of 12 full ones and a remainder.
+    assert default_sequence_chunk_voxels(200_000, 4, 100) == 15_385
+    # Long runs split by spin-interval work.
+    chunk = default_sequence_chunk_voxels(53520, 1, 100_000)
+    assert chunk == 8920
+    assert chunk * 100_000 <= PROGRESS_CHUNK_UPDATES
+    # Very long runs keep about 4,096 spins per chunk for the native threads.
+    assert default_sequence_chunk_voxels(53520, 1, 10**8) == 3823
+    assert default_sequence_chunk_voxels(53520, 8, 10**8) == 510
 
 
 def test_default_chunking_reports_voxel_progress_after_leading_chunk():

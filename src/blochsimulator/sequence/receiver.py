@@ -423,6 +423,48 @@ def _sample_std(settings, context, count):
     return np.repeat(event_std, samples), event_std
 
 
+def with_voxel_volume_weighting(result):
+    """A relative voxel sum result rescaled to physical voxel-volume units.
+
+    Voxel-volume weighting multiplies every spin's signal weight by the one
+    voxel volume of the 3D phantom, so a finished run converts exactly. Returns
+    None when the run recorded no 3D voxel volume (2D phantoms, older runs).
+    """
+    metadata = dict(result.metadata)
+    if metadata.get("signal_weighting") == "voxel_volume":
+        return result
+    volume = metadata.get("phantom_voxel_volume_m3")
+    if volume is None:
+        return None
+    volume = _positive(volume, "Phantom voxel volume")
+
+    def scaled(values):
+        return None if values is None else np.asarray(values) * volume
+
+    metadata["signal_weighting"] = "voxel_volume"
+    metadata["voxel_volume_m3"] = volume
+    context = metadata.get("receiver_acquisition")
+    if context is not None and context.get("ideal_fid_amplitude") is not None:
+        metadata["receiver_acquisition"] = dict(
+            context, ideal_fid_amplitude=context["ideal_fid_amplitude"] * volume
+        )
+    noise = metadata.get("receiver_noise")
+    if noise is not None and noise.get("noise_std_per_quadrature") is not None:
+        metadata["receiver_noise"] = dict(
+            noise,
+            noise_std_per_quadrature=[
+                std * volume for std in noise["noise_std_per_quadrature"]
+            ],
+        )
+    return replace(
+        result,
+        signal=scaled(result.signal),
+        signal_noiseless=scaled(result.signal_noiseless),
+        species_signal=scaled(result.species_signal),
+        metadata=metadata,
+    )
+
+
 def apply_receiver_noise(result, settings: ReceiverNoise):
     """Apply one realization to the summed ADC stream, always from clean data.
 
@@ -447,7 +489,7 @@ def apply_receiver_noise(result, settings: ReceiverNoise):
                 "Calibrated receiver noise needs a signal in physical units, but "
                 "this result was simulated with the relative voxel sum. Rerun "
                 "the simulation with the calibrated noise mode selected (it "
-                "switches Signal weighting to 'Physical voxel volume (3D)') and "
+                "switches Signal weighting to 'Physical (voxel volume, 3D)') and "
                 "apply the noise to that result."
             )
     if settings.mode == "off":

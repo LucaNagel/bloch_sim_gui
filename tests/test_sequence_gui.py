@@ -181,7 +181,7 @@ def test_sequence_tab_order_and_log_shares_application_history(qt_application):
         "Spin Probe",
         "Signal",
         "Spatial Magnetization",
-        "3D Magnetization Animation",
+        "3D Animation",
         "Log",
     ]
     assert widget.views.tabText(widget.log_tab_index) == "Log"
@@ -520,7 +520,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert not window.time_control.compact
     assert window.tab_widget.tabBar().usesScrollButtons()
     assert not window.tab_widget.tabBar().expanding()
-    assert window.tab_widget.tabBar().elideMode() == Qt.ElideRight
+    assert window.tab_widget.tabBar().elideMode() == Qt.ElideNone
     window.tab_widget.setCurrentIndex(window.sequence_simulation_tab_index)
     app.processEvents()
 
@@ -568,13 +568,14 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget.program.source == "internal-flash-2d"
     assert window.sequence_simulation_widget._rf_designer is window.rf_designer
     assert window.sequence_simulation_widget._rf_designer_pulse_data is not None
-    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is None
-    assert window.workspace_switch.parentWidget() is window.free_mode_colormap_controls
+    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
     assert window.statusBar().isAncestorOf(window.status_export_button)
     assert window.findChild(QToolBar, "main_toolbar") is None
     assert window.mag_3d.export_3d_btn.isHidden()
-    assert window.mag_3d.view_layout.indexOf(window.mag_3d.track_checkbox) >= 0
-    assert window.mag_3d.view_layout.indexOf(window.mag_3d.spin_display_combo) >= 0
+    assert window.mag_3d.display_layout.indexOf(window.mag_3d.track_checkbox) >= 0
+    assert window.mag_3d.display_layout.indexOf(window.mag_3d.spin_display_combo) >= 0
+    assert window.mag_3d.view_layout.indexOf(window.mag_3d.plot_options_button) >= 0
+    assert window.mag_3d.plot_options_panel.isHidden()
     ancestor = window.mag_3d.parentWidget()
     while ancestor is not None:
         assert not isinstance(ancestor, QScrollArea)
@@ -639,7 +640,8 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     window.set_workspace_mode("free")
     assert window.workspace_mode == "free"
     assert not window.free_mode_left_container.isHidden()
-    assert not window.free_mode_playback_header.isHidden()
+    # Playback Control waits for a time-resolved Free Mode result.
+    assert window.free_mode_playback_header.isHidden()
     assert window.tab_widget.isTabVisible(0)
     assert not window.tab_widget.isTabVisible(window.sequence_simulation_tab_index)
     assert not window.tab_widget.isTabVisible(window.phantom_tab_index)
@@ -754,10 +756,10 @@ def test_session_simulations_tab_is_next_to_phantom_b1_and_accepts_runs():
     assert window.tab_widget.tabText(window.simulation_explorer_tab_index) == (
         "Simulations"
     )
-    assert not window.tab_widget.isTabVisible(window.simulation_explorer_tab_index)
+    assert not window.main_tab_available(window.simulation_explorer_tab_index)
 
     window.set_workspace_mode("sequence")
-    assert window.tab_widget.isTabVisible(window.simulation_explorer_tab_index)
+    assert window.main_tab_available(window.simulation_explorer_tab_index)
     sequence_widget = window.sequence_simulation_widget
     sequence_widget.object_source.setCurrentIndex(1)
     sequence_widget.sequence_live_preview.setChecked(False)
@@ -1084,9 +1086,8 @@ def test_workspace_roundtrip_remains_interactive(use_popup):
         app.processEvents()
         assert window.workspace_mode == "free"
         assert not window.workspace_header.isVisible()
-        assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is None
         assert (
-            window.workspace_switch.parentWidget() is window.free_mode_colormap_controls
+            window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
         )
         assert window.workspace_switch.isVisible()
         assert window.workspace_mode_selector.isVisible()
@@ -1805,16 +1806,16 @@ def test_spoiling_analysis_tab_is_shown_only_for_gradient_spoiling(tmp_path):
     index = window.spoiling_analysis_tab_index
     tabs = window.tab_widget
     assert tabs.tabText(index) == "Spoiling Analysis"
-    assert not tabs.isTabVisible(index)
+    assert not window.main_tab_available(index)
 
     window.set_workspace_mode("sequence")
     sequence = window.sequence_simulation_widget
     # Manual grids stay as set; auto adjust has its own test.
     sequence.spoiling_auto_adjust.setChecked(False)
     sequence.set_spoiler_configuration("ideal", (1, 1, 9))
-    assert not tabs.isTabVisible(index)
+    assert not window.main_tab_available(index)
     sequence.set_spoiler_configuration("gradient", (1, 4, 1), "midpoint")
-    assert tabs.isTabVisible(index)
+    assert window.main_tab_available(index)
 
     sequence.sequence_source.setCurrentIndex(sequence.FLASH_SOURCE)
     tabs.setCurrentIndex(index)
@@ -1839,14 +1840,14 @@ def test_spoiling_analysis_tab_is_shown_only_for_gradient_spoiling(tmp_path):
 
     # Switching to the ideal crusher leaves the tab before hiding it.
     sequence.set_spoiler_configuration("ideal", (1, 1, 9))
-    assert not tabs.isTabVisible(index)
+    assert not window.main_tab_available(index)
     assert tabs.currentIndex() == window.sequence_simulation_tab_index
     sequence.set_spoiler_configuration("gradient", (1, 4, 1), "stratified")
-    assert tabs.isTabVisible(index)
+    assert window.main_tab_available(index)
     window.set_workspace_mode("free")
-    assert not tabs.isTabVisible(index)
+    assert not window.main_tab_available(index)
     window.set_workspace_mode("sequence")
-    assert tabs.isTabVisible(index)
+    assert window.main_tab_available(index)
 
     window.close()
     window.deleteLater()
@@ -3172,7 +3173,7 @@ def test_sequence_workspace_builds_geometry_probe_positions():
     assert widget.run_probe_button.text() == "Spectral Probe"
     assert widget.run_geometry_probe_button.text() == "Geometry Probe"
     assert widget.open_parameter_loop_button.text() == "Param. Loop"
-    assert widget.run_button.text() == "Seq. Simulation"
+    assert widget.run_button.text() == "Run Simulation"
     assert widget.cancel_probe_button is widget.cancel_button
     assert widget.export_cancel_layout.indexOf(widget.export_button) == 0
     assert widget.export_cancel_layout.indexOf(widget.open_result_button) == 1
@@ -4272,3 +4273,28 @@ def test_ideal_crusher_reminder_for_generated_sequences_with_gradient_spoiling()
     widget.close()
     widget.deleteLater()
     app.processEvents()
+
+
+def test_sequence_source_popup_groups_every_source_and_the_imports(monkeypatch):
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    combo = widget.sequence_source
+    loads = []
+    monkeypatch.setattr(widget, "_load_pulseq_file", lambda: loads.append(True))
+    combo.showPopup()
+    menu = combo.popup_menu
+    actions = {a.text(): a for a in menu.actions() if not a.isSeparator()}
+    sections = [a.text() for a in menu.actions() if a.isSeparator()]
+    assert sections[0] == "Spectroscopy" and sections[-1] == "Import"
+    # Every stored index is listed once; the combo order itself is unchanged.
+    for index in range(combo.count()):
+        assert combo.itemText(index) in actions
+    assert combo.itemText(widget.PULSEQ_SOURCE) == "Pulseq .seq file"
+    assert actions[combo.itemText(combo.currentIndex())].font().bold()
+
+    actions["EPI"].trigger()
+    assert combo.currentIndex() == widget.EPI_SOURCE
+    actions["Load Pulseq .seq file…"].trigger()
+    assert loads == [True]
+    menu.close()
+    widget.deleteLater()

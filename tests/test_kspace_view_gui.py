@@ -175,10 +175,10 @@ def test_kspace_tab_follows_sequence_mode_and_link(qt_application):
     index = window.kspace_tab_index
     tabs = window.tab_widget
     assert tabs.tabText(index) == "k-Space Trajectory"
-    assert not tabs.isTabVisible(index)
+    assert not window.main_tab_available(index)
 
     window.set_workspace_mode("sequence")
-    assert tabs.isTabVisible(index)
+    assert window.main_tab_available(index)
     sequence = window.sequence_simulation_widget
     view = sequence.kspace_trajectory_view
     assert not window.kspace_page.isAncestorOf(view)
@@ -196,7 +196,7 @@ def test_kspace_tab_follows_sequence_mode_and_link(qt_application):
     assert tabs.currentIndex() == window.psf_analysis_tab_index
 
     window.set_workspace_mode("free")
-    assert not tabs.isTabVisible(index)
+    assert not window.main_tab_available(index)
     window.close()
     window.deleteLater()
     app.processEvents()

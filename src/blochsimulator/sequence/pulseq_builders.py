@@ -123,7 +123,11 @@ def _readout_rise_time(system, amplitude_hz_per_m: float) -> float:
 
 
 def _sequence_duration_s(sequence) -> float:
-    return 0.0 if not sequence.block_events else float(sequence.duration()[0])
+    # Sequence.duration() also counts events block by block, which made the
+    # per-repetition timing queries of long sequences quadratic. This sums the
+    # same block durations in the same order.
+    durations = sequence.block_durations
+    return float(sum(map(durations.__getitem__, sequence.block_events)))
 
 
 def _rf_spoiling_phase_deg(excitation_index: int, increment_deg: float) -> float:
@@ -1428,7 +1432,7 @@ def make_pulseq_csi(
             )
             if spoiler_events:
                 sequence.add_block(*spoiler_events)
-                spoiler_end_times.append(float(sequence.duration()[0]))
+                spoiler_end_times.append(_sequence_duration_s(sequence))
             if tr_delay_value:
                 sequence.add_block(pp.make_delay(tr_delay_value))
             excitation_index += 1
@@ -3442,7 +3446,7 @@ def make_pulseq_epi(
             sequence.add_block(gx_post, gy_post)
             if spoilers:
                 sequence.add_block(*spoilers)
-                spoiler_end_times.append(float(sequence.duration()[0]))
+                spoiler_end_times.append(_sequence_duration_s(sequence))
             excitation_index += 1
         if inversion is not None:
             slice_inversion_times.append(repetition_slice_times)
@@ -3455,7 +3459,7 @@ def make_pulseq_epi(
         if delay > 1e-12:
             sequence.add_block(pp.make_delay(delay))
         minimum_acquisition_intervals.append(acquired)
-        acquisition_intervals.append(float(sequence.duration()[0]) - repetition_start)
+        acquisition_intervals.append(_sequence_duration_s(sequence) - repetition_start)
 
     _raise_for_timing_errors(sequence, "EPI")
     sequence.set_definition("Name", "epi_2d")
@@ -4780,7 +4784,7 @@ def make_pulseq_flash(
                         sequence.add_block(pp.make_delay(te_delay_value))
                     sequence.add_block(gx_read, adc)
                     sequence.add_block(gx_spoil, gy_spoil, gz_spoil)
-                    spoiler_end_times.append(float(sequence.duration()[0]))
+                    spoiler_end_times.append(_sequence_duration_s(sequence))
                     if tr_delay_value:
                         sequence.add_block(pp.make_delay(tr_delay_value))
                     excitation_index += 1
@@ -5259,9 +5263,7 @@ def make_pulseq_spiral(
     excitation_index = 0
     for repetition in range(repetitions):
         rf, gz = rf_events[repetition if variable_flip_angle else 0]
-        repetition_start = (
-            0.0 if not sequence.block_events else float(sequence.duration()[0])
-        )
+        repetition_start = _sequence_duration_s(sequence)
         acquisition_start_times.append(repetition_start)
         for slice_index, position in enumerate(slice_positions):
             rf_phase_deg = (
@@ -5307,9 +5309,9 @@ def make_pulseq_spiral(
             sequence.add_block(gx_rewind, gy_rewind)
             if spoilers:
                 sequence.add_block(*spoilers)
-                spoiler_end_times.append(float(sequence.duration()[0]))
+                spoiler_end_times.append(_sequence_duration_s(sequence))
             excitation_index += 1
-        acquired = float(sequence.duration()[0]) - repetition_start
+        acquired = _sequence_duration_s(sequence) - repetition_start
         if minimum_repetition_time is None:
             minimum_repetition_time = acquired
             actual_repetition_time = (
@@ -5323,7 +5325,7 @@ def make_pulseq_spiral(
         if delay > 1e-12:
             sequence.add_block(pp.make_delay(delay))
         minimum_acquisition_intervals.append(acquired)
-        acquisition_intervals.append(float(sequence.duration()[0]) - repetition_start)
+        acquisition_intervals.append(_sequence_duration_s(sequence) - repetition_start)
 
     _raise_for_timing_errors(sequence, "spiral")
     slice_extent = n_slices * slice_thickness_m + (n_slices - 1) * slice_gap_m

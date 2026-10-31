@@ -22,7 +22,7 @@ It is therefore a separate accuracy/performance choice, not another kernel.
 
 ## Post-run 3D magnetization animation
 
-Enable **Create post-run animation** in the **3D Magnetization Animation** tab
+Enable **Create post-run animation** in the **3D Animation** tab
 to keep a bounded set of spatial magnetization states for the next run. The
 **Time resolution** setting specifies the desired interval between frames in
 milliseconds. The scientific simulation first runs normally, with only the

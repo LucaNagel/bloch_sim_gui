@@ -253,10 +253,10 @@ def test_psf_analysis_tab_follows_sequence_mode_and_link(qt_application):
     index = window.psf_analysis_tab_index
     tabs = window.tab_widget
     assert tabs.tabText(index) == "PSF Analysis"
-    assert not tabs.isTabVisible(index)
+    assert not window.main_tab_available(index)
 
     window.set_workspace_mode("sequence")
-    assert tabs.isTabVisible(index)
+    assert window.main_tab_available(index)
     sequence = window.sequence_simulation_widget
     view = sequence.psf_analysis_view
     assert not window.psf_analysis_page.isAncestorOf(view)
@@ -276,7 +276,7 @@ def test_psf_analysis_tab_follows_sequence_mode_and_link(qt_application):
     assert sequence._psf_analysis_token() != context.token
 
     window.set_workspace_mode("free")
-    assert not tabs.isTabVisible(index)
+    assert not window.main_tab_available(index)
     window.close()
     window.deleteLater()
     app.processEvents()

@@ -122,7 +122,10 @@ def _raise_for_timing_errors(sequence, name: str) -> None:
 
 
 def _sequence_duration_s(sequence) -> float:
-    return 0.0 if not sequence.block_events else float(sequence.duration()[0])
+    # Sum the block durations in Sequence.duration() order without its
+    # per-block event count, which is slow for per-repetition queries.
+    durations = sequence.block_durations
+    return float(sum(map(durations.__getitem__, sequence.block_events)))
 
 
 def _finish_acquisition_interval(
@@ -946,7 +949,7 @@ def make_pulseq_spectral_selective_bssfp(
                 sequence.add_block(pp.make_delay(tr_fill))
         if spoilers:
             sequence.add_block(*spoilers)
-            spoiler_end_times.append(float(sequence.duration()[0]))
+            spoiler_end_times.append(_sequence_duration_s(sequence))
         minimum_interval = _sequence_duration_s(sequence) - acquisition_start
         actual_interval, _ = _finish_acquisition_interval(
             pp,

@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QLineEdit,
+    QMenu,
     QRadioButton,
     QSlider,
     QSpinBox,
@@ -1413,7 +1414,13 @@ def test_free_mode_result_controls_use_consistent_headers_and_rows():
 
     assert window.tab_widget.tabBar().font().bold()
     assert window.workspace_header.isHidden()
-    assert window.workspace_switch.parentWidget() is window.free_mode_colormap_controls
+    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
+    assert window.tab_widget.cornerWidget(Qt.TopLeftCorner) is window.main_tab_group_bar
+    # Playback Control appears only with a time-resolved result.
+    assert window.free_mode_playback_header.isHidden()
+    colormap_menu = window.menuBar().findChild(QMenu, "menu_heatmap_colormap")
+    assert colormap_menu is not None
+    assert window.heatmap_colormap_actions[window.heatmap_colormap_name].isChecked()
 
     vector_layout = window.mag_3d.layout()
     assert vector_layout.indexOf(
@@ -2776,31 +2783,40 @@ def test_live_mode_plays_pulses_and_gradients_along_a_line():
         window.mag_3d.ARRANGEMENT_ALONG_POSITION
     )
     live = window.live_mode
-    assert not live.controls.isEnabled()
-    assert live.controls.graphicsEffect().isEnabled()
+    # Inactive, one line of text stands in for the controls.
+    assert not live.controls.isEnabled() and live.controls.isHidden()
+    assert not live.intro_label.isHidden()
 
     live.live_button.setChecked(True)
     assert live.is_active() and live.controls.isEnabled()
-    assert not live.controls.graphicsEffect().isEnabled()
+    assert not live.controls.isHidden() and live.intro_label.isHidden()
+    assert not window.mag_3d.live_fields_widget.isHidden()
     assert not window.anim_timer.isActive()
     assert not live.hint_label.isVisibleTo(live)
     assert not window.mag_3d.preview_line.isVisible()
 
+    pulse_s = live.pulse_length_spin.value() * 1e-3
     _play_pulse(live, 90)
     np.testing.assert_allclose(
         live.system.magnetization.reshape(-1, 3), [[0.0, 1.0, 0.0]] * 5, atol=1e-12
     )
-    assert live.system.time_s == 0.0
+    # Pulses take simulated time, so the trace shows the signal during them.
+    assert live.system.time_s == pytest.approx(pulse_s)
 
     gradient_axis = int(np.argmax(np.ptp(live.system.positions_m, axis=0)))
     live.gradient_buttons[gradient_axis].setChecked(True)
     live.advance(0.05)
-    assert live.system.time_s == pytest.approx(0.05e-3)
+    assert live.system.time_s == pytest.approx(pulse_s + 0.05e-3)
     window._render_live_frame(live)
     assert window.mag_3d.is_spatial_layout_active()
     # The bottom plot traces the live net magnetization over live time.
     trace_t, trace_my = window.mag_3d.preview_my.getData()
-    assert trace_t[-1] == pytest.approx(0.05)
+    assert trace_t[-1] == pytest.approx(pulse_s * 1e3 + 0.05)
+    # The RF trace holds the pulse, the gradient trace the switched gradient.
+    b1_t, b1x = window.mag_3d.live_b1x_curve.getData()
+    assert b1x.max() > 0.0 and b1_t[-1] == pytest.approx(trace_t[-1])
+    _, gradient = window.mag_3d.live_gradient_curves[gradient_axis].getData()
+    assert gradient[-1] == pytest.approx(2.0)
     assert trace_my[-1] == pytest.approx(
         live.system.magnetization[..., 1].mean(), abs=1e-12
     )
@@ -2812,7 +2828,9 @@ def test_live_mode_plays_pulses_and_gradients_along_a_line():
     assert np.ptp(phases) > 0.0
 
     # A 180° refocuses the gradient dephasing after the same time again.
+    live.gradient_buttons[gradient_axis].setChecked(False)
     _play_pulse(live, 180)
+    live.gradient_buttons[gradient_axis].setChecked(True)
     live.advance(0.05)
     np.testing.assert_allclose(
         live.system.magnetization.reshape(-1, 3), [[0.0, -1.0, 0.0]] * 5, atol=1e-9
@@ -2833,6 +2851,8 @@ def test_live_mode_plays_pulses_and_gradients_along_a_line():
 def test_live_mode_queues_pulses_and_yields_to_playback():
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
+    # On resonance, so the finite pulses turn exactly about y.
+    window.freq_spin.setValue(1)
     live = window.live_mode
     live.set_active(True)
     assert live.hint_label.isVisibleTo(live)
