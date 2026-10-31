@@ -6794,6 +6794,9 @@ def _simulate_dynamic_sequence_block(
             "spectral_bandwidth_ppm": phantom.spectral_bandwidth_ppm,
             "spectral_points": phantom.spectral_points,
             "signal_weighting": signal_weighting,
+            "phantom_voxel_volume_m3": (
+                phantom.voxel_volume_m3 if len(phantom.shape) == 3 else None
+            ),
             "spoiler_mode": spoiler_mode,
             "n_simulated_spins": n_simulated_spins,
             "spin_sampling": sampling.to_metadata(),

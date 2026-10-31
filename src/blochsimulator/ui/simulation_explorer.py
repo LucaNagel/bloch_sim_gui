@@ -136,6 +136,8 @@ class SessionSimulationExplorer(QWidget):
 
         footer = QHBoxLayout()
         self.status_label = QLabel("No simulations in this session")
+        # Wrapping keeps this hidden page from widening the Free Mode window.
+        self.status_label.setWordWrap(True)
         footer.addWidget(self.status_label, 1)
         self.open_button = QPushButton("Show simulation")
         self.open_button.setEnabled(False)

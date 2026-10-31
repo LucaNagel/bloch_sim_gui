@@ -154,3 +154,15 @@ def test_physical_spatial_amount_and_spectral_peak_are_preserved():
     spectra = csi.reconstruct_spectra(shown.signal) * display.spectrum_scale(ns)
     assert np.sum(np.abs(fid[..., 0])) == pytest.approx(amount)
     np.testing.assert_allclose(np.max(np.abs(spectra), axis=-1), np.abs(fid[..., 0]))
+
+
+def test_uncalibrated_voxel_volume_results_read_as_mol_times_polarization():
+    result = _result(np.full(4, 2e-9), mode="relative")
+    result.metadata["signal_weighting"] = "voxel_volume"
+    display = signal_display(result, "physical")
+    assert display.unit == "simulation" and display.volume_weighted
+    assert display_result(result, display) is result
+    assert display.axis_units == "mol"
+    assert display.axis_label == "Signal × P/P_th"
+    assert display.format_value(2e-9) == "2 nmol × P/P_th"
+    assert "mol × P/P_th" in display.note

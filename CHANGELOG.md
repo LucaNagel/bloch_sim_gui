@@ -6,6 +6,51 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The main tabs are grouped into Setup, Results and Analysis. A group bar next
+  to the tab row shows the tabs of one group, and the workspace switch sits at
+  the right end of the tab row.
+- Sequence forms fold rarely changed rows into an "Advanced" section.
+- Live mode plays rectangular pulses of finite length that turn about the
+  effective field, including off-resonance and gradients. RF and gradient traces
+  follow the played fields, and 3D Vector shows the B1 arrow.
+- Parameter loops and spin probes show progress, elapsed and remaining time;
+  loops also show the current run.
+- The sequence source list is grouped by sequence type and opens Pulseq files
+  and Python scripts directly.
+- Calibrated receiver noise rescales a finished relative voxel sum result
+  instead of asking for a new run.
+- The focused input field is highlighted, and disabled controls and their
+  labels are greyed out.
+- `docs/ui_module_split_plan.md` plans splitting `main_window.py` and
+  `sequence_simulation_widget.py` into topic modules.
+
+### Changed
+
+- Physical voxel-volume signal weighting is the default for 3D phantoms.
+- 3D Vector keeps its plot settings behind "Plot options"; with live mode off a
+  single line replaces the disabled live controls.
+- The RF pulse designer shows the calculated time-bandwidth product and RF
+  bandwidth as "(auto)" rows.
+- Axes in ms, mm, ppm or mT/m keep their unit instead of gaining an SI prefix
+  such as "mms".
+- The "3D Magnetization Animation" view is called "3D Animation"; saved projects
+  still restore it.
+- Main tabs scroll instead of shortening their names, the Free Mode parameter
+  panel keeps its width when the window grows, and the first window scales with
+  the screen.
+- Sequence runs report progress every few seconds. The remaining time follows
+  the recent rate and grows when a report is overdue.
+
+### Fixed
+
+- A decimal point typed while only the integer part of a value is selected
+  replaces the old fraction, so "32.00 mm" can be changed to 64.30.
+- Starting long multi-repetition sequences no longer blocks the window for many
+  seconds; sequence duration queries took quadratic time.
+- The parameter loop progress bar no longer stays at "Saving loop result…".
+
 ## [2.9.6] - 2026-10-30
 
 ### Added

@@ -512,6 +512,11 @@ def test_parameter_loop_chains_real_sequence_workers(
 
     assert widget._parameter_loop_state is None
     expected = [-12.0, 5.0, -12.0] if input_mode == "manual" else [-12.0, 12.0]
+    assert widget.loop_progress.format().startswith(
+        f"Loop complete · {len(expected)}/{len(expected)} runs in "
+    )
+    assert widget.loop_progress.value() == widget.loop_progress.maximum()
+    assert not widget.simulation_time_timer.isActive()
     assert [metadata["value"] for metadata in loop_metadata] == expected
     assert [metadata["index"] for metadata in loop_metadata] == list(
         range(len(expected))

@@ -46,6 +46,34 @@ def install_axis_constrained_zoom():
     pg.ViewBox.wheelEvent = wheel_event
 
 
+# Units that read correctly with an automatic SI prefix ("kHz", "mT", "µs").
+# Units that already carry a prefix or are no SI unit ("ms", "mm", "ppm",
+# "mT/m") would turn into "mms", "µmm" or "kppm", so their axes keep raw values.
+SI_PREFIXABLE_UNITS = frozenset({"s", "Hz", "m", "T", "G", "V", "A", "W", "mol"})
+
+
+def install_unit_prefix_guard():
+    """Disable automatic SI prefixes on axes whose units cannot take one."""
+    current_set_label = pg.AxisItem.setLabel
+    if getattr(current_set_label, "_blochsimulator_unit_prefix", False):
+        return
+
+    def set_label(axis, *args, **kwargs):
+        result = current_set_label(axis, *args, **kwargs)
+        units = axis.labelUnits or ""
+        if units and units not in SI_PREFIXABLE_UNITS:
+            if axis.autoSIPrefix:
+                axis._blochsimulator_prefix_suppressed = True
+                axis.enableAutoSIPrefix(False)
+        elif getattr(axis, "_blochsimulator_prefix_suppressed", False):
+            axis._blochsimulator_prefix_suppressed = False
+            axis.enableAutoSIPrefix(True)
+        return result
+
+    set_label._blochsimulator_unit_prefix = True
+    pg.AxisItem.setLabel = set_label
+
+
 # Fraction of the data extent that zooming out may add on each side. The X
 # margin is small so that a time axis stays within 0 to the measurement time.
 _DATA_LIMIT_X_MARGIN = 0.05

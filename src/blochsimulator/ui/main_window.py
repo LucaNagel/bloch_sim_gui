@@ -36,9 +36,10 @@ from PyQt5.QtWidgets import (
     QFrame,
     QFileDialog,
     QLineEdit,
+    QActionGroup,
 )
 from PyQt5.QtCore import Qt, QRectF, QSettings, QTimer
-from PyQt5.QtGui import QFont, QIcon, QImage, QPalette, QColor
+from PyQt5.QtGui import QFont, QIcon, QImage, QKeySequence, QPalette, QColor
 
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
@@ -97,7 +98,13 @@ except ImportError:
     KSPACE_AVAILABLE = False
 
 from .colormaps import COLORMAP_NAMES, colormap
-from .widgets import CheckableComboBox, install_spin_box_wheel_guard
+from .widgets import (
+    CheckableComboBox,
+    CollapsibleSection,
+    SegmentedButtons,
+    install_input_feedback,
+    install_spin_box_wheel_guard,
+)
 from .widget_state import capture_widget_state as _capture_widget_state
 from .widget_state import restore_widget_state as _restore_widget_state
 from .threads import SimulationThread
@@ -180,6 +187,8 @@ class BlochSimulatorGUI(QMainWindow):
 
     WORKSPACE_SWITCH_DELAY_MS = 25 if sys.platform == "darwin" else 0
     FREE_MODE_COMPONENT_WIDTH = 220
+    # Title bar height reserved when the first window fills a short screen.
+    WINDOW_FRAME_ALLOWANCE = 40
     # Isochromats drawn per position when the 3D view arranges spins along
     # their positions; the position means still use every frequency.
     SPATIAL_VECTOR_MAX_FREQUENCIES = 32
@@ -228,10 +237,19 @@ class BlochSimulatorGUI(QMainWindow):
             self.setGeometry(100, 100, 1400, 900)
         else:
             available = screen.availableGeometry()
-            window_width = min(1400, available.width())
-            window_height = min(900, available.height())
+            # Large screens get a larger first window. setGeometry sizes the
+            # client area, so leave room for the title bar on small screens.
+            window_width = min(
+                max(1400, round(0.8 * available.width())), available.width()
+            )
+            window_height = min(
+                max(900, round(0.85 * available.height())),
+                available.height() - self.WINDOW_FRAME_ALLOWANCE,
+            )
             window_x = available.x() + max(0, (available.width() - window_width) // 2)
-            window_y = available.y() + max(0, (available.height() - window_height) // 2)
+            window_y = available.y() + max(
+                self.WINDOW_FRAME_ALLOWANCE, (available.height() - window_height) // 2
+            )
             self.setGeometry(
                 window_x, window_y, max(1, window_width), max(1, window_height)
             )
@@ -329,7 +347,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.workspace_header_layout.addStretch()
         main_layout.addWidget(self.workspace_header)
 
-        # Left panel - Parameters
+        # Left panel - Parameters; each section folds away from its title.
+        self.free_mode_sections = {}
         left_panel = QWidget()
         left_layout = QVBoxLayout()
         left_layout.setContentsMargins(6, 6, 6, 18)
@@ -347,12 +366,14 @@ class BlochSimulatorGUI(QMainWindow):
             self._synchronize_workspace_field_strength
         )
         self.tissue_widget.nucleus_changed.connect(self._synchronize_workspace_nucleus)
-        left_layout.addWidget(self.tissue_widget)
+        left_layout.addWidget(self._free_mode_section(self.tissue_widget, "tissue"))
 
         # RF Pulse designers
         # 1. Compact panel view
         self.rf_designer_panel = RFPulseDesigner(compact=True)
-        left_layout.addWidget(self.rf_designer_panel)
+        left_layout.addWidget(
+            self._free_mode_section(self.rf_designer_panel, "rf_pulse")
+        )
 
         # 2. Full view for main tab (created here, added to tab widget later)
         self.rf_designer_tab = RFPulseDesigner(compact=False)
@@ -371,7 +392,9 @@ class BlochSimulatorGUI(QMainWindow):
 
         # Sequence designer
         self.sequence_designer = SequenceDesigner()
-        left_layout.addWidget(self.sequence_designer)
+        left_layout.addWidget(
+            self._free_mode_section(self.sequence_designer, "sequence")
+        )
         self.sequence_designer.parent_gui = self
         self.rf_designer.pulse_changed.connect(self.sequence_designer.set_custom_pulse)
         self.rf_designer.pulse_changed.connect(
@@ -717,7 +740,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         control_group.setLayout(control_layout)
         control_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        left_layout.addWidget(control_group)
+        left_layout.addWidget(self._free_mode_section(control_group, "simulation"))
 
         left_layout.addStretch()
 
@@ -728,8 +751,10 @@ class BlochSimulatorGUI(QMainWindow):
         left_scroll.setMinimumHeight(0)
         left_scroll.setWidget(left_panel)
         # Ensure the scroll area knows the full height so bottom controls are reachable
-        left_panel.adjustSize()
-        left_panel.setMinimumHeight(left_panel.sizeHint().height() + 32)
+        self.free_mode_left_panel = left_panel
+        self._fit_free_mode_left_panel()
+        for section in self.free_mode_sections.values():
+            section.toggled.connect(lambda _expanded: self._fit_free_mode_left_panel())
 
         left_container = QWidget()
         left_container_layout = QVBoxLayout()
@@ -758,30 +783,24 @@ class BlochSimulatorGUI(QMainWindow):
         right_layout.setSpacing(6)
         right_panel.setLayout(right_layout)
 
-        # Shared heatmap colormap selector for all tabs
+        # Shared heatmap colormap, chosen in View > Heatmap Colormap.
+        self.heatmap_colormap_name = str(
+            self.app_settings.value("view/heatmap_colormap", "viridis")
+        )
+        if self.heatmap_colormap_name not in COLORMAP_NAMES:
+            self.heatmap_colormap_name = "viridis"
+
+        # Universal time control - controls all time-resolved views. It
+        # appears with the first time-resolved Free Mode result.
         self.free_mode_playback_header = QWidget()
         playback_header_layout = QVBoxLayout(self.free_mode_playback_header)
         playback_header_layout.setContentsMargins(0, 0, 0, 0)
         playback_header_layout.setSpacing(4)
-
-        colormap_controls = QWidget()
-        self.free_mode_colormap_controls = colormap_controls
-        colormap_layout = QHBoxLayout(colormap_controls)
-        colormap_layout.setContentsMargins(0, 0, 0, 0)
-        colormap_layout.addWidget(QLabel("Heatmap colormap:"))
-        self.heatmap_colormap = QComboBox()
-        self.heatmap_colormap.addItems(COLORMAP_NAMES)
-        self.heatmap_colormap.setCurrentText("viridis")
-        self.heatmap_colormap.currentTextChanged.connect(self._apply_heatmap_colormap)
-        colormap_layout.addWidget(self.heatmap_colormap)
-        colormap_layout.addStretch()
-        self.free_mode_colormap_layout = colormap_layout
-        playback_header_layout.addWidget(colormap_controls)
-
-        # Universal time control - controls all time-resolved views
         self.time_control = UniversalTimeControl(compact=False)
         self.time_control.setEnabled(False)
         playback_header_layout.addWidget(self.time_control)
+        self._free_mode_playback_shown = False
+        self.free_mode_playback_header.setVisible(False)
         right_layout.addWidget(self.free_mode_playback_header)
 
         # Tab widget for different views
@@ -789,10 +808,17 @@ class BlochSimulatorGUI(QMainWindow):
         self.tab_widget.setObjectName("main_tabs")
         self.tab_widget.tabBar().setUsesScrollButtons(True)
         self.tab_widget.tabBar().setExpanding(False)
-        self.tab_widget.tabBar().setElideMode(Qt.ElideRight)
+        # On narrow windows the tabs scroll; elided names like "Ma…" say nothing.
+        self.tab_widget.tabBar().setElideMode(Qt.ElideNone)
         tab_font = self.tab_widget.tabBar().font()
         tab_font.setBold(True)
         self.tab_widget.tabBar().setFont(tab_font)
+        # Two tab levels: a group bar (Setup / Results / Analysis) shows one
+        # group's tabs at a time. Workspaces still decide which tabs exist.
+        self._main_tab_available = {}
+        self._main_tab_group_of = {}
+        self._main_tab_group = None
+        self._main_tab_group_memory = {}
 
         # Magnetization plots
         mag_widget = QWidget()
@@ -1477,7 +1503,7 @@ class BlochSimulatorGUI(QMainWindow):
         )
         b1_layout.addStretch()
         self.b1_subtabs = QTabWidget()
-        self.b1_subtabs.addTab(self.b1_placeholder, "B1 Fields")
+        self.b1_subtabs.addTab(self.b1_placeholder, "Coils")
         self.b1_tab_index = self.tab_widget.addTab(self.b1_subtabs, "B1 Fields")
         self.tab_widget.currentChanged.connect(self._ensure_b1_workspace)
 
@@ -1664,26 +1690,27 @@ class BlochSimulatorGUI(QMainWindow):
                 get_phantom_callback=get_phantom_for_kspace,
                 get_magnetization_callback=get_magnetization_for_kspace,
             )
-            self.tab_widget.addTab(
-                self._wrap_in_scroll_area(self.kspace_widget), "📡 K-Space"
+            self.imaging_simulation_tab_index = self.tab_widget.addTab(
+                self._wrap_in_scroll_area(self.kspace_widget), "Imaging Simulation"
             )
         else:
             self.kspace_widget = None
+            self.imaging_simulation_tab_index = -1
 
         # === PARAMETER SWEEP TAB ===
         self.param_sweep_widget = ParameterSweepWidget(self)
-        self.tab_widget.addTab(
+        self.parameter_sweep_tab_index = self.tab_widget.addTab(
             self._wrap_in_scroll_area(self.param_sweep_widget), "Parameter Sweep"
         )
 
         # === RF PULSE DESIGN TAB ===
-        self.tab_widget.addTab(
+        self.rf_design_tab_index = self.tab_widget.addTab(
             self._wrap_in_scroll_area(self.rf_designer_tab), "RF Design"
         )
 
         # === SLICE EXPLORER TAB ===
         self.slice_explorer = SliceSelectionExplorer(self, rf_designer=self.rf_designer)
-        self.tab_widget.addTab(
+        self.slice_explorer_tab_index = self.tab_widget.addTab(
             self._wrap_in_scroll_area(self.slice_explorer), "Slice Explorer"
         )
 
@@ -1703,7 +1730,9 @@ class BlochSimulatorGUI(QMainWindow):
         self.log_widget.setReadOnly(True)
         log_layout.addWidget(self.log_widget)
         log_tab.setLayout(log_layout)
-        self.tab_widget.addTab(self._wrap_in_scroll_area(log_tab), "Log")
+        self.log_tab_index = self.tab_widget.addTab(
+            self._wrap_in_scroll_area(log_tab), "Log"
+        )
 
         # Add time cursor lines to spatial plots for synchronization
         self.spatial_mxy_time_line = pg.InfiniteLine(
@@ -1725,10 +1754,7 @@ class BlochSimulatorGUI(QMainWindow):
         right_layout.addWidget(self.tab_widget, 1)
 
         # Apply initial colormap selection now that heatmaps are constructed
-        default_cmap = "viridis"
-        if hasattr(self, "heatmap_colormap") and self.heatmap_colormap is not None:
-            default_cmap = self.heatmap_colormap.currentText()
-        self._apply_heatmap_colormap(default_cmap)
+        self._apply_heatmap_colormap(self.heatmap_colormap_name)
 
         # Default to the 3D Vector tab so users immediately see the vector view
         if hasattr(self, "mag_3d"):
@@ -1738,6 +1764,8 @@ class BlochSimulatorGUI(QMainWindow):
                     self.tab_widget.setCurrentIndex(i)
                     break
 
+        self._install_main_tab_groups()
+
         # Connect tab change to optimize rendering
         self._last_main_tab_index = self.tab_widget.currentIndex()
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
@@ -1746,8 +1774,9 @@ class BlochSimulatorGUI(QMainWindow):
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.addWidget(left_container)
         self.main_splitter.addWidget(right_panel)
-        self.main_splitter.setStretchFactor(0, 1)
-        self.main_splitter.setStretchFactor(1, 3)
+        # Window resizes go to the plots; the parameter panel keeps its width.
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
         self.main_splitter.setSizes([420, 1000])
         main_layout.addWidget(self.main_splitter, 1)
 
@@ -2333,7 +2362,11 @@ class BlochSimulatorGUI(QMainWindow):
             "Parameter Loop": (
                 "Configure and run a generic parameter loop for the active sequence."
             ),
-            "📡 K-Space": "Simulate and inspect sampled k-space data.",
+            "Imaging Simulation": (
+                "Sample k-space of the phantom along Cartesian, EPI, or CSI "
+                "trajectories, with eddy currents and B0 effects, and "
+                "reconstruct the image."
+            ),
             "k-Space Trajectory": (
                 "Inspect the k-space trajectory of the current sequence with "
                 "gradient timing, imperfections, animation, and sampling PSF."
@@ -2362,10 +2395,6 @@ class BlochSimulatorGUI(QMainWindow):
                 self.slice_explorer.pulse_source,
                 "Use the current RF Design waveform or generate a selected pulse "
                 "shape from the Slice Explorer controls.",
-            ),
-            (
-                self.heatmap_colormap,
-                "Color map used by all heatmap views. This changes only the display, not the simulation data.",
             ),
             (
                 self.mag_3d.vector_palette_combo,
@@ -3775,6 +3804,7 @@ class BlochSimulatorGUI(QMainWindow):
             self.mag_3d.begin_live_trace()
             return
         self.mag_3d._clear_path()
+        self.mag_3d.b1_arrow.setVisible(False)
         self.mag_3d.end_live_trace()
         if self.anim_data is not None and len(self.anim_data) > 0:
             self._refresh_vector_view(restart=False)
@@ -3808,8 +3838,10 @@ class BlochSimulatorGUI(QMainWindow):
                     b1, gradients, shown, readout=live.field_readout()
                 )
                 self.mag_3d.show_field_frame(0)
+            self.mag_3d.b1_arrow.setVisible(False)
         else:
             self._live_field_key = None
+            self._draw_live_b1_arrow(live.current_pulse())
         self.mag_3d.update_magnetization(
             anim[0],
             colors=colors,
@@ -3824,6 +3856,19 @@ class BlochSimulatorGUI(QMainWindow):
             mean,
             window_ms=LIVE_TRACE_WINDOW_S * live.speed_spin.value(),
         )
+        self.mag_3d.set_live_fields(live.field_history, system.time_s * 1e3)
+
+    def _draw_live_b1_arrow(self, pulse):
+        """Show the B1 of a live pulse in the overlaid view (unit length)."""
+        arrow = self.mag_3d.b1_arrow
+        if pulse is None:
+            arrow.setVisible(False)
+            return
+        # Along the rotation axis of the pulse, as in the playback overlay.
+        phase = np.radians(pulse[1])
+        tip = [-np.cos(phase), np.sin(phase), 0.0]
+        arrow.setData(pos=np.array([[0.0, 0.0, 0.0], tip]))
+        arrow.setVisible(True)
 
     @staticmethod
     def _display_subsample_indices(total: int, limit: int) -> np.ndarray:
@@ -4169,10 +4214,27 @@ class BlochSimulatorGUI(QMainWindow):
             return legend
         return None
 
+    def set_heatmap_colormap(self, name: str):
+        """Use ``name`` for all heatmaps and remember it."""
+        if name not in COLORMAP_NAMES:
+            return
+        self.heatmap_colormap_name = name
+        self.app_settings.setValue("view/heatmap_colormap", name)
+        action = getattr(self, "heatmap_colormap_actions", {}).get(name)
+        if action is not None:
+            action.setChecked(True)
+        self._apply_heatmap_colormap(name)
+
+    def _show_free_mode_playback(self):
+        """Reveal Playback Control once there is a time course to play."""
+        self._free_mode_playback_shown = True
+        if getattr(self, "workspace_mode", "free") == "free":
+            self.free_mode_playback_header.setVisible(True)
+
     def _apply_heatmap_colormap(self, cmap_name: Optional[str] = None):
         """Apply a shared colormap to all heatmaps/colorbars."""
-        if cmap_name is None and hasattr(self, "heatmap_colormap"):
-            cmap_name = self.heatmap_colormap.currentText()
+        if cmap_name is None:
+            cmap_name = getattr(self, "heatmap_colormap_name", None)
         cmap_name = cmap_name or "viridis"
         try:
             cmap = colormap(cmap_name)
@@ -5628,6 +5690,13 @@ class BlochSimulatorGUI(QMainWindow):
         settings_action.setObjectName("action_settings")
         settings_action.triggered.connect(lambda: self.show_settings())
 
+        # Ctrl+R is Cmd+R on macOS and runs whichever workspace is shown.
+        run_action = tools_menu.addAction("Run Simulation")
+        run_action.setObjectName("action_run_simulation")
+        run_action.setShortcut(QKeySequence("Ctrl+R"))
+        run_action.triggered.connect(self._run_active_workspace)
+        self.run_simulation_action = run_action
+
         view_menu = menubar.addMenu("View")
         view_menu.setObjectName("menu_view")
         self.free_workspace_action = view_menu.addAction("Free Mode")
@@ -5640,17 +5709,38 @@ class BlochSimulatorGUI(QMainWindow):
         self.sequence_workspace_action.triggered.connect(
             lambda: self._request_workspace_mode("sequence")
         )
+        view_menu.addSeparator()
+        colormap_menu = view_menu.addMenu("Heatmap Colormap")
+        colormap_menu.setObjectName("menu_heatmap_colormap")
+        colormap_menu.setToolTip(
+            "Color map used by all Free Mode heatmaps. This changes only the "
+            "display, not the simulation data."
+        )
+        colormap_group = QActionGroup(self)
+        colormap_group.setExclusive(True)
+        self.heatmap_colormap_actions = {}
+        for name in COLORMAP_NAMES:
+            action = colormap_menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == self.heatmap_colormap_name)
+            colormap_group.addAction(action)
+            action.triggered.connect(
+                lambda _checked=False, name=name: self.set_heatmap_colormap(name)
+            )
+            self.heatmap_colormap_actions[name] = action
 
         workspace_switch = QWidget()
         workspace_switch_layout = QHBoxLayout(workspace_switch)
         workspace_switch_layout.setContentsMargins(4, 0, 6, 0)
-        workspace_switch_layout.addWidget(QLabel("Workspace:"))
+        # The mode names explain themselves; without a label the tab row keeps
+        # room for the tabs on small screens.
         self.workspace_mode_selector = QComboBox()
+        self.workspace_mode_selector.setAccessibleName("Workspace")
         self.workspace_mode_selector.addItem("Free Mode", "free")
         self.workspace_mode_selector.addItem("Sequence Mode", "sequence")
         self.workspace_mode_selector.setToolTip(
-            "Free Mode shows the single-spin tools; Sequence Mode maximizes "
-            "the sequence simulation and phantom workspaces."
+            "Workspace: Free Mode shows the single-spin tools; Sequence Mode "
+            "maximizes the sequence simulation and phantom workspaces."
         )
         workspace_switch_layout.addWidget(self.workspace_mode_selector)
         self.workspace_header_layout.addWidget(workspace_switch)
@@ -5792,11 +5882,11 @@ class BlochSimulatorGUI(QMainWindow):
             sequence_widget.reconstruction_explorer.restore_state(
                 run.state.get("reconstruction_view", {})
             )
-            view_name = str(run.state.get("sequence_view_name", ""))
-            for index in range(sequence_widget.views.count()):
-                if sequence_widget.views.tabText(index) == view_name:
-                    sequence_widget.views.setCurrentIndex(index)
-                    break
+            view_index = sequence_widget.view_tab_index(
+                run.state.get("sequence_view_name", "")
+            )
+            if view_index >= 0:
+                sequence_widget.views.setCurrentIndex(view_index)
             self.tab_widget.setCurrentIndex(self.sequence_simulation_tab_index)
 
     def _restore_session_run_phantom(self, run):
@@ -5995,36 +6085,183 @@ class BlochSimulatorGUI(QMainWindow):
                 message += f"; example notebook could not be written: {exc}"
         self.statusBar().showMessage(message, 7000)
 
-    def _set_main_tab_visible(self, index: int, visible: bool):
-        """Set main-tab visibility across supported Qt 5 versions."""
+    def _free_mode_section(self, group_box, key):
+        """Wrap a Free Mode settings group so its title folds it away."""
+        section = CollapsibleSection(
+            group_box, settings=self.app_settings, key=f"free_mode/{key}"
+        )
+        self.free_mode_sections[key] = section
+        return section
+
+    def _fit_free_mode_left_panel(self):
+        """Size the Free Mode column to its folded or unfolded sections."""
+        panel = self.free_mode_left_panel
+        panel.setMinimumHeight(0)
+        panel.adjustSize()
+        panel.setMinimumHeight(panel.sizeHint().height() + 32)
+
+    MAIN_TAB_GROUPS = (
+        ("setup", "Setup"),
+        ("results", "Results"),
+        ("analysis", "Analysis"),
+    )
+
+    def _install_main_tab_groups(self):
+        """Sort the main tabs into groups and put the group bar beside them."""
+        groups = {
+            "setup": (
+                self.sequence_simulation_tab_index,
+                self.phantom_tab_index,
+                self.b1_tab_index,
+                self.receiver_noise_tab_index,
+                self.rf_design_tab_index,
+            ),
+            "results": (
+                self.simulation_explorer_tab_index,
+                self.magnetization_tab_index,
+                self.mag_3d_tab_index,
+                self.signal_tab_index,
+                self.spectrum_tab_index,
+                self.spatial_tab_index,
+                self.log_tab_index,
+            ),
+            "analysis": (
+                self.spoiling_analysis_tab_index,
+                self.psf_analysis_tab_index,
+                self.kspace_tab_index,
+                self.sequence_parameter_loop_tab_index,
+                self.imaging_simulation_tab_index,
+                self.parameter_sweep_tab_index,
+                self.slice_explorer_tab_index,
+            ),
+        }
+        self._main_tab_group_of = {
+            index: group
+            for group, indices in groups.items()
+            for index in indices
+            if index >= 0
+        }
+        self.main_tab_group_bar = SegmentedButtons(self.MAIN_TAB_GROUPS)
+        self.main_tab_group_bar.setObjectName("main_tab_groups")
+        self.main_tab_group_bar.buttons["setup"].setToolTip(
+            "Sequence, phantom, B1, receiver, and RF pulse settings."
+        )
+        self.main_tab_group_bar.buttons["results"].setToolTip(
+            "Simulated magnetization, signals, spectra, and session runs."
+        )
+        self.main_tab_group_bar.buttons["analysis"].setToolTip(
+            "Point-spread function, k-space, spoiling, sweeps, and loops."
+        )
+        self.main_tab_group_bar.current_changed.connect(self._select_main_tab_group)
+        self.tab_widget.setCornerWidget(self.main_tab_group_bar, Qt.TopLeftCorner)
+        self.main_tab_group_bar.show()
+        self._show_main_tab_group(
+            self._main_tab_group_of.get(self.tab_widget.currentIndex(), "results")
+        )
+        self.tab_widget.currentChanged.connect(self._follow_main_tab_group)
+
+    def main_tab_available(self, index: int) -> bool:
+        """Whether a main tab belongs to the active workspace (in any group)."""
         if not 0 <= index < self.tab_widget.count():
-            return
+            return False
+        return self._main_tab_available.get(index, True)
+
+    def _main_tab_group_tabs(self, group):
+        return [
+            index
+            for index in range(self.tab_widget.count())
+            if self._main_tab_group_of.get(index) == group
+            and self.main_tab_available(index)
+        ]
+
+    def _apply_main_tab_visibility(self, index: int):
+        group = self._main_tab_group_of.get(index)
+        visible = self.main_tab_available(index) and (
+            group is None
+            or self._main_tab_group is None
+            or group == self._main_tab_group
+        )
         if hasattr(self.tab_widget, "setTabVisible"):
             self.tab_widget.setTabVisible(index, visible)
         else:
             self.tab_widget.tabBar().setTabVisible(index, visible)
 
+    def _set_main_tab_visible(self, index: int, visible: bool):
+        """Make a main tab available in the workspace; its group shows it."""
+        if not 0 <= index < self.tab_widget.count():
+            return
+        self._main_tab_available[index] = bool(visible)
+        self._apply_main_tab_visibility(index)
+        self._sync_main_tab_group_bar()
+
+    def _show_main_tab_group(self, group, current=None):
+        """Show ``group``'s tabs, selecting ``current`` before hiding others.
+
+        Selecting first keeps Qt from walking through neighbouring tabs (and
+        building their lazy workspaces) as the current tab disappears.
+        QTabWidget also makes a newly shown tab current while the current tab
+        is hidden, so a hidden current tab of this group is shown first.
+        """
+        self._main_tab_group = group
+        members = set(self._main_tab_group_tabs(group))
+        hidden_current = self.tab_widget.currentIndex()
+        for index in sorted(members, key=lambda index: index != hidden_current):
+            self._apply_main_tab_visibility(index)
+        if current is not None and self.tab_widget.currentIndex() != current:
+            self.tab_widget.setCurrentIndex(current)
+        for index in range(self.tab_widget.count()):
+            if index not in members:
+                self._apply_main_tab_visibility(index)
+        self._sync_main_tab_group_bar()
+
+    def _select_main_tab_group(self, group):
+        """Open the group's last used tab, or its first one."""
+        if group == self._main_tab_group:
+            return
+        tabs = self._main_tab_group_tabs(group)
+        if not tabs:
+            self._sync_main_tab_group_bar()
+            return
+        mode = getattr(self, "workspace_mode", "free")
+        target = self._main_tab_group_memory.get((mode, group))
+        if target not in tabs:
+            target = tabs[0]
+        self._show_main_tab_group(group, current=target)
+
+    def _follow_main_tab_group(self, index: int):
+        """Switch the group bar to the group of a tab opened from elsewhere."""
+        group = self._main_tab_group_of.get(index)
+        if group is None or not self.main_tab_available(index):
+            return
+        mode = getattr(self, "workspace_mode", "free")
+        self._main_tab_group_memory[(mode, group)] = index
+        if group != self._main_tab_group:
+            self._show_main_tab_group(group)
+
+    def _sync_main_tab_group_bar(self):
+        bar = getattr(self, "main_tab_group_bar", None)
+        if bar is None:
+            return
+        for group, button in bar.buttons.items():
+            button.setEnabled(bool(self._main_tab_group_tabs(group)))
+        bar.set_current(self._main_tab_group)
+
     def _workspace_selector_changed(self, _index: int):
         """Queue a workspace change after the native combo popup has closed."""
         self._request_workspace_mode(str(self.workspace_mode_selector.currentData()))
 
-    def _place_workspace_switch(self, *, sequence_mode: bool):
-        """Keep the selector beside the active workspace's primary controls."""
+    def _place_workspace_switch(self):
+        """Keep the selector in the main tab-bar row of both workspaces.
+
+        Sharing the row with the group bar and the tabs removes the otherwise
+        empty application-header row.
+        """
         if not hasattr(self, "workspace_switch"):
             return
-        if self.tab_widget.cornerWidget(Qt.TopRightCorner) is self.workspace_switch:
-            self.tab_widget.setCornerWidget(None, Qt.TopRightCorner)
-        self.workspace_header_layout.removeWidget(self.workspace_switch)
-        self.free_mode_colormap_layout.removeWidget(self.workspace_switch)
-        if sequence_mode:
-            # Share the main tab-bar row with Sequence Simulation / Phantom.
-            # This removes the otherwise empty application-header row and
-            # mirrors Free Mode, where the selector shares the colormap row.
+        if self.tab_widget.cornerWidget(Qt.TopRightCorner) is not self.workspace_switch:
+            self.workspace_header_layout.removeWidget(self.workspace_switch)
             self.tab_widget.setCornerWidget(self.workspace_switch, Qt.TopRightCorner)
-        else:
-            self.free_mode_colormap_layout.addWidget(self.workspace_switch)
-        # Reparenting a visible widget hides it; both destinations need an
-        # explicit show so the selector survives every workspace transition.
+        # Reparenting a visible widget hides it; show it explicitly.
         self.workspace_switch.show()
         self.workspace_header.setVisible(False)
 
@@ -6110,14 +6347,17 @@ class BlochSimulatorGUI(QMainWindow):
                 self._sync_play_toggle(False)
 
         self.workspace_mode = mode
-        self._place_workspace_switch(sequence_mode=sequence_mode)
+        self._place_workspace_switch()
         self.free_mode_left_container.setVisible(not sequence_mode)
-        self.free_mode_playback_header.setVisible(not sequence_mode)
+        self.free_mode_playback_header.setVisible(
+            not sequence_mode and self._free_mode_playback_shown
+        )
         self.status_run_bar.setVisible(not sequence_mode)
 
         if sequence_mode:
             # Sequence Simulation is hidden in Free Mode. Reveal and select it
             # before hiding the Free Mode tabs to avoid re-entrant tab changes.
+            self._main_tab_group = "setup"
             self._set_main_tab_visible(self.sequence_simulation_tab_index, True)
             # Select the one tab that remains active before hiding the Free Mode
             # tabs. Otherwise Qt successively selects every next visible tab as
@@ -6148,20 +6388,6 @@ class BlochSimulatorGUI(QMainWindow):
             # Reveal Free Mode tabs first, then leave the focused Sequence
             # Mode workspaces hidden. Selecting the restored tab before hiding
             # either current tab prevents re-entrant workspace activation.
-            for index in range(self.tab_widget.count()):
-                if index not in {
-                    self.sequence_simulation_tab_index,
-                    self.phantom_tab_index,
-                    self.b1_tab_index,
-                    self.receiver_noise_tab_index,
-                    self.spoiling_analysis_tab_index,
-                    self.psf_analysis_tab_index,
-                    self.kspace_tab_index,
-                    self.simulation_explorer_tab_index,
-                    self.sequence_parameter_loop_tab_index,
-                }:
-                    self._set_main_tab_visible(index, True)
-            self.main_splitter.setSizes([420, max(1, self.width() - 420)])
             restore_index = getattr(self, "_free_mode_tab_index", 1)
             if not 0 <= restore_index < self.tab_widget.count():
                 restore_index = self.magnetization_tab_index
@@ -6176,6 +6402,21 @@ class BlochSimulatorGUI(QMainWindow):
                 # the workspace transition is fully complete.
                 restore_index = self.magnetization_tab_index
                 self._free_mode_tab_index = restore_index
+            self._main_tab_group = self._main_tab_group_of.get(restore_index, "results")
+            for index in range(self.tab_widget.count()):
+                if index not in {
+                    self.sequence_simulation_tab_index,
+                    self.phantom_tab_index,
+                    self.b1_tab_index,
+                    self.receiver_noise_tab_index,
+                    self.spoiling_analysis_tab_index,
+                    self.psf_analysis_tab_index,
+                    self.kspace_tab_index,
+                    self.simulation_explorer_tab_index,
+                    self.sequence_parameter_loop_tab_index,
+                }:
+                    self._set_main_tab_visible(index, True)
+            self.main_splitter.setSizes([420, max(1, self.width() - 420)])
             self.tab_widget.setCurrentIndex(restore_index)
             self._set_main_tab_visible(self.sequence_simulation_tab_index, False)
             self._set_main_tab_visible(self.phantom_tab_index, False)
@@ -6192,6 +6433,7 @@ class BlochSimulatorGUI(QMainWindow):
                 # resize the compact Free Mode window.
                 self.setGeometry(free_geometry)
 
+        self._sync_main_tab_group_bar()
         if hasattr(self, "workspace_mode_selector"):
             index = self.workspace_mode_selector.findData(mode)
             blocked = self.workspace_mode_selector.blockSignals(True)
@@ -6566,8 +6808,13 @@ class BlochSimulatorGUI(QMainWindow):
         layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(8)
 
-        self.status_run_button = QPushButton("Run Single-Spin Simulation")
+        self.status_run_button = QPushButton("Run Simulation")
         self.status_run_button.setObjectName("run_btn")
+        self.status_run_button.setToolTip(
+            "Run the Free Mode simulation ("
+            + QKeySequence("Ctrl+R").toString(QKeySequence.NativeText)
+            + ")"
+        )
         self.status_run_button.clicked.connect(self.run_simulation)
         self.status_run_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         layout.addWidget(self.status_run_button)
@@ -6694,6 +6941,16 @@ class BlochSimulatorGUI(QMainWindow):
             setattr(self, name, None)
         self.simulator.last_result = None
         self.simulation_thread = None
+
+    def _run_active_workspace(self):
+        """Run the simulation of the visible workspace, if it can run now."""
+        if self.workspace_mode == "sequence":
+            widget = getattr(self, "sequence_simulation_widget", None)
+            button = getattr(widget, "run_button", None)
+        else:
+            button = getattr(self, "status_run_button", None)
+        if button is not None and button.isEnabled() and button.isVisible():
+            button.click()
 
     def run_simulation(self):
         """Run the Bloch simulation."""
@@ -7143,6 +7400,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self._refresh_vector_view(mean_only=mean_only)
                 self.time_control.set_time_range(self.playback_time)
                 self.time_control.setEnabled(True)
+                self._show_free_mode_playback()
 
             self.update_spatial_plot_from_last_result()
         finally:
@@ -7482,16 +7740,9 @@ class BlochSimulatorGUI(QMainWindow):
                     sequence_widget.reconstruction_explorer.restore_state(
                         state.get("reconstruction_view", {})
                     )
-                saved_view_name = str(state.get("sequence_view_name", ""))
-                # The Geometry tab was renamed to Setup.
-                if saved_view_name == "Geometry":
-                    saved_view_name = "Setup"
-                saved_view_index = -1
-                if saved_view_name:
-                    for index in range(sequence_widget.views.count()):
-                        if sequence_widget.views.tabText(index) == saved_view_name:
-                            saved_view_index = index
-                            break
+                saved_view_index = sequence_widget.view_tab_index(
+                    state.get("sequence_view_name", "")
+                )
                 if saved_view_index < 0:
                     # Before the combined 2D tab, k-space and reconstruction
                     # occupied indices 2 and 3 and shifted every later page by
@@ -7519,13 +7770,11 @@ class BlochSimulatorGUI(QMainWindow):
                             "Log",
                         )
                         if 0 <= saved_view_index < len(legacy_names):
-                            for index in range(sequence_widget.views.count()):
-                                if (
-                                    sequence_widget.views.tabText(index)
-                                    == legacy_names[saved_view_index]
-                                ):
-                                    saved_view_index = index
-                                    break
+                            legacy_index = sequence_widget.view_tab_index(
+                                legacy_names[saved_view_index]
+                            )
+                            if legacy_index >= 0:
+                                saved_view_index = legacy_index
                 if saved_view_index == sequence_widget.two_d_result_tab_index:
                     # The combined 2D page is hidden behind the Explorer.
                     saved_view_index = sequence_widget.reconstruction_explorer_tab_index
@@ -10581,6 +10830,7 @@ def main():
         style_mode=settings.value("interface/style", "automatic"),
         system_style_name=system_style_name,
     )
+    install_input_feedback(app)
 
     # Create and show main window
     window = BlochSimulatorGUI()

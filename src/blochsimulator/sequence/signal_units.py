@@ -80,11 +80,20 @@ class SignalDisplay:
     ``sample_scale`` multiplies the chronological ADC samples; in SNR units it
     differs per sample because the noise std follows each ADC event's
     bandwidth. ``note`` explains a fallback from the requested unit.
+    ``volume_weighted`` marks simulation units from a physical voxel-volume
+    weighting, which are mol × P/P_th.
     """
 
     unit: str
     sample_scale: object = 1.0
     note: str = ""
+    volume_weighted: bool = False
+
+    @property
+    def _amount(self) -> bool:
+        return self.unit == "physical" or (
+            self.unit == "simulation" and self.volume_weighted
+        )
 
     @property
     def snr(self) -> bool:
@@ -110,15 +119,23 @@ class SignalDisplay:
 
     @property
     def axis_label(self) -> str:
-        return "Signal / σ" if self.snr else "Signal"
+        if self.snr:
+            return "Signal / σ"
+        if self.unit == "simulation" and self.volume_weighted:
+            return "Signal × P/P_th"
+        return "Signal"
 
     @property
     def axis_units(self) -> Optional[str]:
         """Units for pyqtgraph, which adds the SI prefix itself."""
-        return {"physical": "mol", "simulation": "a.u."}.get(self.unit)
+        if self._amount:
+            return "mol"
+        return {"simulation": "a.u."}.get(self.unit)
 
     @property
     def description(self) -> str:
+        if self.unit == "simulation" and self.volume_weighted:
+            return "mol × P/P_th (voxel volume weighting)"
         return {
             "physical": "mol, fully polarized equivalent",
             "snr": "SNR units, noise σ = 1 per quadrature",
@@ -129,6 +146,8 @@ class SignalDisplay:
         value = float(value)
         if self.unit == "physical":
             return format_amount(value)
+        if self._amount:
+            return f"{format_amount(value)} × P/P_th"
         if self.snr:
             return f"{value:.4g} σ"
         return f"{value:.5g}"
@@ -157,6 +176,10 @@ def signal_display(result, unit=DEFAULT_SIGNAL_UNIT) -> SignalDisplay:
         if factor is not None:
             return SignalDisplay("physical", factor)
         note = "Physical units need a calibrated receiver"
+    if result.metadata.get("signal_weighting") == "voxel_volume":
+        return SignalDisplay(
+            "simulation", 1.0, f"{note}; showing mol × P/P_th", volume_weighted=True
+        )
     return SignalDisplay("simulation", 1.0, f"{note}; showing simulation units")
 
 

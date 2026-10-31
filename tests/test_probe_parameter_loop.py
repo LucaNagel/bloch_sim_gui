@@ -67,6 +67,11 @@ def test_probe_loop_saves_probe_projects_and_notebook(qt_application, tmp_path):
     _wait_until(lambda: widget._parameter_loop_state is None)
 
     assert widget.probe_controls.isEnabled()
+    # Spin probes drive the run bar; the loop bar covers the whole loop.
+    assert widget.progress.format().startswith("100% · Complete in ")
+    assert not widget.loop_progress.isHidden()
+    assert widget.loop_progress.format().startswith("Loop complete · 2/2 runs in ")
+    assert not widget.simulation_time_timer.isActive()
     paths = sorted(tmp_path.glob("*.blochproj"))
     assert len(paths) == 2
     loop_ids = set()

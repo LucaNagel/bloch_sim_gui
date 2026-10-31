@@ -163,11 +163,19 @@ class RFPulseDesigner(QGroupBox):
         self.tbw.hide()
         # tbw_layout.addWidget(self.tbw)
         # control_layout.addLayout(tbw_layout)
-        self.tbw_auto_label = QLabel("Time-bandwidth product (auto): —")
-        self.tbw_auto_label.setStyleSheet("color: gray;")
-        control_layout.addWidget(self.tbw_auto_label)
+        # Calculated values read like the other rows; "(auto)" marks them.
+        tbw_layout = QHBoxLayout()
+        tbw_layout.addWidget(QLabel("Time-bandwidth product:"))
+        self.tbw_auto_label = QLabel("— (auto)")
+        self.tbw_auto_label.setObjectName(f"{prefix}tbw_auto_label")
+        self.tbw_auto_label.setToolTip(
+            "Calculated automatically from the RF pulse shape"
+        )
+        tbw_layout.addWidget(self.tbw_auto_label, 1)
+        control_layout.addLayout(tbw_layout)
 
         design_tbw_layout = QHBoxLayout()
+        design_tbw_layout.setContentsMargins(0, 0, 0, 0)
         design_tbw_layout.addWidget(QLabel("Legacy shape parameter:"))
         self.design_tbw = QDoubleSpinBox()
         self.design_tbw.setObjectName(f"{prefix}design_tbw")
@@ -199,14 +207,20 @@ class RFPulseDesigner(QGroupBox):
         self.rf_bandwidth.hide()
         # rf_bandwidth_layout.addWidget(self.rf_bandwidth)
         # control_layout.addLayout(rf_bandwidth_layout)
-        self.rf_bandwidth_auto_label = QLabel(
-            "RF bandwidth (auto = TBW / duration): — Hz"
+        rf_bandwidth_layout = QHBoxLayout()
+        rf_bandwidth_layout.addWidget(QLabel("RF bandwidth:"))
+        self.rf_bandwidth_auto_label = QLabel("— Hz (auto)")
+        self.rf_bandwidth_auto_label.setObjectName(f"{prefix}rf_bandwidth_auto_label")
+        self.rf_bandwidth_auto_label.setToolTip(
+            "Time-bandwidth product divided by the pulse duration"
         )
-        self.rf_bandwidth_auto_label.setStyleSheet("color: gray;")
-        control_layout.addWidget(self.rf_bandwidth_auto_label)
+        rf_bandwidth_layout.addWidget(self.rf_bandwidth_auto_label, 1)
+        control_layout.addLayout(rf_bandwidth_layout)
 
         # Lobes control for Sinc pulses
         lobes_layout = QHBoxLayout()
+        # Containers keep their rows flush with the plain layout rows.
+        lobes_layout.setContentsMargins(0, 0, 0, 0)
         lobes_layout.addWidget(QLabel("Lobes (Sinc):"))
         self.sinc_lobes = QSpinBox()
         self.sinc_lobes.setObjectName(f"{prefix}sinc_lobes")
@@ -219,6 +233,7 @@ class RFPulseDesigner(QGroupBox):
         control_layout.addWidget(self.lobes_container)
 
         slr_layout = QHBoxLayout()
+        slr_layout.setContentsMargins(0, 0, 0, 0)
         slr_layout.addWidget(QLabel("SLR sharpness:"))
         self.slr_sharpness = QSpinBox()
         self.slr_sharpness.setObjectName(f"{prefix}slr_sharpness")
@@ -237,6 +252,7 @@ class RFPulseDesigner(QGroupBox):
 
         # Apodization
         apod_layout = QHBoxLayout()
+        apod_layout.setContentsMargins(0, 0, 0, 0)
         apod_layout.addWidget(QLabel("Apodization:"))
         self.apodization_combo = QComboBox()
         self.apodization_combo.setObjectName(f"{prefix}apodization_combo")
@@ -368,7 +384,7 @@ class RFPulseDesigner(QGroupBox):
             and integration_factor > 0
         )
         if not explicit_tbw and not valid_integration_factor:
-            self.tbw_auto_label.setText("Time-bandwidth product (auto): —")
+            self.tbw_auto_label.setText("— (auto)")
             self.last_integration_factor = 1.0
             return
         tbw_auto = (
@@ -376,7 +392,7 @@ class RFPulseDesigner(QGroupBox):
             if explicit_tbw
             else 1.0 / float(integration_factor)
         )
-        self.tbw_auto_label.setText(f"Time-bandwidth product (auto): {tbw_auto:.3f}")
+        self.tbw_auto_label.setText(f"{tbw_auto:.3f} (auto)")
         if valid_integration_factor:
             self.last_integration_factor = float(integration_factor)
         # Keep the control in sync without retriggering pulse design
@@ -406,9 +422,7 @@ class RFPulseDesigner(QGroupBox):
             and integration_factor > 0
         )
         if (not explicit_tbw and not valid_integration_factor) or duration <= 0:
-            self.rf_bandwidth_auto_label.setText(
-                "RF bandwidth (auto = TBW / duration): — Hz"
-            )
+            self.rf_bandwidth_auto_label.setText("— Hz (auto)")
             self.last_integration_factor = 1.0
             return
         tbw_auto = (
@@ -417,9 +431,7 @@ class RFPulseDesigner(QGroupBox):
             else 1.0 / float(integration_factor)
         )
         rf_bandwidth_auto = tbw_auto / duration
-        self.rf_bandwidth_auto_label.setText(
-            f"RF bandwidth (auto = TBW / duration): {rf_bandwidth_auto:.3f} Hz"
-        )
+        self.rf_bandwidth_auto_label.setText(f"{rf_bandwidth_auto:.1f} Hz (auto)")
         if valid_integration_factor:
             self.last_integration_factor = float(integration_factor)
         # Keep the control in sync without retriggering pulse design

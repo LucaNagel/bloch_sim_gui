@@ -1,8 +1,11 @@
 """Live mode of the 3D Vector view: play pulses and gradients by hand.
 
 The panel drives a :class:`~blochsimulator.live_bloch.LiveSpinSystem` from a
-timer. Pulses turn the spins at a fixed rate on screen; in between, the
-spins precess in simulation time scaled by the speed setting.
+timer. Pulses are rectangular pulses of the chosen length: they play in
+simulation time, slowed down on screen so that no pulse turns faster than
+``PULSE_DEG_PER_S``. In between, the spins precess in simulation time scaled
+by the speed setting. The RF and gradient history is kept for the field
+traces below the signal trace.
 """
 
 import time
@@ -16,7 +19,6 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -32,9 +34,8 @@ from ..position_sampling import AXIS_NAMES
 PULSE_PHASES_DEG = {"x": 0.0, "y": 90.0, "-x": 180.0, "-y": 270.0}
 # Seconds on screen the live signal trace scrolls through.
 LIVE_TRACE_WINDOW_S = 10.0
-# Opacity of the live controls while live mode is off; native macOS buttons
-# hardly change when disabled, so fade them as well.
-INACTIVE_CONTROLS_OPACITY = 0.35
+# Field changes kept for the RF and gradient traces.
+FIELD_HISTORY_LENGTH = 4000
 LIVE_BUTTON_STYLE = (
     "QPushButton#mag_3d_live_mode {"
     " padding: 3px 12px; border: 1px solid palette(mid); border-radius: 5px;"
@@ -92,6 +93,9 @@ class LiveModePanel(QWidget):
         self.system = None
         self._context = None
         self._pulses = deque()
+        # (time ms, B1x µT, B1y µT, Gx, Gy, Gz mT/m) at every field change;
+        # each field holds until the next entry.
+        self.field_history = deque(maxlen=FIELD_HISTORY_LENGTH)
         self._last_wall = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -104,7 +108,7 @@ class LiveModePanel(QWidget):
         self.live_button.setObjectName("mag_3d_live_mode")
         self.live_button.setCheckable(True)
         self.live_button.setToolTip(
-            "Play hard pulses and gradients by hand and watch the spins evolve.\n"
+            "Play pulses and gradients by hand and watch the spins evolve.\n"
             "Keys while live: 1 = 90°, 2 = 180°, X/Y/Z = gradient, R = reset."
         )
         self.live_button.setStyleSheet(LIVE_BUTTON_STYLE)
@@ -121,7 +125,10 @@ class LiveModePanel(QWidget):
         for flip in (90, 180):
             button = QPushButton(f"{flip}°")
             button.setObjectName(f"mag_3d_live_pulse_{flip}")
-            button.setToolTip(f"Ideal hard {flip}° pulse about the chosen axis")
+            button.setToolTip(
+                f"Rectangular {flip}° pulse about the chosen axis, of the "
+                "chosen pulse length"
+            )
             button.clicked.connect(lambda _, f=flip: self.queue_pulse(f))
             controls.addWidget(button)
             self.pulse_buttons[flip] = button
@@ -140,7 +147,7 @@ class LiveModePanel(QWidget):
             button.setObjectName(f"mag_3d_live_g{axis}")
             button.setCheckable(True)
             button.setToolTip(f"Switch the {axis} gradient on or off")
-            button.toggled.connect(lambda _: self._draw())
+            button.toggled.connect(lambda _: self._fields_changed())
             controls.addWidget(button)
             self.gradient_buttons.append(button)
         self.gradient_spin = QDoubleSpinBox()
@@ -153,13 +160,14 @@ class LiveModePanel(QWidget):
         self.gradient_spin.setToolTip(
             "Strength of every switched-on gradient; negative values rewind"
         )
-        self.gradient_spin.valueChanged.connect(lambda _: self._draw())
+        self.gradient_spin.valueChanged.connect(lambda _: self._fields_changed())
         controls.addWidget(self.gradient_spin)
         controls.addStretch()
 
         controls = QHBoxLayout()
         rows.addLayout(controls)
-        controls.addWidget(QLabel("Speed:"))
+        speed_label = QLabel("Speed:")
+        controls.addWidget(speed_label)
         self.speed_spin = QDoubleSpinBox()
         self.speed_spin.setObjectName("mag_3d_live_speed")
         self.speed_spin.setRange(0.01, 1000.0)
@@ -167,7 +175,23 @@ class LiveModePanel(QWidget):
         self.speed_spin.setValue(1.0)
         self.speed_spin.setSuffix(" ms/s")
         self.speed_spin.setToolTip("Simulated milliseconds per second on screen")
+        speed_label.setBuddy(self.speed_spin)
         controls.addWidget(self.speed_spin)
+        pulse_label = QLabel("Pulse:")
+        controls.addWidget(pulse_label)
+        self.pulse_length_spin = QDoubleSpinBox()
+        self.pulse_length_spin.setObjectName("mag_3d_live_pulse_length")
+        self.pulse_length_spin.setRange(0.01, 50.0)
+        self.pulse_length_spin.setDecimals(2)
+        self.pulse_length_spin.setSingleStep(0.05)
+        self.pulse_length_spin.setValue(0.2)
+        self.pulse_length_spin.setSuffix(" ms")
+        self.pulse_length_spin.setToolTip(
+            "Length of a pulse; B1 = flip angle / (gamma * length). Off-resonance "
+            "and switched-on gradients act during the pulse."
+        )
+        pulse_label.setBuddy(self.pulse_length_spin)
+        controls.addWidget(self.pulse_length_spin)
         self.relax_checkbox = QCheckBox("Relaxation")
         self.relax_checkbox.setObjectName("mag_3d_live_relaxation")
         self.relax_checkbox.setToolTip(
@@ -195,8 +219,12 @@ class LiveModePanel(QWidget):
         controls.addWidget(self.hint_label, 2)
         controls.addStretch(1)
         row.addWidget(self.controls, 1)
-        self._controls_fade = QGraphicsOpacityEffect(self.controls)
-        self.controls.setGraphicsEffect(self._controls_fade)
+        # While live mode is off, one line explains it instead of a block of
+        # disabled controls.
+        self.intro_label = QLabel("Play 90°/180° pulses and Gx/Gy/Gz gradients by hand")
+        self.intro_label.setObjectName("mag_3d_live_intro")
+        self.intro_label.setEnabled(False)
+        row.addWidget(self.intro_label, 1)
         self._set_controls_enabled(False)
 
         # Window-wide while live; text fields still take typed digits.
@@ -235,6 +263,8 @@ class LiveModePanel(QWidget):
             shortcut.setEnabled(active)
         if active:
             self._sync_context(force=True)
+            self.field_history.clear()
+            self._record_fields()
             self._last_wall = time.perf_counter()
             self.timer.start(self.TICK_MS)
             self.active_changed.emit(True)
@@ -246,22 +276,25 @@ class LiveModePanel(QWidget):
 
     def _set_controls_enabled(self, enabled: bool):
         self.controls.setEnabled(enabled)
-        self._controls_fade.setOpacity(1.0 if enabled else INACTIVE_CONTROLS_OPACITY)
-        # Fully opaque needs no offscreen pass.
-        self._controls_fade.setEnabled(not enabled)
+        self.controls.setVisible(enabled)
+        self.intro_label.setVisible(not enabled)
 
     def reset(self):
         """Return the spins to equilibrium and drop queued pulses."""
         self._pulses.clear()
         self._sync_context(force=True)
+        self.field_history.clear()
+        self._record_fields()
         self._draw()
 
     def queue_pulse(self, flip_deg: float):
-        """Play a hard pulse after the ones still turning."""
+        """Play a pulse after the ones still turning."""
         if not self.is_active():
             return
         phase = PULSE_PHASES_DEG[self.phase_combo.currentText()]
-        self._pulses.append([float(flip_deg), float(flip_deg), phase])
+        length_s = self.pulse_length_spin.value() * 1e-3
+        # [flip deg, phase deg, length s, remaining s]
+        self._pulses.append([float(flip_deg), phase, length_s, length_s])
         self._draw()
 
     def gradient_t_per_m(self) -> np.ndarray:
@@ -273,8 +306,41 @@ class LiveModePanel(QWidget):
         """(flip, phase) in degrees of the pulse being played, or None."""
         if not self._pulses:
             return None
-        flip, _, phase = self._pulses[0]
+        flip, phase = self._pulses[0][:2]
         return flip, phase
+
+    @staticmethod
+    def _rabi_hz(pulse) -> float:
+        flip, _, length_s, _ = pulse
+        return flip / 360.0 / length_s
+
+    def b1_ut(self) -> complex:
+        """RF field (B1x + i B1y) in µT of the pulse being played, else 0."""
+        if not self._pulses or self.system is None:
+            return 0j
+        pulse = self._pulses[0]
+        amplitude = self._rabi_hz(pulse) / self.system.gamma_hz_per_t * 1e6
+        return amplitude * np.exp(1j * np.radians(pulse[1]))
+
+    def _fields_changed(self):
+        self._record_fields()
+        self._draw()
+
+    def _record_fields(self):
+        """Log the current RF and gradient at the current time."""
+        if self.system is None:
+            return
+        b1 = self.b1_ut()
+        gradient = self.gradient_t_per_m() * 1e3
+        entry = (self.system.time_s * 1e3, b1.real, b1.imag, *gradient)
+        history = self.field_history
+        if history and history[-1][1:] == entry[1:]:
+            return
+        if history and history[-1][0] >= entry[0]:
+            history.pop()
+            if history and history[-1][1:] == entry[1:]:
+                return
+        history.append(entry)
 
     def field_readout(self) -> str:
         """Pulse and gradient currently played, for the field label."""
@@ -305,6 +371,7 @@ class LiveModePanel(QWidget):
         if context is None:
             return
         if force or self.system is None or not context.same_spins(self._context):
+            self.field_history.clear()
             self.system = LiveSpinSystem(
                 context.positions_m,
                 context.offsets_hz,
@@ -318,23 +385,35 @@ class LiveModePanel(QWidget):
         self._context = context
         self.hint_label.setVisible(len(context.positions_m) < 2)
 
+    def _pulse_rate(self, pulse) -> float:
+        """Simulated seconds per second on screen while ``pulse`` plays."""
+        flip, _, length_s, _ = pulse
+        slowest = length_s * self.PULSE_DEG_PER_S / max(flip, 1e-9)
+        return min(self.speed_spin.value() * 1e-3, slowest)
+
     def advance(self, wall_dt_s: float):
         """Advance by ``wall_dt_s`` seconds on screen."""
         if self.system is None:
             return
-        wall_dt_s = min(max(float(wall_dt_s), 0.0), self.MAX_TICK_S)
-        if self._pulses:
+        wall_left = min(max(float(wall_dt_s), 0.0), self.MAX_TICK_S)
+        gradient = self.gradient_t_per_m()
+        relax = self.relax_checkbox.isChecked()
+        self._record_fields()
+        while self._pulses and wall_left > 0.0:
             pulse = self._pulses[0]
-            step = min(pulse[1], self.PULSE_DEG_PER_S * wall_dt_s)
-            self.system.apply_pulse(step, pulse[2])
-            pulse[1] -= step
-            if pulse[1] <= 1e-9:
+            rate = self._pulse_rate(pulse)
+            dt = min(pulse[3], wall_left * rate)
+            self.system.drive(dt, self._rabi_hz(pulse), pulse[1], gradient, relax)
+            pulse[3] -= dt
+            wall_left -= dt / rate
+            if pulse[3] <= 1e-12 * pulse[2]:
                 self._pulses.popleft()
+                wall_left = max(wall_left, 0.0)
+            self._record_fields()
+        if self._pulses or wall_left <= 0.0:
             return
         self.system.evolve(
-            wall_dt_s * self.speed_spin.value() * 1e-3,
-            self.gradient_t_per_m(),
-            relax=self.relax_checkbox.isChecked(),
+            wall_left * self.speed_spin.value() * 1e-3, gradient, relax=relax
         )
 
     def tick(self):

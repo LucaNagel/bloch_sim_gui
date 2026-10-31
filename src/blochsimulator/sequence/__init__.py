@@ -30,6 +30,7 @@ from .receiver import (
     ReceiverNoise,
     apply_receiver_noise,
     receiver_acquisition_metadata,
+    with_voxel_volume_weighting,
 )
 from .reference_scan import (
     ReferenceEfficiency,
@@ -237,6 +238,7 @@ __all__ = [
     "ReceiverNoise",
     "apply_receiver_noise",
     "receiver_acquisition_metadata",
+    "with_voxel_volume_weighting",
     "AmplitudeEstimate",
     "MeasuredCalibrationInputs",
     "MeasuredScan",
