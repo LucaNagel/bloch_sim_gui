@@ -41,6 +41,7 @@ from ..sequence.kspace_trajectory import (
 )
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
+from .theme import set_tone
 
 PLANES = {"kx × ky": (0, 1), "kx × kz": (0, 2), "ky × kz": (1, 2)}
 SHOW_MODES = ("Readout", "Frame", "All readouts")
@@ -543,7 +544,7 @@ class KSpaceView(QWidget):
         self.recalculate_button.clicked.connect(self.recalculate)
         controls.addWidget(self.recalculate_button)
         self.status_label = QLabel()
-        self.status_label.setStyleSheet("color: #475569;")
+        set_tone(self.status_label, "muted")
         self.status_label.setWordWrap(True)
         controls.addWidget(self.status_label, 1)
         controls.addWidget(QLabel("Show"))

@@ -33,8 +33,13 @@ from .default_settings import (
     SEQUENCE_TIMESTEP_TOOLTIP,
     WorkspaceDefaults,
 )
-from .styles import INTERFACE_STYLE_CHOICES, normalize_interface_style
+from .styles import (
+    INTERFACE_STYLE_CHOICES,
+    INTERFACE_STYLE_DEFAULT,
+    normalize_interface_style,
+)
 from ..sequence.signal_units import SIGNAL_UNITS, normalize_signal_unit
+from .theme import set_tone
 
 
 class SettingsDialog(QDialog):
@@ -139,7 +144,7 @@ class SettingsDialog(QDialog):
         recommendation = QLabel(str(hint))
         recommendation.setObjectName(object_name)
         recommendation.setWordWrap(True)
-        recommendation.setStyleSheet("color: #0f766e; font-size: 11px;")
+        set_tone(recommendation, "accent", "font-size: 11px;")
         recommendation.setVisible(bool(hint))
         field_layout.addWidget(recommendation, 1)
         return container, recommendation
@@ -167,7 +172,7 @@ class SettingsDialog(QDialog):
         scanner_parameters: Optional[ScannerParameters] = None,
         scanner_profiles: Optional[Mapping[str, ScannerParameters]] = None,
         workspace_defaults: Optional[WorkspaceDefaults] = None,
-        interface_style: str = "automatic",
+        interface_style: str = INTERFACE_STYLE_DEFAULT,
         sequence_section_titles_bold: bool = True,
         sequence_timing_visible: bool = False,
         color_accents: bool = True,
@@ -805,10 +810,14 @@ class SettingsDialog(QDialog):
         )
         self.interface_style_combo.setCurrentIndex(max(0, style_index))
         self.interface_style_combo.setToolTip(
-            "Choose the Qt control style for the whole application. The change "
-            "takes effect immediately after the settings are accepted."
+            "Light and Dark give the whole application one modern look on "
+            "every platform; Match system follows the light or dark setting "
+            "of the operating system when the application starts or this "
+            "setting is accepted; Native platform controls keeps the "
+            "operating system's own widgets. The change takes effect "
+            "immediately after the settings are accepted."
         )
-        interface_form.addRow("Application style:", self.interface_style_combo)
+        interface_form.addRow("Appearance:", self.interface_style_combo)
         self.signal_unit_combo = QComboBox()
         self.signal_unit_combo.setObjectName("signal_unit")
         for label, unit in SIGNAL_UNITS:

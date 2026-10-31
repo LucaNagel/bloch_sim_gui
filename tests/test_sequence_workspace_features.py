@@ -109,14 +109,14 @@ def test_pulseq_file_dialog_loads_in_background(tmp_path):
 
     worker = widget.pulseq_load_worker
     assert worker is not None
-    assert not widget.load_pulseq_button.isEnabled()
+    assert not widget.load_pulseq_action.isEnabled()
     assert widget.progress.minimum() == 0
     assert widget.progress.maximum() == 0
     assert worker.wait(10_000)
     app.processEvents()
 
     assert widget.pulseq_load_worker is None
-    assert widget.load_pulseq_button.isEnabled()
+    assert widget.load_pulseq_action.isEnabled()
     assert widget.run_button.isEnabled()
     assert widget.program.source == str(path)
     assert widget.progress.format() == "Pulseq loaded"
@@ -165,7 +165,7 @@ def test_python_sequence_script_runs_in_gui_and_loads_generated_pulseq(
     assert widget.program.source == str(generated)
     assert "generated generate_test_sequence.seq" in widget.script_output.toPlainText()
     assert widget.sequence_source.currentIndex() == widget.PULSEQ_SOURCE
-    assert widget.run_script_button.isEnabled()
+    assert widget.run_script_action.isEnabled()
 
     widget.close()
     app.processEvents()
@@ -395,7 +395,7 @@ def test_live_sequence_preview_moves_cursor_and_updates_cartesian_views():
     widget.sequence_source.setCurrentIndex(1)
     widget.read_matrix.setValue(4)
     widget.phase_matrix.setValue(4)
-    widget._load_cartesian_epi()
+    assert widget._reload_selected_generated_sequence()
     widget._configure_frame_selector()
 
     signal = np.ones(widget.acquisition.num_samples, dtype=np.complex128)

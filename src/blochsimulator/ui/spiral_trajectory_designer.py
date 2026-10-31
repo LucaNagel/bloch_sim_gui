@@ -34,12 +34,12 @@ from ..sequence.scanner import ScannerParameters
 from ..sequence.spiral_design import SpiralDesign, design_spiral
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
+from .theme import set_tone
 
 AXIS_COLORS = {"x": "#dc2626", "y": "#16a34a"}
 MAGNITUDE_COLOR = "#0f172a"
 LIMIT_COLOR = "#e11d48"
 NYQUIST_COLOR = "#0f766e"
-WARNING_STYLE = "color: #b45309;"
 PLOT_MINIMUM_HEIGHT = 240
 # Above this many samples the PSF image uses the voxel grid only.
 PSF_OVERSAMPLING_SAMPLE_LIMIT = 4096
@@ -238,7 +238,7 @@ class SpiralTrajectoryDesigner(QDialog):
 
         self.message = QLabel()
         self.message.setWordWrap(True)
-        self.message.setStyleSheet(WARNING_STYLE)
+        set_tone(self.message, "warning")
         column.addWidget(self.message)
         column.addStretch(1)
 

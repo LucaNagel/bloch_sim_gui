@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 from PyQt5.QtCore import QPointF, QSettings, Qt
+from PyQt5.QtGui import QPalette
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -16,6 +17,7 @@ from PyQt5.QtWidgets import (
     QDialog,
     QFileDialog,
     QGridLayout,
+    QLabel,
     QLineEdit,
     QMenu,
     QRadioButton,
@@ -35,7 +37,10 @@ from blochsimulator.simulator import (
     SpinEcho,
     SpinEchoTipAxis,
 )
+from blochsimulator.ui import theme
 from blochsimulator.ui.dialogs import PulseImportDialog, SettingsDialog
+from blochsimulator.ui.styles import normalize_interface_style
+from blochsimulator.ui.theme import set_tone
 from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.ui.magnetization_viewer import (
     MagnetizationViewer,
@@ -66,42 +71,86 @@ from blochsimulator.ui.sequence_diagram import (
 from blochsimulator.units import LEGACY_GAMMA_RAD_PER_S_PER_GAUSS
 
 
-def test_application_style_uses_native_macos_controls():
+def test_application_appearance_defaults_to_the_light_theme(monkeypatch):
     app = MagicMock()
+    monkeypatch.setattr(theme, "_system_palette", {"palette": QPalette()})
 
-    _apply_platform_style(app, platform="darwin")
+    concrete = _apply_platform_style(app, platform="darwin")
 
-    app.setStyle.assert_not_called()
-
-
-def test_application_style_can_force_fusion_on_macos():
-    app = MagicMock()
-
-    _apply_platform_style(app, platform="darwin", style_mode="fusion")
-
+    assert concrete == "light"
     app.setStyle.assert_called_once_with("Fusion")
+    app.setStyleSheet.assert_called_once_with(theme.stylesheet_for(theme.LIGHT))
+    assert theme.current_tokens() is theme.LIGHT
 
 
-def test_application_style_can_restore_remembered_system_style():
+def test_application_appearance_applies_the_dark_theme(monkeypatch):
     app = MagicMock()
+    monkeypatch.setattr(theme, "_system_palette", {"palette": QPalette()})
 
-    _apply_platform_style(
+    try:
+        concrete = _apply_platform_style(app, platform="linux", style_mode="dark")
+        assert concrete == "dark"
+        app.setStyle.assert_called_once_with("Fusion")
+        palette = app.setPalette.call_args.args[0]
+        assert palette.color(QPalette.Window).name() == theme.DARK["window"]
+        assert theme.color("warning") == theme.DARK["warning"]
+    finally:
+        theme._state.update(tokens=theme.LIGHT, appearance="light")
+
+
+@pytest.mark.parametrize("dark", [False, True])
+def test_application_appearance_can_match_the_system(monkeypatch, dark):
+    app = MagicMock()
+    monkeypatch.setattr(theme, "_system_palette", {"palette": QPalette()})
+    monkeypatch.setattr(theme, "system_prefers_dark", lambda *_args, **_kwargs: dark)
+
+    try:
+        concrete = _apply_platform_style(app, style_mode="match_system")
+        assert concrete == ("dark" if dark else "light")
+    finally:
+        theme._state.update(tokens=theme.LIGHT, appearance="light")
+
+
+def test_application_appearance_can_restore_native_controls(monkeypatch):
+    app = MagicMock()
+    system_palette = QPalette()
+    monkeypatch.setattr(theme, "_system_palette", {"palette": system_palette})
+    monkeypatch.setattr(theme, "system_prefers_dark", lambda *_args, **_kwargs: False)
+
+    concrete = _apply_platform_style(
         app,
         platform="darwin",
         style_mode="system",
         system_style_name="macintosh",
     )
 
+    assert concrete == "system"
     app.setStyle.assert_called_once_with("macintosh")
+    app.setPalette.assert_called_once_with(system_palette)
+    app.setStyleSheet.assert_called_once_with(theme.native_stylesheet())
 
 
-@pytest.mark.parametrize("platform", ["linux", "win32"])
-def test_application_style_retains_fusion_elsewhere(platform):
-    app = MagicMock()
+@pytest.mark.parametrize("legacy", ["automatic", "fusion", "", "unknown"])
+def test_legacy_application_styles_open_the_light_theme(legacy):
+    assert normalize_interface_style(legacy) == "light"
 
-    _apply_platform_style(app, platform=platform)
 
-    app.setStyle.assert_called_once_with("Fusion")
+def test_toned_labels_follow_the_applied_theme():
+    app = QApplication.instance() or QApplication(sys.argv)
+    label = QLabel("Spoiling incomplete")
+    set_tone(label, "warning", "font-weight: bold;")
+    assert theme.LIGHT["warning"] in label.styleSheet()
+
+    try:
+        theme._state["tokens"] = theme.DARK
+        theme._refresh_tones(app)
+        assert theme.DARK["warning"] in label.styleSheet()
+        assert "font-weight: bold;" in label.styleSheet()
+    finally:
+        theme._state.update(tokens=theme.LIGHT, appearance="light")
+        theme._refresh_tones(app)
+    set_tone(label, None)
+    assert label.styleSheet() == ""
 
 
 def test_log_messages_include_local_timestamp():
@@ -440,11 +489,15 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     assert dialog.animation_memory_budget_bytes() == 2048 * 1024**2
     assert dialog.get_export_directory() == tmp_path
     assert dialog.tooltips_enabled()
-    assert dialog.interface_style() == "automatic"
+    assert dialog.interface_style() == "light"
+    assert [
+        dialog.interface_style_combo.itemData(index)
+        for index in range(dialog.interface_style_combo.count())
+    ] == ["light", "dark", "match_system", "system"]
     dialog.interface_style_combo.setCurrentIndex(
-        dialog.interface_style_combo.findData("fusion")
+        dialog.interface_style_combo.findData("dark")
     )
-    assert dialog.interface_style() == "fusion"
+    assert dialog.interface_style() == "dark"
     assert dialog.sequence_live_progress_enabled()
     assert dialog.sequence_kernel() == "optimized"
     assert dialog.sequence_kernel_combo.findData("reference") == -1
@@ -1414,8 +1467,14 @@ def test_free_mode_result_controls_use_consistent_headers_and_rows():
 
     assert window.tab_widget.tabBar().font().bold()
     assert window.workspace_header.isHidden()
-    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
-    assert window.tab_widget.cornerWidget(Qt.TopLeftCorner) is window.main_tab_group_bar
+    assert window.main_header.isAncestorOf(window.workspace_switch)
+    assert window.main_header.isAncestorOf(window.main_tab_group_bar)
+    assert window.tab_widget.cornerWidget(Qt.TopLeftCorner) is None
+    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is None
+    # The group names are a size above the tab names.
+    tab_size = window.tab_widget.tabBar().font().pointSizeF()
+    for button in window.main_tab_group_bar.buttons.values():
+        assert button.font().pointSizeF() > tab_size
     # Playback Control appears only with a time-resolved result.
     assert window.free_mode_playback_header.isHidden()
     colormap_menu = window.menuBar().findChild(QMenu, "menu_heatmap_colormap")
@@ -2441,7 +2500,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     dialog.get_export_directory.return_value = tmp_path
     dialog.get_policy.return_value = MemoryPolicy()
     dialog.tooltips_enabled.return_value = True
-    dialog.interface_style.return_value = "fusion"
+    dialog.interface_style.return_value = "dark"
     dialog.sequence_timing_visible.return_value = False
     dialog.sequence_live_progress_enabled.return_value = False
     dialog.sequence_kernel.return_value = "strict_reference"
@@ -2465,7 +2524,10 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     )
     dialog.workspace_defaults.return_value = workspace_defaults
 
-    with patch("blochsimulator.ui.main_window.SettingsDialog", return_value=dialog):
+    with (
+        patch("blochsimulator.ui.main_window.SettingsDialog", return_value=dialog),
+        patch("blochsimulator.ui.main_window._apply_platform_style") as apply_style,
+    ):
         window.show_settings(initial_tab="simulation")
 
     assert window.app_settings.value("sequence/timestep_preset") == "fast"
@@ -2480,7 +2542,8 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     assert window.app_settings.value("simulation/thread_mode") == "manual"
     assert int(window.app_settings.value("simulation/manual_threads")) == 2
     assert int(window.app_settings.value("memory/animation_replay_mib")) == 2048
-    assert window.app_settings.value("interface/style") == "fusion"
+    assert window.app_settings.value("interface/style") == "dark"
+    assert apply_style.call_args.kwargs["style_mode"] == "dark"
     assert (
         window.app_settings.value("interface/show_sequence_timing_row", type=bool)
         is False
@@ -2539,7 +2602,7 @@ def test_changing_only_spoiler_settings_preserves_active_sequence_parameters(
     dialog.get_export_directory.return_value = tmp_path
     dialog.get_policy.return_value = MemoryPolicy()
     dialog.tooltips_enabled.return_value = True
-    dialog.interface_style.return_value = "automatic"
+    dialog.interface_style.return_value = "light"
     dialog.sequence_live_progress_enabled.return_value = True
     dialog.sequence_kernel.return_value = "optimized"
     dialog.dynamic_sequence_kernel.return_value = "optimized"
@@ -2901,6 +2964,7 @@ def test_color_accents_tint_run_buttons_and_progress_bars():
     assert window.status_progress.styleSheet() == ""
     assert sequence.progress.styleSheet() == ""
     assert "#43a047" not in sequence.run_button.styleSheet()
-    assert "QPushButton:disabled" in sequence.run_button.styleSheet()
+    assert sequence.run_button.styleSheet() == ""
+    assert sequence.run_button.property("dimWhenDisabled") is True
     sequence.progress.setValue(40)
     assert sequence.progress.styleSheet() == ""

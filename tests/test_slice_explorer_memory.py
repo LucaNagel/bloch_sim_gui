@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 from blochsimulator.memory import SimulationMemoryError
 from blochsimulator.slice_explorer import SliceSelectionExplorer
+from blochsimulator.ui.theme import tone_style
 
 
 def test_profile_memory_error_does_not_escape_run():
@@ -39,5 +40,5 @@ def test_profile_memory_error_clears_stale_results_and_plots():
     assert explorer.last_time is None
     explorer.plot_rf.clear.assert_called_once_with()
     explorer.plot_profile.clear.assert_called_once_with()
-    explorer.pulse_status.setStyleSheet.assert_called_once_with("color: #b00020;")
+    explorer.pulse_status.setStyleSheet.assert_called_once_with(tone_style("error"))
     explorer.pulse_status.setText.assert_called_once_with(str(error))

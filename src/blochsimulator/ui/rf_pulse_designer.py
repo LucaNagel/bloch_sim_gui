@@ -24,6 +24,7 @@ from ..sequence.rf_pulses import (
     rf_envelope_integration_factor,
 )
 from .dialogs import PulseImportDialog
+from .theme import set_tone
 
 
 class RFPulseDesigner(QGroupBox):
@@ -146,7 +147,7 @@ class RFPulseDesigner(QGroupBox):
         )
         self.adiabatic_parameter_hint.setObjectName(f"{prefix}adiabatic_parameter_hint")
         self.adiabatic_parameter_hint.setWordWrap(True)
-        self.adiabatic_parameter_hint.setStyleSheet("color: #b06a00;")
+        set_tone(self.adiabatic_parameter_hint, "warning")
         self.adiabatic_parameter_hint.setVisible(False)
         control_layout.addWidget(self.adiabatic_parameter_hint)
 
@@ -290,7 +291,7 @@ class RFPulseDesigner(QGroupBox):
         # Info label for Custom Pulse
         self.custom_info_label = QLabel("")
         self.custom_info_label.setObjectName(f"{prefix}custom_info_label")
-        self.custom_info_label.setStyleSheet("color: gray; font-size: 9pt;")
+        set_tone(self.custom_info_label, "muted", "font-size: 9pt;")
         self.custom_info_label.setVisible(False)
         control_layout.addWidget(self.custom_info_label)
 

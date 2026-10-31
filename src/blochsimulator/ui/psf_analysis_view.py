@@ -38,6 +38,7 @@ from ..sequence.psf import (
     simulate_point_sources,
 )
 from .plot_interaction import StaticPlotWidget
+from .theme import set_tone
 
 ROLE_COLORS = {
     "read": "#2563eb",
@@ -275,7 +276,7 @@ class PSFAnalysisView(QWidget):
         self.cancel_button.clicked.connect(self.cancel)
         controls.addWidget(self.cancel_button)
         self.status_label = QLabel()
-        self.status_label.setStyleSheet("color: #475569;")
+        set_tone(self.status_label, "muted")
         controls.addWidget(self.status_label, 1)
         controls.addWidget(QLabel("Frame"))
         self.frame_selector = QComboBox()
@@ -569,9 +570,9 @@ class PSFAnalysisView(QWidget):
             context = self.context_provider()
         except ValueError as exc:
             self.status_label.setText(str(exc))
-            self.status_label.setStyleSheet("color: #b91c1c;")
+            set_tone(self.status_label, "error")
             return
-        self.status_label.setStyleSheet("color: #475569;")
+        set_tone(self.status_label, "muted")
         self.status_label.setText("Preparing…")
         self.compute_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
@@ -607,10 +608,9 @@ class PSFAnalysisView(QWidget):
         self.compute_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.status_label.setText(message)
-        self.status_label.setStyleSheet(
-            "color: #475569;"
-            if message == "PSF computation cancelled"
-            else "color: #b91c1c;"
+        set_tone(
+            self.status_label,
+            "muted" if message == "PSF computation cancelled" else "error",
         )
 
     def set_computation(self, computation: Optional[PSFComputation]):
@@ -688,9 +688,7 @@ class PSFAnalysisView(QWidget):
                 computation.simulation, computation.source, frame=frame, **options
             )
         self.status_label.setText(message)
-        self.status_label.setStyleSheet(
-            "color: #b45309;" if message else "color: #475569;"
-        )
+        set_tone(self.status_label, "warning" if message else "muted")
         return psf
 
     def _frame_changed(self, index):
@@ -767,7 +765,7 @@ class PSFAnalysisView(QWidget):
                 "The sequence changed after this PSF was computed. Click "
                 "Compute PSF to update it."
             )
-            self.summary_label.setStyleSheet("color: #b45309;")
+            set_tone(self.summary_label, "warning")
             return
         position = ", ".join(f"{1000 * value:g}" for value in source.position_m)
         relaxation = []
@@ -791,7 +789,7 @@ class PSFAnalysisView(QWidget):
             f"{', '.join(relaxation) or 'no relaxation'}, "
             f"Δf {source.off_resonance_hz:g} Hz, {polarization}, {gradients}."
         )
-        self.summary_label.setStyleSheet("color: #15803d;")
+        set_tone(self.summary_label, "ok")
 
     def _render_image(self, psf):
         roles = psf.roles

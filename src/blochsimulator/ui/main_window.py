@@ -160,12 +160,13 @@ def _cyclic_colormap():
 
 from .styles import (
     BOLD_GROUP_TITLES_STYLE,
-    INTERFACE_STYLE_FUSION,
+    INTERFACE_STYLE_DEFAULT,
+    INTERFACE_STYLE_MATCH_SYSTEM,
     RUN_BUTTON_ACCENT_STYLE,
     ProgressAccent,
     normalize_interface_style,
-    resolve_interface_style,
 )
+from .theme import apply_appearance
 
 
 _SYSTEM_STYLE_PROPERTY = "blochSimulatorSystemStyle"
@@ -5731,9 +5732,7 @@ class BlochSimulatorGUI(QMainWindow):
 
         workspace_switch = QWidget()
         workspace_switch_layout = QHBoxLayout(workspace_switch)
-        workspace_switch_layout.setContentsMargins(4, 0, 6, 0)
-        # The mode names explain themselves; without a label the tab row keeps
-        # room for the tabs on small screens.
+        workspace_switch_layout.setContentsMargins(0, 0, 0, 0)
         self.workspace_mode_selector = QComboBox()
         self.workspace_mode_selector.setAccessibleName("Workspace")
         self.workspace_mode_selector.addItem("Free Mode", "free")
@@ -6141,8 +6140,14 @@ class BlochSimulatorGUI(QMainWindow):
             for index in indices
             if index >= 0
         }
-        self.main_tab_group_bar = SegmentedButtons(self.MAIN_TAB_GROUPS)
+        self.main_tab_group_bar = SegmentedButtons(self.MAIN_TAB_GROUPS, size="large")
         self.main_tab_group_bar.setObjectName("main_tab_groups")
+        # The group names sit a size above the tab names so the two levels
+        # of navigation read as heading and sub-heading.
+        group_font = QFont(self.tab_widget.tabBar().font())
+        group_font.setPointSizeF(group_font.pointSizeF() + 1)
+        for button in self.main_tab_group_bar.buttons.values():
+            button.setFont(group_font)
         self.main_tab_group_bar.buttons["setup"].setToolTip(
             "Sequence, phantom, B1, receiver, and RF pulse settings."
         )
@@ -6153,7 +6158,20 @@ class BlochSimulatorGUI(QMainWindow):
             "Point-spread function, k-space, spoiling, sweeps, and loops."
         )
         self.main_tab_group_bar.current_changed.connect(self._select_main_tab_group)
-        self.tab_widget.setCornerWidget(self.main_tab_group_bar, Qt.TopLeftCorner)
+        # The groups and the workspace selector get a row of their own above
+        # the tabs, so neither shares the tab row with the tab names.
+        self.main_header = QWidget()
+        self.main_header.setObjectName("main_header")
+        self.main_header_layout = QHBoxLayout(self.main_header)
+        self.main_header_layout.setContentsMargins(0, 2, 0, 2)
+        self.main_header_layout.setSpacing(6)
+        self.main_header_layout.addWidget(self.main_tab_group_bar)
+        self.main_header_layout.addStretch(1)
+        self.workspace_caption = QLabel("Workspace")
+        self.workspace_caption.setProperty("role", "caption")
+        self.main_header_layout.addWidget(self.workspace_caption)
+        tabs_layout = self.tab_widget.parentWidget().layout()
+        tabs_layout.insertWidget(tabs_layout.indexOf(self.tab_widget), self.main_header)
         self.main_tab_group_bar.show()
         self._show_main_tab_group(
             self._main_tab_group_of.get(self.tab_widget.currentIndex(), "results")
@@ -6251,16 +6269,16 @@ class BlochSimulatorGUI(QMainWindow):
         self._request_workspace_mode(str(self.workspace_mode_selector.currentData()))
 
     def _place_workspace_switch(self):
-        """Keep the selector in the main tab-bar row of both workspaces.
+        """Keep the selector in the header row above the main tabs.
 
-        Sharing the row with the group bar and the tabs removes the otherwise
-        empty application-header row.
+        Sharing the row with the group bar removes the otherwise empty
+        application-header row.
         """
-        if not hasattr(self, "workspace_switch"):
+        if not hasattr(self, "workspace_switch") or not hasattr(self, "main_header"):
             return
-        if self.tab_widget.cornerWidget(Qt.TopRightCorner) is not self.workspace_switch:
+        if self.workspace_switch.parentWidget() is not self.main_header:
             self.workspace_header_layout.removeWidget(self.workspace_switch)
-            self.tab_widget.setCornerWidget(self.workspace_switch, Qt.TopRightCorner)
+            self.main_header_layout.addWidget(self.workspace_switch)
         # Reparenting a visible widget hides it; show it explicitly.
         self.workspace_switch.show()
         self.workspace_header.setVisible(False)
@@ -6568,9 +6586,9 @@ class BlochSimulatorGUI(QMainWindow):
                 self.tab_widget.setTabToolTip(index, tooltip if enabled else "")
 
     def _load_interface_style(self) -> str:
-        """Load the persistent application-wide Qt control style."""
+        """Load the persistent application-wide appearance."""
         return normalize_interface_style(
-            self.app_settings.value("interface/style", "automatic")
+            self.app_settings.value("interface/style", INTERFACE_STYLE_DEFAULT)
         )
 
     def _load_sequence_section_titles_bold(self) -> bool:
@@ -6717,7 +6735,10 @@ class BlochSimulatorGUI(QMainWindow):
         self.app_settings.sync()
         # Without a sequence widget the persisted mode decides the tab.
         self._update_spoiling_analysis_tab_visibility()
-        if interface_style != previous_interface_style:
+        if (
+            interface_style != previous_interface_style
+            or interface_style == INTERFACE_STYLE_MATCH_SYSTEM
+        ):
             _apply_platform_style(
                 QApplication.instance(),
                 style_mode=interface_style,
@@ -10799,17 +10820,16 @@ def _apply_platform_style(
     app,
     platform=None,
     *,
-    style_mode="automatic",
+    style_mode=INTERFACE_STYLE_DEFAULT,
     system_style_name=None,
 ):
-    """Apply the selected Qt style while preserving the historical default."""
-    if app is None:
-        return
-    concrete_style = resolve_interface_style(style_mode, platform=platform)
-    if concrete_style == INTERFACE_STYLE_FUSION:
-        app.setStyle("Fusion")
-    elif system_style_name:
-        app.setStyle(str(system_style_name))
+    """Apply the selected appearance: a light or dark theme, or native."""
+    return apply_appearance(
+        app,
+        style_mode,
+        system_style_name=system_style_name,
+        platform=platform,
+    )
 
 
 def main():
@@ -10827,7 +10847,7 @@ def main():
     settings = QSettings("BlochSimulator", "BlochSimulator")
     _apply_platform_style(
         app,
-        style_mode=settings.value("interface/style", "automatic"),
+        style_mode=settings.value("interface/style", INTERFACE_STYLE_DEFAULT),
         system_style_name=system_style_name,
     )
     install_input_feedback(app)

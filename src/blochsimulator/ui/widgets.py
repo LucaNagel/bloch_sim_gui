@@ -548,14 +548,21 @@ def install_tab_bar_wheel_scroll(tab_widget: QTabWidget) -> _TabBarWheelScroller
 
 
 class SegmentedButtons(QWidget):
-    """A row of exclusive, flat buttons; one key is current at a time."""
+    """A row of exclusive, flat buttons; one key is current at a time.
+
+    The application style sheet draws the joined buttons from the
+    ``segmented`` property of the row and the ``segment`` position of each
+    button; ``size="large"`` gives the row more padding.
+    """
 
     current_changed = pyqtSignal(str)
 
-    def __init__(self, items, parent=None):
+    def __init__(self, items, parent=None, *, size="normal"):
         """``items`` is a sequence of ``(key, text)`` pairs."""
         super().__init__(parent)
         self.setObjectName("segmented_buttons")
+        self.setProperty("segmented", True)
+        self.setProperty("size", str(size))
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 8, 2)
         layout.setSpacing(0)
@@ -568,22 +575,12 @@ class SegmentedButtons(QWidget):
             button.setText(text)
             button.setCheckable(True)
             button.setAutoRaise(False)
-            edge = (
-                "border-top-left-radius: 5px; border-bottom-left-radius: 5px;"
-                if position == 0
-                else ""
-            ) + (
-                "border-top-right-radius: 5px; border-bottom-right-radius: 5px;"
-                if position == len(items) - 1
-                else ""
-            )
-            button.setStyleSheet(
-                "QToolButton { border: 1px solid palette(mid); padding: 3px 12px;"
-                " background: palette(button); margin-left: -1px;" + edge + " }"
-                "QToolButton:checked { background: palette(highlight);"
-                " color: palette(highlighted-text); font-weight: bold; }"
-                "QToolButton:disabled { color: palette(mid); }"
-            )
+            if position == 0:
+                button.setProperty("segment", "first")
+            elif position == len(items) - 1:
+                button.setProperty("segment", "last")
+            else:
+                button.setProperty("segment", "middle")
             self._group.addButton(button)
             self.buttons[key] = button
             layout.addWidget(button)
@@ -641,7 +638,8 @@ class CollapsibleSection(QWidget):
         self.header.setCursor(Qt.PointingHandCursor)
         # The group-title style sheet resets nested widgets to normal weight.
         self.header.setStyleSheet(
-            "QToolButton { font-weight: bold; border: none; padding: 2px 0px; }"
+            "QToolButton { font-weight: bold; border: none; padding: 2px 0px;"
+            " background: transparent; }"
         )
         self.header.setToolTip(f"Show or hide {title}")
         layout = QVBoxLayout(self)

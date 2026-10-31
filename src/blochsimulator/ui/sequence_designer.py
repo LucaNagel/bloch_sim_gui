@@ -47,6 +47,7 @@ from ..simulator import (
     apply_rf_carrier,
     resample_rf_pulse,
 )
+from .theme import set_tone
 
 
 # Columns of the extra gradient lobe table: (header, lobe field, range, step).
@@ -322,7 +323,7 @@ class SequenceDesigner(QGroupBox):
             "off-resonance → 90° pulse flips it back along z."
         )
         tour_info.setWordWrap(True)
-        tour_info.setStyleSheet("color: gray;")
+        set_tone(tour_info, "muted")
         tour_layout.addWidget(tour_info)
         self.options_container.addWidget(self.gradient_tour_opts)
 
@@ -404,7 +405,7 @@ class SequenceDesigner(QGroupBox):
         self.tr_spin.setValue(10)
         tr_layout.addWidget(self.tr_spin)
         self.tr_actual_label = QLabel("")
-        self.tr_actual_label.setStyleSheet("color: #666; font-style: italic;")
+        set_tone(self.tr_actual_label, "muted", "font-style: italic;")
         tr_layout.addWidget(self.tr_actual_label)
         layout.addLayout(tr_layout)
         self.tr_spin.valueChanged.connect(lambda _: self.update_diagram())
@@ -466,7 +467,7 @@ class SequenceDesigner(QGroupBox):
         )
         layout.addWidget(self.diagram_widget)
         hint = QLabel("Click: set time · Wheel: zoom · Double-click: all")
-        hint.setStyleSheet("color: #888; font-size: 8pt;")
+        set_tone(hint, "muted", "font-size: 8pt;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.diagram_full_button.clicked.connect(self.diagram_widget.show_full_sequence)
@@ -547,7 +548,7 @@ class SequenceDesigner(QGroupBox):
         self.gradient_moment_label = QLabel("")
         self.gradient_moment_label.setObjectName("gradient_moment_label")
         self.gradient_moment_label.setWordWrap(True)
-        self.gradient_moment_label.setStyleSheet("color: #666;")
+        set_tone(self.gradient_moment_label, "muted")
         self.gradient_moment_label.setToolTip(
             "Net gradient area of the whole sequence per axis and the phase "
             "twist it winds across the object (Free Mode proton gamma)."

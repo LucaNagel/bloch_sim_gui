@@ -32,6 +32,7 @@ from .simulator import (
     apply_rf_carrier,
     design_rf_pulse,
 )
+from .ui.theme import set_tone
 
 
 class SliceSelectionExplorer(QWidget):
@@ -94,7 +95,7 @@ class SliceSelectionExplorer(QWidget):
         pulse_layout.addLayout(row_type)
         self.pulse_status = QLabel()
         self.pulse_status.setWordWrap(True)
-        self.pulse_status.setStyleSheet("color: gray;")
+        set_tone(self.pulse_status, "muted")
         pulse_layout.addWidget(self.pulse_status)
 
         # Flip Angle
@@ -427,7 +428,7 @@ class SliceSelectionExplorer(QWidget):
             self._show_simulation_error(exc)
             return
 
-        self.pulse_status.setStyleSheet("color: gray;")
+        set_tone(self.pulse_status, "muted")
         self.pulse_status.setText(f"Using {pulse_label}")
 
         try:
@@ -455,7 +456,7 @@ class SliceSelectionExplorer(QWidget):
         self.last_time = None
         self.plot_rf.clear()
         self.plot_profile.clear()
-        self.pulse_status.setStyleSheet("color: #b00020;")
+        set_tone(self.pulse_status, "error")
         self.pulse_status.setText(str(error))
 
     def _simulate_profile(self, *, b1_base, time_rf, flip, dur_s, tbw, dt):

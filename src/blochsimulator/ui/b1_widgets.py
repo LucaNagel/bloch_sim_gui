@@ -14,14 +14,17 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStyle,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -634,9 +637,18 @@ class B1WorkspaceWidget(QWidget):
         self.apply_status.setWordWrap(True)
         application_layout.addWidget(self.apply_status)
         controls_layout.addWidget(application_group)
-        controls_container.setMinimumWidth(450)
-        controls_container.setMaximumWidth(620)
-        splitter.addWidget(controls_container)
+        # On short screens the column scrolls instead of squeezing its rows
+        # on top of each other.
+        controls_scroll = QScrollArea()
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.NoFrame)
+        controls_scroll.setWidget(controls_container)
+        scrollbar = controls_scroll.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+        controls_scroll.setMinimumWidth(
+            max(450, controls_container.minimumSizeHint().width() + scrollbar)
+        )
+        controls_scroll.setMaximumWidth(620 + scrollbar)
+        splitter.addWidget(controls_scroll)
 
         self.preview_tabs = QTabWidget()
         self.tx_preview = B1FieldPreview("transmit")

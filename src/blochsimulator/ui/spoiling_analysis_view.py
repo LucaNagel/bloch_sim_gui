@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 from ..sequence.spin_sampling import SpinSampling
 from ..sequence.spoiling import SpinGridRecommendation, pathway_grid_coherence
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
+from .theme import set_tone
 
 VOXEL_COLOR = "#334155"
 CURRENT_COLOR = "#d97706"
@@ -115,7 +116,7 @@ class SpoilingAnalysisView(QWidget):
         self.empty_label = QLabel()
         self.empty_label.setWordWrap(True)
         self.empty_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.empty_label.setStyleSheet("color: #475569;")
+        set_tone(self.empty_label, "muted")
         self.stack.addWidget(self.empty_label)
         plots = QWidget()
         grid = QGridLayout(plots)
@@ -243,9 +244,7 @@ class SpoilingAnalysisView(QWidget):
             return
         self.title_label.setText(snapshot.title)
         self.summary_label.setText(snapshot.summary)
-        self.summary_label.setStyleSheet(
-            "color: #b45309;" if snapshot.warning else "color: #15803d;"
-        )
+        set_tone(self.summary_label, "warning" if snapshot.warning else "ok")
         self.stack.setCurrentIndex(1)
 
         phases, weights, observation = self._plotted_rows(snapshot)

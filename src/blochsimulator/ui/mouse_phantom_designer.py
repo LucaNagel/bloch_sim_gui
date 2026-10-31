@@ -47,6 +47,7 @@ from ..units import (
 from .default_settings import WorkspaceDefaults
 from .volume_viewer import PhantomInspectorWidget
 from .widgets import ExplicitAcceptDialog, PolarizationPercentSpinBox
+from .theme import set_tone
 
 MOUSE_NUCLEI = {
     "C13": "13C (hyperpolarized injection)",
@@ -635,7 +636,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             "body weight."
         )
         self.injection_dose_label = QLabel()
-        self.injection_dose_label.setStyleSheet("color: palette(mid);")
+        set_tone(self.injection_dose_label, "muted")
         self.injection_polarization = PolarizationPercentSpinBox()
         self.injection_polarization.setObjectName("injection_polarization_percent")
         self.injection_polarization.setToolTip(
@@ -643,7 +644,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         )
         self.injection_polarization_thermal = QLabel()
         self.injection_polarization_thermal.setWordWrap(True)
-        self.injection_polarization_thermal.setStyleSheet("color: palette(mid);")
+        set_tone(self.injection_polarization_thermal, "muted")
         compound_form.addRow("Nucleus", self.nucleus)
         compound_form.addRow("Compound", self.injection_compound)
         compound_form.addRow("Concentration", self.injection_concentration)
@@ -823,12 +824,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             "Absolute receive signal still requires scanner/coil calibration."
         )
         injection_help.setWordWrap(True)
-        injection_help.setStyleSheet("color: palette(mid);")
+        set_tone(injection_help, "muted")
         injection_controls_layout.addWidget(injection_help)
         self.injection_help = injection_help
         self.compound_help = QLabel()
         self.compound_help.setWordWrap(True)
-        self.compound_help.setStyleSheet("color: palette(mid);")
+        set_tone(self.compound_help, "muted")
         injection_controls_layout.addWidget(self.compound_help)
         injection_controls_layout.addStretch(1)
         perfusion_animation_row = QHBoxLayout()
