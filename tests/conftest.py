@@ -73,6 +73,24 @@ def _forget_deleted_viewboxes():
             pg.ViewBox.AllViews.pop(view, None)
 
 
+def _close_and_delete_top_level_widgets(app):
+    """Close visible windows and schedule parentless app widgets for deletion.
+
+    Kept apart from the fixture so no local variable still references a
+    window when the reference cycles are collected. Returns whether any
+    top-level widget existed.
+    """
+    top_level_widgets = QApplication.topLevelWidgets()
+    for widget in top_level_widgets:
+        if widget.isVisible():
+            widget.close()
+    app.processEvents()
+    for widget in QApplication.topLevelWidgets():
+        if widget.parentWidget() is None and _is_application_widget(widget):
+            widget.deleteLater()
+    return bool(top_level_widgets)
+
+
 @pytest.fixture(autouse=True)
 def inline_sequence_generation(monkeypatch):
     """Generate sequences inline so tests can check the result right away.
@@ -95,22 +113,28 @@ def cleanup_qt_widgets(qt_application):
     Each new named pyqtgraph ViewBox then refreshed the context menus of all
     ViewBoxes ever created, making every test slower than the one before.
     Parentless application widgets a test did not delete itself are deleted
-    too. Third-party top-level widgets are left alone: some are owned
-    elsewhere (e.g. QWidgetAction default widgets in pyqtgraph menus), and
-    deleting them separately crashes when their owner is destroyed.
-    Those stay alive hidden, so only visible windows are closed: every
-    ``close()`` scans all top-level widgets, which grows quadratically.
+    too. Third-party top-level widgets are not deleted directly: some are
+    owned elsewhere (e.g. QWidgetAction default widgets in pyqtgraph menus),
+    and deleting them separately crashes when their owner is destroyed.
+    Only visible windows are closed: every ``close()`` scans all top-level
+    widgets.
+
+    The parentless pyqtgraph menus belong to Python wrappers in reference
+    cycles, which the disabled automatic GC never frees. PyQt also keeps
+    every lambda slot, and with it the window it captures, until the
+    ``destroyed`` call its deleted sender queued has been delivered. So the
+    queued calls are delivered, the slot proxies deleted and the cycles
+    collected here, at a point where no Qt code is running.
     """
     memory_policy = get_default_memory_policy()
     yield
 
     set_default_memory_policy(memory_policy)
-    for widget in QApplication.topLevelWidgets():
-        if widget.isVisible():
-            widget.close()
-    qt_application.processEvents()
-    for widget in QApplication.topLevelWidgets():
-        if widget.parentWidget() is None and _is_application_widget(widget):
-            widget.deleteLater()
+    had_widgets = _close_and_delete_top_level_widgets(qt_application)
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    QApplication.sendPostedEvents()
     QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     _forget_deleted_viewboxes()
+    if had_widgets:
+        # Tests without widgets skip the ~35 ms full collection.
+        gc.collect()
