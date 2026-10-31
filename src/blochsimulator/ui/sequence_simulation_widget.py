@@ -229,6 +229,7 @@ from .styles import (
     RUN_BUTTON_ACCENT_STYLE,
     ProgressAccent,
 )
+from .theme import set_tone, tone_of
 from .volume_viewer import (
     SequenceMagnetizationAnimationViewer,
     SequenceResultVolumeViewer,
@@ -246,6 +247,11 @@ from .default_settings import WorkspaceDefaults, load_kernel_settings
 
 # Run progress is drawn in permille so time extrapolation moves smoothly.
 RUN_PROGRESS_SCALE = 1000
+
+# File filters of the Pulseq export dialog; the Export menu preselects one.
+PULSEQ_EXPORT_BOTH_FILTER = "Pulseq + Jupyter notebook (*.seq)"
+PULSEQ_EXPORT_SEQUENCE_FILTER = "Pulseq sequence only (*.seq)"
+PULSEQ_EXPORT_NOTEBOOK_FILTER = "Jupyter notebook only (*.ipynb)"
 
 # Display names of the subvoxel spin-grid methods in diagnostics.
 _SPIN_GRID_METHOD_LABELS = {
@@ -1730,6 +1736,8 @@ class SequenceSimulationWidget(QWidget):
         self.program: Optional[SequenceProgram] = None
         self._generated_pulseq_sequence = None
         self._sequence_generation_pending = False
+        self._sequence_generation_failed = False
+        self._sequence_status_detail = ""
         self._generated_sequence_source_index = None
         self._selected_sequence_source_index = 0
         self._generation_error = ""
@@ -2138,7 +2146,7 @@ class SequenceSimulationWidget(QWidget):
         """Green run button and a progress bar tinted orange to green."""
         self._color_accents = bool(enabled)
         accent = RUN_BUTTON_ACCENT_STYLE if self._color_accents else ""
-        self.run_button.setStyleSheet(accent + self._inactive_button_style)
+        self.run_button.setStyleSheet(accent)
         self.progress_accent.set_enabled(self._color_accents)
         self.loop_progress_accent.set_enabled(self._color_accents)
 
@@ -2861,8 +2869,14 @@ class SequenceSimulationWidget(QWidget):
         splitter.addWidget(control_column)
         self.workspace_splitter = splitter
 
+        # The section is a form: aligned label/field rows, a rule, then the
+        # actions and a one-line status of the generated sequence.
         sequence_group = QGroupBox()
-        sequence_layout = QVBoxLayout(sequence_group)
+        sequence_layout = QGridLayout(sequence_group)
+        sequence_layout.setHorizontalSpacing(10)
+        sequence_layout.setVerticalSpacing(8)
+        sequence_layout.setColumnStretch(1, 1)
+        sequence_layout.setColumnStretch(3, 1)
         sequence_title = QLabel("Sequence")
         sequence_title_font = sequence_title.font()
         sequence_title_font.setBold(True)
@@ -2872,10 +2886,6 @@ class SequenceSimulationWidget(QWidget):
         # to normal weight, so explicitly retain this custom section heading.
         sequence_title.setStyleSheet("font-weight: bold;")
         self.sequence_title = sequence_title
-        sequence_layout.addWidget(sequence_title)
-        source_row = QHBoxLayout()
-        source_row.addWidget(QLabel("Source / mode"))
-        source_row.addStretch(1)
         self.sequence_presets_button = QToolButton()
         self.sequence_presets_button.setText("Presets")
         self.sequence_presets_button.setPopupMode(QToolButton.InstantPopup)
@@ -2889,8 +2899,12 @@ class SequenceSimulationWidget(QWidget):
             self._rebuild_sequence_presets_menu
         )
         self.sequence_presets_button.setMenu(self.sequence_presets_menu)
-        source_row.addWidget(self.sequence_presets_button)
-        sequence_layout.addLayout(source_row)
+        heading_row = QHBoxLayout()
+        heading_row.addWidget(sequence_title)
+        heading_row.addStretch(1)
+        heading_row.addWidget(self.sequence_presets_button)
+        sequence_layout.addLayout(heading_row, 0, 0, 1, 4)
+
         self.sequence_source = GroupedComboBox()
         self.sequence_source.setObjectName("sequence_source")
         self.sequence_source.addItems(
@@ -2922,11 +2936,10 @@ class SequenceSimulationWidget(QWidget):
             "imaging, imaging, bSSFP or an RF + slice-selection check), or "
             "import one from a Pulseq file or a Python script"
         )
-        sequence_layout.addWidget(self.sequence_source)
+        sequence_layout.addWidget(QLabel("Source"), 1, 0)
+        sequence_layout.addWidget(self.sequence_source, 1, 1, 1, 3)
 
-        nucleus_row = QHBoxLayout()
         self.nucleus_label = QLabel("Nucleus")
-        nucleus_row.addWidget(self.nucleus_label)
         self.nucleus = QComboBox()
         self.nucleus.setObjectName("sequence_nucleus")
         self.nucleus.addItems(list(NUCLEUS_GAMMA_HZ_PER_T))
@@ -2935,10 +2948,7 @@ class SequenceSimulationWidget(QWidget):
             "Reference nucleus for this sequence, ppm-to-Hz conversion and "
             "physical RF/gradient units"
         )
-        nucleus_row.addWidget(self.nucleus, 1)
-        nucleus_row.addSpacing(8)
-        self.sequence_reference_label = QLabel("Sequence reference")
-        nucleus_row.addWidget(self.sequence_reference_label)
+        self.sequence_reference_label = QLabel("Reference")
         self.sequence_reference_ppm = QDoubleSpinBox()
         self.sequence_reference_ppm.setObjectName("sequence_reference_ppm")
         self.sequence_reference_ppm.setRange(-10000.0, 10000.0)
@@ -2953,31 +2963,12 @@ class SequenceSimulationWidget(QWidget):
             "offsets are applied relative to this reference; the phantom's "
             "spectrum centre and bandwidth remain independent."
         )
-        nucleus_row.addWidget(self.sequence_reference_ppm, 1)
-        sequence_layout.addLayout(nucleus_row)
+        self.sequence_reference_label.setToolTip(self.sequence_reference_ppm.toolTip())
+        sequence_layout.addWidget(self.nucleus_label, 2, 0)
+        sequence_layout.addWidget(self.nucleus, 2, 1)
+        sequence_layout.addWidget(self.sequence_reference_label, 2, 2)
+        sequence_layout.addWidget(self.sequence_reference_ppm, 2, 3)
 
-        generation_grid = QGridLayout()
-        generation_grid.setHorizontalSpacing(10)
-        generation_grid.setVerticalSpacing(6)
-        generation_grid.setContentsMargins(0, 4, 0, 2)
-        generation_grid.setColumnStretch(0, 1)
-        generation_grid.setColumnStretch(1, 1)
-
-        self.sequence_live_preview = QCheckBox("Live preview")
-        self.sequence_live_preview.setChecked(False)
-        self.sequence_live_preview.setToolTip(
-            "Regenerate the selected sequence after every parameter change. "
-            "Leave this off for long sequences and generate once after setup."
-        )
-        self.sequence_live_preview.toggled.connect(self._sequence_live_preview_changed)
-        self.generate_sequence_button = QPushButton("Generate sequence")
-        self.generate_sequence_button.setToolTip(
-            "Generate the sequence from the current parameters and refresh the timeline"
-        )
-        self.generate_sequence_button.clicked.connect(self._generate_sequence_clicked)
-
-        time_resolution_row = QHBoxLayout()
-        time_resolution_row.addWidget(QLabel("Time resolution"))
         self.simulation_timestep_us = QDoubleSpinBox()
         self.simulation_timestep_us.setObjectName("sequence_simulation_timestep_us")
         self.simulation_timestep_us.setRange(0.1, 1000.0)
@@ -2986,29 +2977,76 @@ class SequenceSimulationWidget(QWidget):
         self.simulation_timestep_us.setValue(self._initial_sequence_timestep_us)
         self.simulation_timestep_us.setSuffix(" µs")
         self.simulation_timestep_us.setToolTip(SEQUENCE_TIMESTEP_TOOLTIP)
-        time_resolution_row.addWidget(self.simulation_timestep_us, 1)
-
-        self.load_pulseq_button = QPushButton("Load Pulseq…")
-        self.load_pulseq_button.clicked.connect(self._load_pulseq_file)
-
-        run_script_button = QPushButton("Run Python script…")
-        self.run_script_button = run_script_button
-        self.run_script_button.setToolTip(
-            "Run a selected Python sequence-generation script inside the GUI. "
-            "A newly written Pulseq file is loaded automatically."
+        self.sequence_live_preview = QCheckBox("Live preview")
+        self.sequence_live_preview.setChecked(False)
+        self.sequence_live_preview.setToolTip(
+            "Regenerate the selected sequence after every parameter change. "
+            "Leave this off for long sequences and generate once after setup."
         )
-        self.run_script_button.clicked.connect(self._run_python_script)
+        self.sequence_live_preview.toggled.connect(self._sequence_live_preview_changed)
+        sequence_layout.addWidget(QLabel("Time step"), 3, 0)
+        sequence_layout.addWidget(self.simulation_timestep_us, 3, 1)
+        sequence_layout.addWidget(self.sequence_live_preview, 3, 2, 1, 2)
 
-        self.export_pulseq_button = QPushButton("Export Pulseq…")
+        rule = QFrame()
+        rule.setProperty("role", "rule")
+        rule.setFrameShape(QFrame.HLine)
+        sequence_layout.addWidget(rule, 4, 0, 1, 4)
+
+        self.generate_sequence_button = QPushButton("Generate sequence")
+        self.generate_sequence_button.setToolTip(
+            "Generate the sequence from the current parameters and refresh the timeline"
+        )
+        self.generate_sequence_button.clicked.connect(self._generate_sequence_clicked)
+        self.generate_sequence_button.setProperty("primary", True)
+
+        self.import_sequence_button = QToolButton()
+        self.import_sequence_button.setText("Import")
+        self.import_sequence_button.setPopupMode(QToolButton.InstantPopup)
+        self.import_sequence_button.setToolTip(
+            "Load a Pulseq .seq file, or run a Python sequence-generation "
+            "script inside the GUI (a newly written Pulseq file is loaded "
+            "automatically)"
+        )
+        import_menu = QMenu(self.import_sequence_button)
+        self.load_pulseq_action = import_menu.addAction("Load Pulseq .seq file…")
+        self.load_pulseq_action.triggered.connect(
+            lambda _checked=False: self._load_pulseq_file()
+        )
+        self.run_script_action = import_menu.addAction("Run Python script…")
+        self.run_script_action.triggered.connect(
+            lambda _checked=False: self._run_python_script()
+        )
+        self.import_sequence_button.setMenu(import_menu)
+
+        self.export_pulseq_button = QToolButton()
+        self.export_pulseq_button.setText("Export")
+        self.export_pulseq_button.setPopupMode(QToolButton.InstantPopup)
         self.export_pulseq_button.setEnabled(False)
         self.export_pulseq_button.setToolTip(
             "Export the generated sequence as Pulseq, a reproducing Jupyter "
             "notebook, or both"
         )
-        self.export_pulseq_button.clicked.connect(self._export_pulseq)
+        export_menu = QMenu(self.export_pulseq_button)
+        for text, file_filter in (
+            ("Pulseq + Jupyter notebook…", PULSEQ_EXPORT_BOTH_FILTER),
+            ("Pulseq sequence only…", PULSEQ_EXPORT_SEQUENCE_FILTER),
+            ("Jupyter notebook only…", PULSEQ_EXPORT_NOTEBOOK_FILTER),
+        ):
+            export_menu.addAction(text).triggered.connect(
+                lambda _checked=False, file_filter=file_filter: self._export_pulseq(
+                    file_filter
+                )
+            )
+        self.export_pulseq_button.setMenu(export_menu)
 
-        # Arrange the sequence workflow from source to output in two columns:
-        # choose a source, configure generation, generate, then export.
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(6)
+        actions_row.addWidget(self.generate_sequence_button, 1)
+        actions_row.addWidget(self.import_sequence_button)
+        actions_row.addWidget(self.export_pulseq_button)
+        sequence_layout.addLayout(actions_row, 5, 0, 1, 4)
+
         self.sequence_source.set_groups(
             [
                 (
@@ -3044,20 +3082,20 @@ class SequenceSimulationWidget(QWidget):
                 ),
             ]
         )
-        generation_grid.addWidget(self.load_pulseq_button, 0, 0)
-        generation_grid.addWidget(run_script_button, 0, 1)
-        generation_grid.addLayout(time_resolution_row, 1, 0)
-        generation_grid.addWidget(self.sequence_live_preview, 1, 1)
-        generation_grid.addWidget(self.generate_sequence_button, 2, 0, 1, 2)
-        generation_grid.addWidget(self.export_pulseq_button, 3, 0, 1, 2)
-        sequence_layout.addLayout(generation_grid)
 
+        # Messages that need more than the status line (errors, the
+        # generation that restarts) appear here.
         self.sequence_info = QLabel()
         self.sequence_info.setWordWrap(True)
-        sequence_layout.addWidget(self.sequence_info)
+        self.sequence_info.setVisible(False)
+        sequence_layout.addWidget(self.sequence_info, 6, 0, 1, 4)
+        self.sequence_status_label = QLabel()
+        self.sequence_status_label.setObjectName("sequence_status")
+        self.sequence_status_label.setWordWrap(True)
         self.psf_analysis_link = QLabel(
-            "<a href='psf-analysis'>Show PSF Analysis</a> · "
-            "<a href='kspace'>Show k-space trajectory</a>"
+            "<a href='psf-analysis' style='text-decoration: none'>PSF Analysis</a>"
+            " · <a href='kspace' style='text-decoration: none'>k-space "
+            "trajectory</a> ›"
         )
         self.psf_analysis_link.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
         self.psf_analysis_link.setToolTip(
@@ -3066,7 +3104,12 @@ class SequenceSimulationWidget(QWidget):
             "timing and sampling PSF."
         )
         self.psf_analysis_link.linkActivated.connect(self._analysis_link_activated)
-        sequence_layout.addWidget(self.psf_analysis_link)
+        status_row = QHBoxLayout()
+        status_row.addWidget(self.sequence_status_label, 1)
+        status_row.addWidget(self.psf_analysis_link, 0, Qt.AlignRight | Qt.AlignTop)
+        sequence_layout.addLayout(status_row, 7, 0, 1, 4)
+        # The name of the generated sequence is in the status line; the table
+        # keeps the summary rows for scripts and tests.
         self.sequence_summary_table = QTableWidget(0, 2)
         self.sequence_summary_table.setHorizontalHeaderLabels(["Parameter", "Value"])
         self.sequence_summary_table.verticalHeader().setVisible(False)
@@ -3085,7 +3128,6 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_summary_table.horizontalHeader().sectionResized.connect(
             self._schedule_sequence_summary_table_fit
         )
-        sequence_layout.addWidget(self.sequence_summary_table)
         controls_layout.addWidget(sequence_group)
 
         self.fid_group = QGroupBox("Internal FID")
@@ -4944,7 +4986,7 @@ class SequenceSimulationWidget(QWidget):
         self.spoiling_quality_button.setAccessibleName("Spoiling quality details")
         spoiling_quality_layout.addWidget(self.spoiling_quality_button)
         self.spoiling_quality_status = QLabel("Details on hover")
-        self.spoiling_quality_status.setStyleSheet("color: #475569;")
+        set_tone(self.spoiling_quality_status, "muted")
         spoiling_quality_layout.addWidget(self.spoiling_quality_status)
         spoiling_quality_layout.addStretch()
         # Retain the plain-text value for programmatic access and backwards
@@ -5413,7 +5455,7 @@ class SequenceSimulationWidget(QWidget):
             "run the probe again to update it."
         )
         self.probe_stale_warning.setWordWrap(True)
-        self.probe_stale_warning.setStyleSheet("color: #b45309; font-weight: bold;")
+        set_tone(self.probe_stale_warning, "warning", "font-weight: bold;")
         self.probe_stale_warning.setVisible(False)
         probe_form.addRow(self.probe_stale_warning)
         probe_group_layout.addWidget(self.probe_controls)
@@ -5443,18 +5485,15 @@ class SequenceSimulationWidget(QWidget):
         probe_button_layout.addWidget(self.open_parameter_loop_button, 1, 0)
         probe_button_layout.addWidget(self.run_button, 1, 1)
         run_panel_layout.addWidget(probe_buttons)
-        inactive_button_style = (
-            "QPushButton:disabled { color: rgba(70, 70, 70, 145); "
-            "background-color: rgba(210, 210, 210, 150); }"
-        )
-        self._inactive_button_style = inactive_button_style
+        # Native platform styles barely mark disabled buttons; the theme
+        # greys out buttons with this property.
         for button in (
             self.run_probe_button,
             self.run_geometry_probe_button,
             self.open_parameter_loop_button,
             self.run_button,
         ):
-            button.setStyleSheet(inactive_button_style)
+            button.setProperty("dimWhenDisabled", True)
 
         # The loop editor is hosted by the main window in a dedicated tab. It
         # remains owned here so the loop logic and discovered controls stay
@@ -5658,7 +5697,7 @@ class SequenceSimulationWidget(QWidget):
 
         self.parameter_loop_button = QPushButton("Run parameter loop")
         self.parameter_loop_button.setObjectName("run_sequence_parameter_loop")
-        self.parameter_loop_button.setStyleSheet(inactive_button_style)
+        self.parameter_loop_button.setProperty("dimWhenDisabled", True)
         self.parameter_loop_button.clicked.connect(self._start_parameter_loop)
         parameter_loop_form.addRow(self.parameter_loop_button)
         self._update_parameter_loop_input_controls()
@@ -7617,7 +7656,7 @@ class SequenceSimulationWidget(QWidget):
             frame = EncodingFrame.from_read_phase_axes(read_axis, phase_axis)
         except ValueError:
             slice_axis.setText("Invalid — Read and Phase must use different axes")
-            slice_axis.setStyleSheet("color: #b00020;")
+            set_tone(slice_axis, "error")
             target_preset = preset.findText("Custom")
         else:
             read_code, phase_code, partition_code = frame.axis_codes
@@ -8800,6 +8839,7 @@ class SequenceSimulationWidget(QWidget):
         if source_index not in self.CONFIGURABLE_SOURCES:
             return
         self._sequence_generation_pending = True
+        self._sequence_generation_failed = False
         self._sequence_revision += 1
         self._update_probe_stale_warning()
         self._schedule_geometry_refresh(sequence_only=True)
@@ -8815,7 +8855,8 @@ class SequenceSimulationWidget(QWidget):
             preview_text = "The timeline still shows the previously loaded sequence."
         self._show_sequence_message(
             "Sequence parameters changed. Click Generate sequence to refresh.\n"
-            f"{preview_text}"
+            f"{preview_text}",
+            in_status=True,
         )
         self._emit_physical_b1_changed()
 
@@ -8962,6 +9003,7 @@ class SequenceSimulationWidget(QWidget):
         source_index = generation.source_index
         if success:
             self._sequence_generation_pending = False
+            self._sequence_generation_failed = False
             self._generated_sequence_source_index = source_index
             self._generation_error = ""
             if source_index == self.FLASH_SOURCE:
@@ -8969,10 +9011,12 @@ class SequenceSimulationWidget(QWidget):
             self._update_spoiling_quality()
             self._update_geometry_stale_notice()
             self._emit_physical_b1_changed()
+            self._refresh_sequence_status()
             return True
         for name, value in generation.previous_state.items():
             setattr(self, name, value)
         self._sequence_generation_pending = True
+        self._sequence_generation_failed = True
         message = self._generation_error or "Sequence generation failed."
         if self._generation_recovery_note:
             message += f"\n{self._generation_recovery_note}"
@@ -9032,7 +9076,8 @@ class SequenceSimulationWidget(QWidget):
     def _show_generation_restart_message(self):
         self._show_sequence_message(
             "Generating sequence…\nSettings changed; the sequence is generated "
-            "again with the new values."
+            "again with the new values.",
+            in_status=True,
         )
 
     def _sequence_generation_current(self, generation):
@@ -9050,7 +9095,7 @@ class SequenceSimulationWidget(QWidget):
         thread.failed.connect(self._sequence_generation_job_failed)
         thread.finished.connect(self._sequence_generation_thread_finished)
         self._sequence_generation_threads.append(thread)
-        self._show_sequence_message("Generating sequence…")
+        self._show_sequence_message("Generating sequence…", in_status=True)
         thread.start()
 
     def _sequence_generation_stage(self, generation, message):
@@ -9058,7 +9103,7 @@ class SequenceSimulationWidget(QWidget):
             return
         if not self._sequence_generation_current(generation):
             return
-        self._show_sequence_message(f"Generating sequence…\n{message}")
+        self._show_sequence_message(f"Generating sequence…\n{message}", in_status=True)
         if self._run_waiting_for_generation:
             self._status_update(f"Generating sequence: {message}")
 
@@ -9126,18 +9171,52 @@ class SequenceSimulationWidget(QWidget):
             self._sequence_generation.stale = True
             self._update_generation_controls()
 
-    def _update_generation_controls(self):
+    def _sequence_generating(self):
         generation = self._sequence_generation
         # An outdated generation that will not restart leaves Generate free.
-        generating = generation is not None and (
+        return generation is not None and (
             self._sequence_generation_current(generation)
             or self._sequence_generation_restarts(generation)
         )
+
+    def _update_generation_controls(self):
+        generating = self._sequence_generating()
         configurable = self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES
         self.generate_sequence_button.setEnabled(configurable and not generating)
         self.generate_sequence_button.setText(
             "Generating sequence…" if generating else "Generate sequence"
         )
+        self._refresh_sequence_status()
+
+    def _sequence_status_name(self):
+        source = str(getattr(self.program, "source", "") or "sequence")
+        if "/" in source or "\\" in source:
+            source = Path(source).name
+        return source
+
+    def _refresh_sequence_status(self):
+        """Summarize the loaded sequence and its state in one coloured line."""
+        label = getattr(self, "sequence_status_label", None)
+        if label is None:
+            return
+        configurable = self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES
+        if self._sequence_generating():
+            text, tone = "Generating sequence…", "info"
+            if self._sequence_status_detail:
+                text += f" · {self._sequence_status_detail}"
+        elif self._sequence_generation_failed:
+            text, tone = "Generation failed", "error"
+            if self.program is not None:
+                text += f" · showing {self._sequence_status_name()}"
+        elif self.program is None:
+            text, tone = "No sequence yet · click Generate sequence", "muted"
+        elif self._sequence_generation_pending and configurable:
+            text = f"{self._sequence_status_name()} · settings changed, generate again"
+            tone = "warning"
+        else:
+            text, tone = f"{self._sequence_status_name()} · up to date", "ok"
+        label.setText(f"● {text}")
+        set_tone(label, tone)
 
     def _sequence_generation_thread_finished(self):
         for thread in list(self._sequence_generation_threads):
@@ -10686,9 +10765,7 @@ class SequenceSimulationWidget(QWidget):
                 )
             )
         self.flash_spoiler_info.setText(message)
-        self.flash_spoiler_info.setStyleSheet(
-            "color: #b45309;" if warning else "color: #15803d;"
-        )
+        set_tone(self.flash_spoiler_info, "warning" if warning else "ok")
         phases = np.asarray(report.phase_cycles_per_voxel, dtype=float).reshape(-1, 3)
         adc_rows = report_source == "actual ADC moment origins"
         # ADC rows are relative to the first ADC, so they start at ADC 2.
@@ -10896,7 +10973,7 @@ class SequenceSimulationWidget(QWidget):
         """Render spoiling quality as a rich table in the info-button tooltip."""
         if not hasattr(self, "spoiling_quality_button"):
             return
-        color = "#b45309" if warning else "#15803d"
+        tone = "warning" if warning else "ok"
         status = "Review recommended" if warning else "Quality available"
         body = "".join(
             "<tr>"
@@ -10912,18 +10989,16 @@ class SequenceSimulationWidget(QWidget):
             f"{body}"
             "</table></div>"
         )
-        self.spoiling_quality_button.setStyleSheet(f"color: {color};")
+        set_tone(self.spoiling_quality_button, tone)
         self.spoiling_quality_status.setText(status)
-        self.spoiling_quality_status.setStyleSheet(f"color: {color};")
+        set_tone(self.spoiling_quality_status, tone)
 
     def _set_spoiling_quality_unavailable(self, message, warning=False):
         if not hasattr(self, "spoiling_quality_info"):
             return
         self._spoiling_spin_grid_recommendation = None
         self.spoiling_quality_info.setText(message)
-        self.spoiling_quality_info.setStyleSheet(
-            "color: #b45309;" if warning else "color: #475569;"
-        )
+        set_tone(self.spoiling_quality_info, "warning" if warning else "muted")
         self._set_spoiling_quality_table(
             (("Status", "Warning" if warning else "Information"), ("Details", message)),
             warning=warning,
@@ -11049,9 +11124,7 @@ class SequenceSimulationWidget(QWidget):
             or report.maximum_sampling_error > 0.05
         )
         self.spoiling_quality_info.setText(message)
-        self.spoiling_quality_info.setStyleSheet(
-            "color: #b45309;" if warning else "color: #15803d;"
-        )
+        set_tone(self.spoiling_quality_info, "warning" if warning else "ok")
         quality_rows = [
             ("Sequence", spec["name"]),
             (
@@ -11131,7 +11204,7 @@ class SequenceSimulationWidget(QWidget):
         self.spoiling_quality_info.setText(
             "FLASH (2D). " + self.flash_spoiler_info.text()
         )
-        self.spoiling_quality_info.setStyleSheet(self.flash_spoiler_info.styleSheet())
+        set_tone(self.spoiling_quality_info, tone_of(self.flash_spoiler_info))
         flash_rows = getattr(
             self,
             "_flash_spoiling_quality_rows",
@@ -11139,7 +11212,7 @@ class SequenceSimulationWidget(QWidget):
         )
         self._set_spoiling_quality_table(
             flash_rows,
-            warning="#b45309" in self.flash_spoiler_info.styleSheet(),
+            warning=tone_of(self.flash_spoiler_info) == "warning",
         )
         self.spoiling_apply_recommended_grid.setVisible(True)
         self.spoiling_apply_recommended_grid.setEnabled(
@@ -11324,9 +11397,7 @@ class SequenceSimulationWidget(QWidget):
             )
         warning = current.maximum_error > 0.05
         self.spoiling_quality_info.setText(message)
-        self.spoiling_quality_info.setStyleSheet(
-            "color: #b45309;" if warning else "color: #15803d;"
-        )
+        set_tone(self.spoiling_quality_info, "warning" if warning else "ok")
         quality_rows = [
             ("Sequence", "Imported Pulseq coherence pathways"),
             (
@@ -11538,9 +11609,7 @@ class SequenceSimulationWidget(QWidget):
             else:
                 messages.append("Receiver offsets match the named phantom peaks.")
         self.ss_bssfp_spoiler_info.setText(" ".join(messages))
-        self.ss_bssfp_spoiler_info.setStyleSheet(
-            "color: #b45309;" if warning else "color: #15803d;"
-        )
+        set_tone(self.ss_bssfp_spoiler_info, "warning" if warning else "ok")
         if (
             hasattr(self, "spoiling_quality_info")
             and self.sequence_source.currentIndex() == self.SS_BSSFP_SOURCE
@@ -13402,7 +13471,7 @@ class SequenceSimulationWidget(QWidget):
         self.script_output = output
         self.script_stop_button = stop_button
         self.script_close_button = close_button
-        self.run_script_button.setEnabled(False)
+        self.run_script_action.setEnabled(False)
         self.status.setText(f"Running Python script {self._script_path.name}…")
         process.start()
         dialog.show()
@@ -13458,7 +13527,7 @@ class SequenceSimulationWidget(QWidget):
         if self.script_output is not None:
             self.script_output.append(f"\nProcess error: {error}")
         if error == QProcess.FailedToStart:
-            self.run_script_button.setEnabled(True)
+            self.run_script_action.setEnabled(True)
             if hasattr(self, "script_stop_button"):
                 self.script_stop_button.setEnabled(False)
             if hasattr(self, "script_close_button"):
@@ -13469,7 +13538,7 @@ class SequenceSimulationWidget(QWidget):
         self._read_python_script_output()
         process = self.script_process
         script_path = self._script_path
-        self.run_script_button.setEnabled(True)
+        self.run_script_action.setEnabled(True)
         if hasattr(self, "script_stop_button"):
             self.script_stop_button.setEnabled(False)
         if hasattr(self, "script_close_button"):
@@ -13661,7 +13730,7 @@ class SequenceSimulationWidget(QWidget):
                 self, "Pulseq import", "A Pulseq file is already being loaded."
             )
             return
-        self.load_pulseq_button.setEnabled(False)
+        self.load_pulseq_action.setEnabled(False)
         self.run_button.setEnabled(False)
         self.progress.setRange(0, 0)
         self.progress.setFormat("Loading Pulseq…")
@@ -13695,7 +13764,7 @@ class SequenceSimulationWidget(QWidget):
         QMessageBox.critical(self, "Pulseq import failed", str(message))
 
     def _reset_pulseq_load_controls(self, progress_text):
-        self.load_pulseq_button.setEnabled(True)
+        self.load_pulseq_action.setEnabled(True)
         self.run_button.setEnabled(
             self.program is not None and self.object_source.currentIndex() != 2
         )
@@ -13795,7 +13864,7 @@ class SequenceSimulationWidget(QWidget):
         sequence.write(str(path), v141_compat=True)
         return path
 
-    def _export_pulseq(self):
+    def _export_pulseq(self, initial_filter=PULSEQ_EXPORT_BOTH_FILTER):
         try:
             export_spec = self._pulseq_export_spec()
         except ValueError:
@@ -13806,14 +13875,18 @@ class SequenceSimulationWidget(QWidget):
             )
             return
         sequence_kind, parameters, default_name = export_spec
-        both_filter = "Pulseq + Jupyter notebook (*.seq)"
-        sequence_filter = "Pulseq sequence only (*.seq)"
-        notebook_filter = "Jupyter notebook only (*.ipynb)"
+        both_filter = PULSEQ_EXPORT_BOTH_FILTER
+        sequence_filter = PULSEQ_EXPORT_SEQUENCE_FILTER
+        notebook_filter = PULSEQ_EXPORT_NOTEBOOK_FILTER
+        default_path = self._export_directory() / default_name
+        if initial_filter == notebook_filter:
+            default_path = default_path.with_suffix(".ipynb")
         filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export generated Pulseq sequence",
-            str(self._export_directory() / default_name),
+            str(default_path),
             f"{both_filter};;{sequence_filter};;{notebook_filter}",
+            initial_filter,
         )
         if not filename:
             return
@@ -14091,10 +14164,17 @@ class SequenceSimulationWidget(QWidget):
             "per-voxel max-B1 map are included in result exports."
         )
 
-    def _show_sequence_message(self, message):
-        self.sequence_summary_table.setVisible(False)
-        self.sequence_info.setVisible(True)
+    def _show_sequence_message(self, message, *, in_status=False):
+        """Show ``message`` below the actions.
+
+        With ``in_status`` the status line already says it; only the lines
+        after the first are added there as detail.
+        """
+        lines = str(message).splitlines()
+        self._sequence_status_detail = " ".join(lines[1:]).strip() if in_status else ""
         self.sequence_info.setText(str(message))
+        self.sequence_info.setVisible(not in_status)
+        self._refresh_sequence_status()
 
     def _generation_error_guidance(self, error):
         """Translate low-level sequence errors into a useful next action."""
@@ -14185,7 +14265,7 @@ class SequenceSimulationWidget(QWidget):
         dialog.exec_()
 
     def _set_sequence_summary(self, rows, plain_text):
-        """Show only the sequence name while retaining the full text for APIs."""
+        """Keep the sequence name for the status line and the full text for APIs."""
         sequence_rows = [
             ("Sequence name", value)
             for parameter, value in rows
@@ -14202,10 +14282,9 @@ class SequenceSimulationWidget(QWidget):
             value_item.setTextAlignment(Qt.AlignLeft | Qt.AlignTop)
             table.setItem(row, 0, parameter_item)
             table.setItem(row, 1, value_item)
-        self._fit_summary_table(table, 340)
         self.sequence_info.setText(str(plain_text))
         self.sequence_info.setVisible(False)
-        table.setVisible(True)
+        self._refresh_sequence_status()
 
     def _show_program(self, compiled=None):
         if self.program is None:

@@ -1,41 +1,49 @@
 """Small cross-platform Qt style helpers shared by desktop workspaces."""
 
-import sys
-
-
-INTERFACE_STYLE_AUTOMATIC = "automatic"
+INTERFACE_STYLE_LIGHT = "light"
+INTERFACE_STYLE_DARK = "dark"
+INTERFACE_STYLE_MATCH_SYSTEM = "match_system"
 INTERFACE_STYLE_SYSTEM = "system"
-INTERFACE_STYLE_FUSION = "fusion"
+INTERFACE_STYLE_DEFAULT = INTERFACE_STYLE_LIGHT
 
 INTERFACE_STYLE_CHOICES = (
-    (
-        "Automatic (system on macOS, Fusion elsewhere)",
-        INTERFACE_STYLE_AUTOMATIC,
-    ),
-    ("System / native", INTERFACE_STYLE_SYSTEM),
-    ("Fusion (consistent across platforms)", INTERFACE_STYLE_FUSION),
+    ("Light", INTERFACE_STYLE_LIGHT),
+    ("Dark", INTERFACE_STYLE_DARK),
+    ("Match system (light or dark)", INTERFACE_STYLE_MATCH_SYSTEM),
+    ("Native platform controls", INTERFACE_STYLE_SYSTEM),
 )
+
+# Settings written before the light and dark themes existed.
+_LEGACY_INTERFACE_STYLES = {
+    "automatic": INTERFACE_STYLE_LIGHT,
+    "fusion": INTERFACE_STYLE_LIGHT,
+}
 
 
 def normalize_interface_style(value) -> str:
-    """Return a supported persistent interface-style identifier."""
+    """Return a supported persistent appearance identifier."""
     style = str(value or "").strip().lower()
+    style = _LEGACY_INTERFACE_STYLES.get(style, style)
     if style in {
-        INTERFACE_STYLE_AUTOMATIC,
+        INTERFACE_STYLE_LIGHT,
+        INTERFACE_STYLE_DARK,
+        INTERFACE_STYLE_MATCH_SYSTEM,
         INTERFACE_STYLE_SYSTEM,
-        INTERFACE_STYLE_FUSION,
     }:
         return style
-    return INTERFACE_STYLE_AUTOMATIC
+    return INTERFACE_STYLE_DEFAULT
 
 
-def resolve_interface_style(value, *, platform=None) -> str:
-    """Resolve ``automatic`` to the concrete style used on this platform."""
+def resolve_interface_style(value, *, system_dark=False) -> str:
+    """Resolve ``match_system`` to ``light`` or ``dark``.
+
+    ``system_dark`` is a flag or a callable asked only when needed.
+    """
     style = normalize_interface_style(value)
-    if style != INTERFACE_STYLE_AUTOMATIC:
+    if style != INTERFACE_STYLE_MATCH_SYSTEM:
         return style
-    platform = sys.platform if platform is None else str(platform)
-    return INTERFACE_STYLE_SYSTEM if platform == "darwin" else INTERFACE_STYLE_FUSION
+    dark = system_dark() if callable(system_dark) else system_dark
+    return INTERFACE_STYLE_DARK if dark else INTERFACE_STYLE_LIGHT
 
 
 # macOS' native QGroupBox style does not consistently honor a font declared
@@ -52,12 +60,12 @@ BOLD_GROUP_TITLES_STYLE = (
 # Optional colour accents ("Colour accents" in Settings > Interface).
 RUN_BUTTON_ACCENT_STYLE = (
     "QPushButton:enabled { background-color: #43a047; color: white;"
-    " border: 1px solid #2e7d32; border-radius: 5px; padding: 3px 12px;"
+    " border: 1px solid #2e7d32; border-radius: 6px; padding: 5px 12px;"
     " font-weight: bold; }"
     "QPushButton:enabled:hover { background-color: #4caf50; }"
     "QPushButton:enabled:pressed { background-color: #2e7d32; }"
-    "QPushButton:disabled { border: 1px solid palette(mid); border-radius: 5px;"
-    " padding: 3px 12px; }"
+    "QPushButton:disabled { border: 1px solid palette(mid); border-radius: 6px;"
+    " padding: 5px 12px; }"
 )
 
 # Text colour of a result tab whose data come from the finished simulation.
@@ -84,7 +92,7 @@ def progress_accent_style(fraction) -> str:
         )
     return (
         "QProgressBar { border: 1px solid palette(mid); border-radius: 4px;"
-        " background-color: palette(base); color: #111111; text-align: center;"
+        " background-color: palette(base); color: palette(text); text-align: center;"
         " min-height: 16px; }"
         f"QProgressBar::chunk {{ background-color: hsl({hue}, 60%, 58%);"
         " border-radius: 3px; }"

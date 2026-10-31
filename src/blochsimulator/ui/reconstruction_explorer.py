@@ -62,6 +62,7 @@ from .sequence_geometry_viewer import (
 )
 from .volume_viewer import VolumeViewerWidget, _SliceScrollViewBox
 from .widgets import IMAGE_CANVAS_BACKGROUND, style_image_item
+from .theme import set_tone
 
 
 _IMAGE_INTERPOLATION_FACTOR = 8
@@ -1079,7 +1080,7 @@ class SequenceReconstructionExplorer(QWidget):
         layout.addRow("Trajectory", self.reconstruction_trajectory_combo)
         self.reconstruction_message = QLabel()
         self.reconstruction_message.setWordWrap(True)
-        self.reconstruction_message.setStyleSheet("color: #475569;")
+        set_tone(self.reconstruction_message, "muted")
         layout.addRow(self.reconstruction_message)
         self.reconstruction_group = group
         group.setVisible(False)
@@ -1149,9 +1150,7 @@ class SequenceReconstructionExplorer(QWidget):
         self._select_session_run(run_id)
         self.reconstruction_group.setVisible(True)
         self.reconstruction_message.setText(message)
-        self.reconstruction_message.setStyleSheet(
-            "color: #b45309;" if message else "color: #475569;"
-        )
+        set_tone(self.reconstruction_message, "warning" if message else "muted")
 
     def set_result(self, result, phantom=None):
         source = result.metadata.get("sequence_source", "current simulation")

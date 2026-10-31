@@ -568,7 +568,7 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
     assert window.sequence_simulation_widget.program.source == "internal-flash-2d"
     assert window.sequence_simulation_widget._rf_designer is window.rf_designer
     assert window.sequence_simulation_widget._rf_designer_pulse_data is not None
-    assert window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
+    assert window.main_header.isAncestorOf(window.workspace_switch)
     assert window.statusBar().isAncestorOf(window.status_export_button)
     assert window.findChild(QToolBar, "main_toolbar") is None
     assert window.mag_3d.export_3d_btn.isHidden()
@@ -1076,9 +1076,7 @@ def test_workspace_roundtrip_remains_interactive(use_popup):
         app.processEvents()
         assert window.workspace_mode == "sequence"
         assert not window.workspace_header.isVisible()
-        assert (
-            window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
-        )
+        assert window.main_header.isAncestorOf(window.workspace_switch)
         assert window.workspace_switch.isVisible()
         assert window.workspace_mode_selector.isVisible()
 
@@ -1086,9 +1084,7 @@ def test_workspace_roundtrip_remains_interactive(use_popup):
         app.processEvents()
         assert window.workspace_mode == "free"
         assert not window.workspace_header.isVisible()
-        assert (
-            window.tab_widget.cornerWidget(Qt.TopRightCorner) is window.workspace_switch
-        )
+        assert window.main_header.isAncestorOf(window.workspace_switch)
         assert window.workspace_switch.isVisible()
         assert window.workspace_mode_selector.isVisible()
         assert window.size() == initial_window_size

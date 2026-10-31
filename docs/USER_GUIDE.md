@@ -39,7 +39,10 @@ remote servers or Colab).
 
 ## 2. The two workspaces
 
-Switch with the **Workspace** selector at the top.
+Switch with the **Workspace** selector at the top right. The bar on the left
+shows the tabs of one group: **Setup**, **Results** or **Analysis**.
+**Tools → Settings → Interface → Appearance** picks a light or dark theme, one
+that follows the system, or the native platform controls.
 
 | | Free Mode | Sequence Mode |
 | --- | --- | --- |
@@ -181,11 +184,12 @@ Only the non-obvious points per sequence:
 | **Slice-selective FID** | No readout gradient; the spectrum sums the whole slice. |
 | **Internal FID** | Magnetization is not reset between repetitions. |
 
-**Presets** (beside *Source / mode*) store all sequence, RF, noise and spoiler
+**Presets** (beside the *Sequence* heading) store all sequence, RF, noise and spoiler
 settings — not the phantom. A *Startup preset* replaces the FLASH default.
 
-**Run Python script…** runs your own sequence script with the app's Python; a
-`.seq` it writes is imported automatically.
+*Import → Run Python script…* runs your own sequence script with the app's
+Python; a `.seq` it writes is imported automatically. The line under *Generate
+sequence* says whether the sequence still matches the settings.
 
 ### 4.4 Spectral-spatial (SPSP) pulses
 
@@ -373,7 +377,7 @@ increases the run time.
 | **Project** `.blochproj` | *File → Save Project…* | Everything: settings, phantom, B1, sequence, results, explorer state |
 | **Results** | *Export results…* | `.nc` (NetCDF, recommended) + analysis notebook; also HDF5/NPZ, Bruker raw (experimental) |
 | **Spin probe** | *Spin Probe → Export…* | `.nc`/`.npz` per probe + `load_spin_probes.ipynb` |
-| **Sequence** | *Export Pulseq…* | `.seq` and/or a notebook that regenerates it |
+| **Sequence** | *Export* beside *Generate sequence* | `.seq` and/or a notebook that regenerates it |
 | **Free Mode results** | *File → Export Results* | HDF5 + analysis notebook; optionally a *reproducible* notebook that re-runs the simulation |
 
 *File → Project Explorer…* indexes folders of projects and shows what each

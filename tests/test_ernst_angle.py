@@ -116,7 +116,6 @@ def test_gui_ernst_angle_state_and_summary_table():
     definitions = widget.program.metadata["definitions"]
     assert bool(definitions["UseErnstAngle"])
     assert not bool(definitions["ErnstUsesT2"])
-    assert not widget.sequence_summary_table.isHidden()
     summary = {
         widget.sequence_summary_table.item(row, 0)
         .text(): widget.sequence_summary_table.item(row, 1)
@@ -124,6 +123,7 @@ def test_gui_ernst_angle_state_and_summary_table():
         for row in range(widget.sequence_summary_table.rowCount())
     }
     assert summary == {"Sequence name": "internal-flash-2d"}
+    assert widget.sequence_status_label.text() == "● internal-flash-2d · up to date"
 
     widget.close()
     widget.deleteLater()

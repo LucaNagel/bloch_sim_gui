@@ -8,9 +8,13 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- The main tabs are grouped into Setup, Results and Analysis. A group bar next
-  to the tab row shows the tabs of one group, and the workspace switch sits at
-  the right end of the tab row.
+- The main tabs are grouped into Setup, Results and Analysis. A header row
+  above the tabs holds a segmented group bar that shows the tabs of one group,
+  and the workspace switch on the right.
+- Settings > Interface > Appearance offers a light theme (the default), a dark theme, one
+  that follows the system, and the native platform controls. Status texts,
+  warnings and hints take their colours from the theme, so they stay readable
+  in the dark theme.
 - Sequence forms fold rarely changed rows into an "Advanced" section.
 - Live mode plays rectangular pulses of finite length that turn about the
   effective field, including off-resonance and gradients. RF and gradient traces
@@ -51,6 +55,11 @@ The project follows [Semantic Versioning](https://semver.org/).
 - The spin-grid recommendation for gradient spoilers reuses per-axis factors
   across candidate grids, which makes it about 30 times faster with identical
   results.
+- The sequence section is a compact form: Source, Nucleus with reference,
+  Time step with live preview, then Generate sequence next to Import and Export
+  menus. A status line says whether the sequence is up to date, being
+  generated, outdated by changed settings or failed, and links to the PSF
+  Analysis tab; it replaces the sequence summary table.
 
 ### Fixed
 
@@ -59,6 +68,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Starting long multi-repetition sequences no longer blocks the window for many
   seconds; sequence duration queries took quadratic time.
 - The parameter loop progress bar no longer stays at "Saving loop result…".
+- On short screens the B1 Fields editor column scrolls instead of drawing the
+  field source rows on top of each other.
 
 ## [2.9.6] - 2026-10-30
 

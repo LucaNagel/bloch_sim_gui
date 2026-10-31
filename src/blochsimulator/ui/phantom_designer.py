@@ -70,6 +70,7 @@ from .sequence_geometry_viewer import (
 from .default_settings import WorkspaceDefaults
 from .styles import BOLD_GROUP_TITLES_STYLE
 from .widgets import ExplicitAcceptDialog
+from .theme import color as theme_color, set_tone
 
 try:
     import pyqtgraph.opengl as gl
@@ -710,7 +711,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             "phantom_simulation_region_summary"
         )
         self.simulation_region_summary.setWordWrap(True)
-        self.simulation_region_summary.setStyleSheet("color: #2563eb;")
+        set_tone(self.simulation_region_summary, "info")
         self.simulation_region_summary.hide()
         geometry_layout.addWidget(self.simulation_region_summary)
         # Keep the compact controls together at the top of the group.  Without
@@ -2633,7 +2634,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             )
         if not kept:
             text += (
-                "<br><span style='color:#b91c1c'>No peak lies in the range; "
+                f"<br><span style='color:{theme_color('error')}'>No peak lies in the range; "
                 "the phantom cannot be built.</span>"
             )
         self.simulation_ppm_info.setText(text)

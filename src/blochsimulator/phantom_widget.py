@@ -66,6 +66,7 @@ from .units import NUCLEUS_GAMMA_HZ_PER_T
 
 # Import simulator
 from .simulator import BlochSimulator
+from .ui.theme import set_tone
 
 
 class PhantomSimulationThread(QThread):
@@ -255,7 +256,7 @@ class PhantomCreatorWidget(QGroupBox):
         # Info display
         self.info_label = QLabel("Click 'Create Phantom' to begin")
         self.info_label.setWordWrap(True)
-        self.info_label.setStyleSheet("color: gray; font-style: italic; padding: 5px;")
+        set_tone(self.info_label, "muted", "font-style: italic; padding: 5px;")
         layout.addWidget(self.info_label)
 
         self.setLayout(layout)
@@ -649,9 +650,7 @@ class PhantomCreatorWidget(QGroupBox):
             )
         else:
             self.info_label.setText(self._empty_hint())
-            self.info_label.setStyleSheet(
-                "color: gray; font-style: italic; padding: 5px;"
-            )
+            set_tone(self.info_label, "muted", "font-style: italic; padding: 5px;")
 
 
 class PhantomViewerWidget(QWidget):
@@ -813,7 +812,7 @@ class PhantomViewerWidget(QWidget):
         self.signal_stats_label = QLabel("")
         self.signal_stats_label.setAlignment(Qt.AlignCenter)
         self.signal_stats_label.setStyleSheet(
-            "padding: 5px; background: #f5f5f5; border-radius: 3px;"
+            "padding: 5px; background: palette(alternate-base); border-radius: 3px;"
         )
         signal_layout.addWidget(self.signal_stats_label)
 
@@ -1205,7 +1204,7 @@ class PhantomWidget(QWidget):
             "Use Sequence Simulation for event-based and spectral phantoms.</i>"
         )
         self.seq_info.setWordWrap(True)
-        self.seq_info.setStyleSheet("color: #666; font-size: 10px; padding: 5px;")
+        set_tone(self.seq_info, "muted", "font-size: 10px; padding: 5px;")
         sim_layout.addWidget(self.seq_info)
 
         sim_group.setLayout(sim_layout)
@@ -1234,7 +1233,7 @@ class PhantomWidget(QWidget):
 
         self.status_label = QLabel("Create a phantom to begin")
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("color: gray; padding: 3px;")
+        set_tone(self.status_label, "muted", "padding: 3px;")
         run_layout.addWidget(self.status_label)
 
         run_group.setLayout(run_layout)
@@ -1291,7 +1290,7 @@ class PhantomWidget(QWidget):
                 else ""
             )
         )
-        self.status_label.setStyleSheet("color: green; padding: 3px;")
+        set_tone(self.status_label, "ok", "padding: 3px;")
         self.log(
             f"Phantom created: {phantom.name}, {phantom.shape}, {phantom.n_active} active voxels"
         )
@@ -1371,7 +1370,7 @@ class PhantomWidget(QWidget):
             self.cancel_btn.setEnabled(True)
             self.progress_bar.setValue(0)
             self.status_label.setText("Starting simulation...")
-            self.status_label.setStyleSheet("color: blue; padding: 3px;")
+            set_tone(self.status_label, "info", "padding: 3px;")
 
             self.log(f"Starting phantom simulation: {nvoxels} voxels, mode={mode}")
 
@@ -1395,7 +1394,7 @@ class PhantomWidget(QWidget):
             self.sim_thread.wait(2000)
             self._reset_controls()
             self.status_label.setText("Simulation cancelled")
-            self.status_label.setStyleSheet("color: orange; padding: 3px;")
+            set_tone(self.status_label, "warning", "padding: 3px;")
             self.log("Phantom simulation cancelled by user")
 
     def _on_progress(self, value: int, message: str):
@@ -1447,7 +1446,7 @@ class PhantomWidget(QWidget):
             self.status_label.setText(
                 f"Complete | |Mxy|: {mxy_active.mean():.3f}, Mz: {mz_active.mean():.3f}"
             )
-            self.status_label.setStyleSheet("color: green; padding: 3px;")
+            set_tone(self.status_label, "ok", "padding: 3px;")
 
             self.log(
                 f"Phantom simulation complete: |Mxy| mean={mxy_active.mean():.4f}, Mz mean={mz_active.mean():.4f}"
@@ -1460,7 +1459,7 @@ class PhantomWidget(QWidget):
         )
         self._reset_controls()
         self.status_label.setText(f"Error: {error_msg[:80]}...")
-        self.status_label.setStyleSheet("color: red; padding: 3px;")
+        set_tone(self.status_label, "error", "padding: 3px;")
         self.log(f"Phantom simulation error: {error_msg}")
 
     def _reset_controls(self):

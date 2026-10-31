@@ -84,7 +84,7 @@ class JCAMPPulseLoader:
 
     @staticmethod
     def load(
-        filepath: Union[str, Path]
+        filepath: Union[str, Path],
     ) -> Tuple[np.ndarray, np.ndarray, PulseMetadata]:
         """
         Load an RF pulse from a JCAMP-DX file.
