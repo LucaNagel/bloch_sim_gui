@@ -19,8 +19,11 @@ CHUNKED_GUI_MODULES = (
 )
 # Benchmarks require local phantom assets and are not part of quality validation.
 EXCLUDED_MODULES = (TESTS / "test_benchmarks.py",)
-GUI_BATCH_SIZE = 2
-GUI_NODE_BATCH_SIZE = 10
+# The conftest cleanup frees every test's widgets, so batches only bound how
+# much one native Qt crash can take down. The explorer's OpenGL views stay one
+# test per process for the software-rendered X11 CI runner.
+GUI_BATCH_SIZE = 12
+GUI_NODE_BATCH_SIZE = 70
 GUI_NODE_BATCH_SIZE_OVERRIDES = {
     TESTS / "test_reconstruction_explorer.py": 1,
 }
