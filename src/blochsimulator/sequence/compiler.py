@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Sequence, Tuple
+from typing import Callable, Iterable, List, Sequence, Tuple
 
 import numpy as np
 
@@ -254,6 +254,9 @@ class SequenceCompiler:
                 status("Skipping RF rasterization for acquisition inference…")
             else:
                 status(f"Rasterizing {len(rf_events):,} RF events…")
+                rf_ranges = self._overlapping_interval_ranges(
+                    interval_end, starts, rf_events
+                )
                 for event_index, event in enumerate(rf_events):
                     frame = frames.get(event_index)
                     if frame is not None:
@@ -265,20 +268,18 @@ class SequenceCompiler:
                                 event_start_s=0.0,
                             )
                         continue
-                    first, last = self._overlapping_interval_range(
-                        interval_end, starts, event.start_s, event.end_s
-                    )
+                    first, last = rf_ranges[event_index]
                     for index in range(first, last):
                         rf_integrals[index] += self._rf_event_integral(
                             event, starts[index], interval_end[index]
                         )
             status(f"Rasterizing {len(program.gradient_events):,} gradient events…")
             tolerance = self._time_tolerance(program.duration_s)
-            for event in program.gradient_events:
+            gradient_ranges = self._overlapping_interval_ranges(
+                interval_end, starts, program.gradient_events
+            )
+            for event, (first, last) in zip(program.gradient_events, gradient_ranges):
                 axis_index = "xyz".index(event.axis)
-                first, last = self._overlapping_interval_range(
-                    interval_end, starts, event.start_s, event.end_s
-                )
                 local_event_starts = {}
                 for index in range(first, last):
                     event_index = int(frame_of_interval[index])
@@ -729,16 +730,24 @@ class SequenceCompiler:
         return total
 
     @staticmethod
-    def _overlapping_interval_range(
-        interval_end: np.ndarray,
-        interval_start: np.ndarray,
-        event_start: float,
-        event_end: float,
-    ) -> Tuple[int, int]:
-        """Return the half-open interval index range overlapping one event."""
-        first = int(np.searchsorted(interval_end, event_start, side="right"))
-        last = int(np.searchsorted(interval_start, event_end, side="left"))
-        return first, last
+    def _overlapping_interval_ranges(
+        interval_end: np.ndarray, interval_start: np.ndarray, events
+    ) -> List[Tuple[int, int]]:
+        """Return the half-open interval index range overlapping each event.
+
+        One search for all events keeps the loop over events in Python: a
+        search per event releases and retakes the GIL each time, which
+        starves the GUI thread while a worker compiles.
+        """
+        event_starts = np.fromiter(
+            (event.start_s for event in events), dtype=float, count=len(events)
+        )
+        event_ends = np.fromiter(
+            (event.end_s for event in events), dtype=float, count=len(events)
+        )
+        first = np.searchsorted(interval_end, event_starts, side="right")
+        last = np.searchsorted(interval_start, event_ends, side="left")
+        return list(zip(first.tolist(), last.tolist()))
 
     @staticmethod
     def _event_integral(

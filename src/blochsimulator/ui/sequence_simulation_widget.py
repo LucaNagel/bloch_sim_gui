@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import html
+import inspect
 import copy
+import dataclasses
 import math
 import re
 import sys
@@ -1221,6 +1223,97 @@ class PulseqLoadThread(QThread):
             self.failed.emit(str(exc))
 
 
+@dataclass(frozen=True)
+class _GeneratedSequenceResult:
+    sequence: object
+    payload: _SequenceLoadPayload
+
+
+@dataclass(frozen=True)
+class _GeneratedSequenceJob:
+    """Build, import and analyse one generated sequence without touching Qt.
+
+    The builder arguments and the workspace definitions are read from the
+    form beforehand, so the job can run in a worker thread.
+    """
+
+    builder: object
+    parameters: dict
+    source: str
+    definitions: dict
+
+    def run(self, status_callback=None):
+        status = (
+            status_callback if status_callback is not None else lambda _message: None
+        )
+        status("Building sequence…")
+        sequence = self.builder(**self.parameters)
+        for name, value in self.definitions.items():
+            sequence.set_definition(name, value)
+        status("Reading generated Pulseq events…")
+        with tempfile.TemporaryDirectory(prefix="blochsimulator-pulseq-") as directory:
+            path = Path(directory) / "generated.seq"
+            sequence.write(str(path), v141_compat=True)
+            imported = load_pulseq(path)
+        program = SequenceProgram(
+            events=imported.events,
+            duration_s=imported.duration_s,
+            source=self.source,
+            version=imported.version,
+            metadata=imported.metadata,
+        )
+        status("Compiling ADC timing and gradient moments…")
+        compiled = SequenceCompiler().compile_acquisition(
+            program, status_callback=status
+        )
+        status("Inferring acquisition layout…")
+        payload = _infer_sequence_acquisition(program, compiled)
+        return _GeneratedSequenceResult(sequence, payload)
+
+
+class SequenceGenerationThread(QThread):
+    """Run the pure part of sequence generation off the Qt event loop."""
+
+    stage = pyqtSignal(object, str)
+    result_ready = pyqtSignal(object, object)
+    failed = pyqtSignal(object, object)
+
+    def __init__(self, job, token):
+        super().__init__()
+        self.job = job
+        self.token = token
+
+    def run(self):
+        try:
+            result = self.job.run(
+                status_callback=lambda message: self.stage.emit(self.token, message)
+            )
+        except Exception as exc:
+            self.failed.emit(self.token, exc)
+        else:
+            self.result_ready.emit(self.token, result)
+
+
+@dataclass(eq=False)
+class _SequenceGeneration:
+    """One reload of the selected generated sequence, inline or in a worker.
+
+    ``revision`` is the form revision the job was built from; a result for an
+    older revision is discarded. Continuations receive True after success,
+    False after a failure and None when the generation was abandoned.
+    """
+
+    source_index: int
+    loader: object
+    previous_state: dict
+    preserve_plot_range: bool
+    routine: object = None
+    revision: Optional[int] = None
+    stale: bool = False
+    thread: object = None
+    continuations: list = dataclasses.field(default_factory=list)
+
+
 class ParameterLoopSaveThread(QThread):
     """Save exactly one run before allowing the parameter loop to continue."""
 
@@ -1566,6 +1659,10 @@ class SequenceSimulationWidget(QWidget):
     # which causes an unnecessary horizontal scrollbar on headless Qt.
     MINIMUM_FOCUSED_CONTROL_WIDTH = 576
     MINIMUM_FOCUSED_VIEWER_WIDTH = 540
+    # Generate, live preview and Run build sequences in a worker thread, so a
+    # long build does not freeze the window. Other callers that need the
+    # sequence at once build it inline.
+    background_sequence_generation = True
     INTERNAL_SOURCE = 0
     EPI_SOURCE = 1
     CSI_SOURCE = 2
@@ -1658,6 +1755,11 @@ class SequenceSimulationWidget(QWidget):
         self.worker = None
         self.probe_worker = None
         self.pulseq_load_worker = None
+        self._sequence_generation = None
+        self._sequence_generation_restart = False
+        # Generation threads stay referenced until Qt reports them finished.
+        self._sequence_generation_threads = []
+        self._run_waiting_for_generation = False
         self._pulseq_spoiler_warning_dialog = None
         self.script_process = None
         self.script_output_dialog = None
@@ -1703,6 +1805,9 @@ class SequenceSimulationWidget(QWidget):
         self._parameter_loop_phantom = None
         self._parameter_loop_save_worker = None
         QApplication.instance().aboutToQuit.connect(self._wait_for_parameter_loop_save)
+        QApplication.instance().aboutToQuit.connect(
+            self._wait_for_sequence_generation_threads
+        )
         self.probe_playback_timer = QTimer(self)
         self.probe_playback_timer.setInterval(16)
         self.probe_playback_timer.timeout.connect(self._advance_probe_playback)
@@ -8507,7 +8612,12 @@ class SequenceSimulationWidget(QWidget):
         probe_running = self.probe_worker is not None and self.probe_worker.isRunning()
         sequence_running = self.worker is not None and self.worker.isRunning()
         loop_running = self._parameter_loop_state is not None
-        idle = not probe_running and not sequence_running and not loop_running
+        idle = (
+            not probe_running
+            and not sequence_running
+            and not loop_running
+            and not self._run_waiting_for_generation
+        )
         self.run_probe_button.setEnabled(
             probe_selected and self.program is not None and idle
         )
@@ -8693,7 +8803,12 @@ class SequenceSimulationWidget(QWidget):
         self._sequence_revision += 1
         self._update_probe_stale_warning()
         self._schedule_geometry_refresh(sequence_only=True)
-        self.generate_sequence_button.setEnabled(True)
+        self._update_generation_controls()
+        generation = self._sequence_generation
+        if generation is not None and self._sequence_generation_restarts(generation):
+            self._show_generation_restart_message()
+            self._emit_physical_b1_changed()
+            return
         if self.program is None:
             preview_text = "No generated sequence is loaded yet."
         else:
@@ -8719,31 +8834,41 @@ class SequenceSimulationWidget(QWidget):
             return False
         self._mark_sequence_generation_pending()
         if self.sequence_live_preview.isChecked():
-            return self._reload_selected_generated_sequence()
+            return self._generate_selected_sequence()
         return False
 
     def _sequence_live_preview_changed(self, enabled):
         if enabled and self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
-            self._reload_selected_generated_sequence()
+            self._generate_selected_sequence()
 
     def _generate_sequence_clicked(self):
-        if not self._reload_selected_generated_sequence():
+        self._generate_selected_sequence(self._generation_clicked_finished)
+
+    def _generation_clicked_finished(self, success):
+        if success is False:
             self._show_generation_error_dialog()
 
-    def _ensure_current_generated_sequence(self):
+    def _generated_sequence_needs_reload(self):
         source_index = self.sequence_source.currentIndex()
-        if source_index not in self.CONFIGURABLE_SOURCES:
-            return self.program is not None
-        if (
+        return source_index in self.CONFIGURABLE_SOURCES and (
             self.program is None
             or self._sequence_generation_pending
             or self._generated_sequence_source_index != source_index
+        )
+
+    def _ensure_current_generated_sequence(self):
+        if self.sequence_source.currentIndex() not in self.CONFIGURABLE_SOURCES:
+            return self.program is not None
+        # A background generation may still replace the program, so callers
+        # that need the sequence now generate it inline.
+        if (
+            self._sequence_generation is not None
+            or self._generated_sequence_needs_reload()
         ):
             return self._reload_selected_generated_sequence()
         return True
 
-    def _reload_selected_generated_sequence(self):
-        source_index = self.sequence_source.currentIndex()
+    def _generated_sequence_loader(self, source_index):
         loaders = {
             self.INTERNAL_SOURCE: self._load_internal_sequence,
             self.SLICE_SELECTION_SOURCE: self._load_slice_selection,
@@ -8759,9 +8884,33 @@ class SequenceSimulationWidget(QWidget):
             self.FLASH_SOURCE: self._load_flash,
             self.EPSI_MGE_SOURCE: self._load_epsi_mge,
         }
-        loader = loaders.get(source_index)
-        if loader is None:
+        return loaders.get(source_index)
+
+    def _reload_selected_generated_sequence(self):
+        """Generate the selected sequence inline and return whether it worked."""
+        generation = self._begin_sequence_generation()
+        if generation is None:
             return False
+        job, success = self._advance_sequence_generation(generation)
+        while job is not None:
+            try:
+                result = job.run()
+            except Exception as exc:
+                job, success = self._advance_sequence_generation(generation, error=exc)
+            else:
+                job, success = self._advance_sequence_generation(
+                    generation, result=result
+                )
+        return self._finish_sequence_generation(generation, success)
+
+    def _begin_sequence_generation(self):
+        """Start a reload of the selected source, or return None without loader."""
+        # A new reload supersedes one that is still running in the background.
+        self._abandon_sequence_generation()
+        source_index = self.sequence_source.currentIndex()
+        loader = self._generated_sequence_loader(source_index)
+        if loader is None:
+            return None
         state_names = (
             "program",
             "_generated_pulseq_sequence",
@@ -8773,17 +8922,44 @@ class SequenceSimulationWidget(QWidget):
             "spectroscopic_acquisition",
             "acquisition_note",
         )
-        previous_state = {name: getattr(self, name) for name in state_names}
         self._generation_error = ""
         self._generation_recovery_note = ""
-        self._preserve_sequence_plot_range_on_next_show = bool(
-            self.program is not None
-            and self._generated_sequence_source_index == source_index
+        return _SequenceGeneration(
+            source_index=source_index,
+            loader=loader,
+            previous_state={name: getattr(self, name) for name in state_names},
+            preserve_plot_range=bool(
+                self.program is not None
+                and self._generated_sequence_source_index == source_index
+            ),
         )
+
+    def _advance_sequence_generation(self, generation, result=None, error=None):
+        """Run the loader up to its next job.
+
+        Returns ``(job, None)`` while a job remains, otherwise
+        ``(None, success)``.
+        """
+        self._preserve_sequence_plot_range_on_next_show = generation.preserve_plot_range
         try:
-            success = bool(loader())
+            if generation.routine is None:
+                outcome = generation.loader()
+                if not inspect.isgenerator(outcome):
+                    return None, bool(outcome)
+                generation.routine = outcome
+                job = next(outcome)
+            elif error is not None:
+                job = generation.routine.throw(error)
+            else:
+                job = generation.routine.send(result)
+        except StopIteration as stop:
+            return None, bool(stop.value)
         finally:
             self._preserve_sequence_plot_range_on_next_show = False
+        return job, None
+
+    def _finish_sequence_generation(self, generation, success):
+        source_index = generation.source_index
         if success:
             self._sequence_generation_pending = False
             self._generated_sequence_source_index = source_index
@@ -8794,7 +8970,7 @@ class SequenceSimulationWidget(QWidget):
             self._update_geometry_stale_notice()
             self._emit_physical_b1_changed()
             return True
-        for name, value in previous_state.items():
+        for name, value in generation.previous_state.items():
             setattr(self, name, value)
         self._sequence_generation_pending = True
         message = self._generation_error or "Sequence generation failed."
@@ -8807,6 +8983,171 @@ class SequenceSimulationWidget(QWidget):
         self._show_sequence_message(message)
         self._emit_physical_b1_changed()
         return False
+
+    def _generate_selected_sequence(self, continuation=None):
+        """Generate the selected sequence, in a worker thread when enabled.
+
+        ``continuation`` is called with True after success, False after a
+        failure and None when the generation was abandoned. Without a worker
+        thread it runs before this method returns. Returns whether the
+        sequence was generated, or True while a background generation runs.
+        """
+        if not self.background_sequence_generation:
+            success = self._reload_selected_generated_sequence()
+            if continuation is not None:
+                continuation(success)
+            return success
+        active = self._sequence_generation
+        if active is not None:
+            if continuation is not None:
+                active.continuations.append(continuation)
+            if not self._sequence_generation_current(active):
+                self._sequence_generation_restart = True
+                self._show_generation_restart_message()
+                self._update_generation_controls()
+            return True
+        self._start_background_generation(
+            [] if continuation is None else [continuation]
+        )
+        return True
+
+    def _start_background_generation(self, continuations):
+        generation = self._begin_sequence_generation()
+        if generation is None:
+            self._call_generation_continuations(continuations, False)
+            return
+        generation.continuations = list(continuations)
+        self._sequence_generation = generation
+        self._sequence_generation_restart = False
+        self._update_generation_controls()
+        job, success = self._advance_sequence_generation(generation)
+        # The loader resolves timing before it reads the form, which can bump
+        # the revision; the job reflects the form as it is now.
+        generation.revision = self._sequence_revision
+        if job is None:
+            self._complete_background_generation(generation, success)
+        else:
+            self._start_generation_job(generation, job)
+
+    def _show_generation_restart_message(self):
+        self._show_sequence_message(
+            "Generating sequence…\nSettings changed; the sequence is generated "
+            "again with the new values."
+        )
+
+    def _sequence_generation_current(self, generation):
+        return (
+            not generation.stale
+            and generation.revision in (None, self._sequence_revision)
+            and generation.source_index == self.sequence_source.currentIndex()
+        )
+
+    def _start_generation_job(self, generation, job):
+        thread = SequenceGenerationThread(job, generation)
+        generation.thread = thread
+        thread.stage.connect(self._sequence_generation_stage)
+        thread.result_ready.connect(self._sequence_generation_job_finished)
+        thread.failed.connect(self._sequence_generation_job_failed)
+        thread.finished.connect(self._sequence_generation_thread_finished)
+        self._sequence_generation_threads.append(thread)
+        self._show_sequence_message("Generating sequence…")
+        thread.start()
+
+    def _sequence_generation_stage(self, generation, message):
+        if generation is not self._sequence_generation:
+            return
+        if not self._sequence_generation_current(generation):
+            return
+        self._show_sequence_message(f"Generating sequence…\n{message}")
+        if self._run_waiting_for_generation:
+            self._status_update(f"Generating sequence: {message}")
+
+    def _sequence_generation_job_finished(self, generation, result):
+        self._resume_background_generation(generation, result=result)
+
+    def _sequence_generation_job_failed(self, generation, error):
+        self._resume_background_generation(generation, error=error)
+
+    def _resume_background_generation(self, generation, result=None, error=None):
+        if generation is not self._sequence_generation:
+            return
+        generation.thread = None
+        if not self._sequence_generation_current(generation):
+            continuations = generation.continuations
+            restart = self._sequence_generation_restarts(generation)
+            generation.continuations = []
+            self._abandon_sequence_generation()
+            if restart:
+                self._start_background_generation(continuations)
+            return
+        job, success = self._advance_sequence_generation(
+            generation, result=result, error=error
+        )
+        if job is None:
+            self._complete_background_generation(generation, success)
+        else:
+            self._start_generation_job(generation, job)
+
+    def _complete_background_generation(self, generation, success):
+        self._sequence_generation = None
+        success = self._finish_sequence_generation(generation, success)
+        self._update_generation_controls()
+        self._call_generation_continuations(generation.continuations, success)
+
+    def _abandon_sequence_generation(self):
+        """Discard the background generation and restore the previous state."""
+        generation = self._sequence_generation
+        if generation is None:
+            return
+        self._sequence_generation = None
+        self._sequence_generation_restart = False
+        if generation.routine is not None:
+            generation.routine.close()
+        for name, value in generation.previous_state.items():
+            setattr(self, name, value)
+        self._update_generation_controls()
+        self._call_generation_continuations(generation.continuations, None)
+
+    def _call_generation_continuations(self, continuations, success):
+        for continuation in continuations:
+            continuation(success)
+
+    def _sequence_generation_restarts(self, generation):
+        """Whether an outdated generation is started again with new settings."""
+        return (
+            bool(generation.continuations)
+            or self._sequence_generation_restart
+            or self.sequence_live_preview.isChecked()
+        )
+
+    def _sequence_generation_inputs_changed(self):
+        """Discard a running job built from settings that have since changed."""
+        if self._sequence_generation is not None:
+            self._sequence_generation.stale = True
+            self._update_generation_controls()
+
+    def _update_generation_controls(self):
+        generation = self._sequence_generation
+        # An outdated generation that will not restart leaves Generate free.
+        generating = generation is not None and (
+            self._sequence_generation_current(generation)
+            or self._sequence_generation_restarts(generation)
+        )
+        configurable = self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES
+        self.generate_sequence_button.setEnabled(configurable and not generating)
+        self.generate_sequence_button.setText(
+            "Generating sequence…" if generating else "Generate sequence"
+        )
+
+    def _sequence_generation_thread_finished(self):
+        for thread in list(self._sequence_generation_threads):
+            if thread.isFinished():
+                self._sequence_generation_threads.remove(thread)
+                thread.deleteLater()
+
+    def _wait_for_sequence_generation_threads(self, timeout_ms=60000):
+        for thread in list(self._sequence_generation_threads):
+            thread.wait(timeout_ms)
 
     def _update_frequency_reference_info(self):
         source_index = self.object_source.currentIndex()
@@ -9120,7 +9461,7 @@ class SequenceSimulationWidget(QWidget):
         generated_selected = source_index in self.GENERATED_SOURCES
         configurable_selected = source_index in self.CONFIGURABLE_SOURCES
         self.sequence_live_preview.setEnabled(configurable_selected)
-        self.generate_sequence_button.setEnabled(configurable_selected)
+        self._update_generation_controls()
         self.export_pulseq_button.setEnabled(generated_selected)
         self.acquisition_hint.setText(
             "Read/phase matrix and sampling bandwidth define each 2D frame. "
@@ -9140,7 +9481,7 @@ class SequenceSimulationWidget(QWidget):
             if source_changed or self._generated_sequence_source_index != source_index:
                 self._mark_sequence_generation_pending()
             if self.sequence_live_preview.isChecked():
-                self._reload_selected_generated_sequence()
+                self._generate_selected_sequence()
         self._update_spoiling_quality()
         self._refresh_parameter_loop_parameters()
 
@@ -11263,6 +11604,8 @@ class SequenceSimulationWidget(QWidget):
             viewer = getattr(phantom_widget, "viewer", None)
             if viewer is not None and viewer.volume_inspector.phantom is phantom:
                 viewer.refresh_spectrum()
+        # A job in flight still carries the previous frequency definitions.
+        self._sequence_generation_inputs_changed()
         generated_sequence = self._generated_pulseq_sequence
         if generated_sequence is not None:
             self._apply_workspace_frequency_reference(generated_sequence)
@@ -12565,10 +12908,11 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_slice_selection(self):
         try:
-            sequence = make_pulseq_slice_selection(
-                **self._slice_selection_pulseq_parameters()
+            yield from self._build_generated_pulseq(
+                make_pulseq_slice_selection,
+                self._slice_selection_pulseq_parameters(),
+                "internal-rf-slice-selection",
             )
-            self._set_generated_pulseq_sequence(sequence, "internal-rf-slice-selection")
             return True
         except Exception as exc:
             self._generation_error = f"Invalid RF + Slice Selection: {exc}"
@@ -12629,12 +12973,13 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_cartesian_epi(self):
         if self.epi_readout_trajectory.currentText() == "Spiral":
-            return self._load_spiral()
+            return (yield from self._load_spiral())
         try:
             self._resolve_epi_timing(keep_notes=True)
             self._update_bandwidth_labels()
-            sequence = make_pulseq_epi(**self._epi_pulseq_parameters())
-            self._set_generated_pulseq_sequence(sequence, "internal-cartesian-epi")
+            sequence = yield from self._build_generated_pulseq(
+                make_pulseq_epi, self._epi_pulseq_parameters(), "internal-cartesian-epi"
+            )
             self._sync_sampling_bandwidth_control(self.sampling_bandwidth_khz, sequence)
             self._last_valid_epi_bandwidth_khz = self.sampling_bandwidth_khz.value()
             self._update_bandwidth_labels()
@@ -12653,28 +12998,29 @@ class SequenceSimulationWidget(QWidget):
             return False
 
     def _load_spiral(self):
-        self._generated_pulseq_sequence = None
-        self._acquisition_compiled = None
         self.export_pulseq_button.setEnabled(True)
-        self.acquisition = None
-        self.acquisition_frames = None
-        self.acquisition_volumes = None
-        self.spectroscopic_acquisition = None
         try:
-            sequence = make_pulseq_spiral(**self._spiral_pulseq_parameters())
-            self._set_generated_pulseq_sequence(sequence, "internal-spiral")
+            yield from self._build_generated_pulseq(
+                make_pulseq_spiral, self._spiral_pulseq_parameters(), "internal-spiral"
+            )
             return True
         except Exception as exc:
-            self.spiral_acquisition = None
+            self._generated_pulseq_sequence = None
             self.program = None
             self._acquisition_compiled = None
+            self.acquisition = None
+            self.acquisition_frames = None
+            self.acquisition_volumes = None
+            self.spiral_acquisition = None
+            self.spectroscopic_acquisition = None
             self._generation_error = f"Invalid spiral acquisition: {exc}"
             return False
 
     def _load_csi(self):
         try:
-            sequence = make_pulseq_csi(**self._csi_pulseq_parameters())
-            self._set_generated_pulseq_sequence(sequence, "internal-csi")
+            yield from self._build_generated_pulseq(
+                make_pulseq_csi, self._csi_pulseq_parameters(), "internal-csi"
+            )
             return True
         except Exception as exc:
             self._generated_pulseq_sequence = None
@@ -12688,8 +13034,11 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_slice_fid(self):
         try:
-            sequence = make_pulseq_slice_fid(**self._slice_fid_pulseq_parameters())
-            self._set_generated_pulseq_sequence(sequence, "internal-slice-fid")
+            yield from self._build_generated_pulseq(
+                make_pulseq_slice_fid,
+                self._slice_fid_pulseq_parameters(),
+                "internal-slice-fid",
+            )
             return True
         except Exception as exc:
             self._generated_pulseq_sequence = None
@@ -12703,8 +13052,9 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_press(self):
         try:
-            sequence = make_pulseq_press(**self._press_pulseq_parameters())
-            self._set_generated_pulseq_sequence(sequence, "internal-press")
+            yield from self._build_generated_pulseq(
+                make_pulseq_press, self._press_pulseq_parameters(), "internal-press"
+            )
             return True
         except Exception as exc:
             self._generated_pulseq_sequence = None
@@ -12720,9 +13070,10 @@ class SequenceSimulationWidget(QWidget):
         try:
             self._resolve_ir_timing(keep_notes=True)
             self._update_ir_labels()
-            sequence = make_pulseq_inversion_recovery(**self._ir_pulseq_parameters())
-            self._set_generated_pulseq_sequence(
-                sequence, "internal-inversion-recovery-2d"
+            sequence = yield from self._build_generated_pulseq(
+                make_pulseq_inversion_recovery,
+                self._ir_pulseq_parameters(),
+                "internal-inversion-recovery-2d",
             )
             self._sync_sampling_bandwidth_control(
                 self.ir_sampling_bandwidth_khz, sequence
@@ -12752,8 +13103,11 @@ class SequenceSimulationWidget(QWidget):
         try:
             self._resolve_epsi_mge_timing(keep_notes=True)
             self._update_epsi_mge_labels()
-            sequence = make_pulseq_epsi_mge(**self._epsi_mge_pulseq_parameters())
-            self._set_generated_pulseq_sequence(sequence, "internal-epsi-mge-2d")
+            yield from self._build_generated_pulseq(
+                make_pulseq_epsi_mge,
+                self._epsi_mge_pulseq_parameters(),
+                "internal-epsi-mge-2d",
+            )
             return True
         except Exception as exc:
             self._generated_pulseq_sequence = None
@@ -12771,8 +13125,9 @@ class SequenceSimulationWidget(QWidget):
         try:
             self._resolve_flash_timing(keep_notes=True)
             self._update_flash_labels()
-            sequence = make_pulseq_flash(**self._flash_pulseq_parameters())
-            self._set_generated_pulseq_sequence(sequence, "internal-flash-2d")
+            sequence = yield from self._build_generated_pulseq(
+                make_pulseq_flash, self._flash_pulseq_parameters(), "internal-flash-2d"
+            )
             self._sync_sampling_bandwidth_control(
                 self.flash_sampling_bandwidth_khz, sequence
             )
@@ -12800,8 +13155,9 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_bssfp(self):
         try:
-            sequence = make_pulseq_bssfp(**self._bssfp_pulseq_parameters())
-            self._set_generated_pulseq_sequence(sequence, "internal-bssfp-3d")
+            yield from self._build_generated_pulseq(
+                make_pulseq_bssfp, self._bssfp_pulseq_parameters(), "internal-bssfp-3d"
+            )
             return True
         except Exception as exc:
             self._generated_pulseq_sequence = None
@@ -12816,11 +13172,10 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_ss_bssfp(self):
         try:
-            sequence = make_pulseq_spectral_selective_bssfp(
-                **self._ss_bssfp_pulseq_parameters()
-            )
-            self._set_generated_pulseq_sequence(
-                sequence, "internal-spectral-selective-bssfp-3d"
+            sequence = yield from self._build_generated_pulseq(
+                make_pulseq_spectral_selective_bssfp,
+                self._ss_bssfp_pulseq_parameters(),
+                "internal-spectral-selective-bssfp-3d",
             )
             encoding_duration_ms = (
                 float(sequence.definitions["EncodingLobeDuration"]) * 1000.0
@@ -12842,10 +13197,11 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_radial_me_bssfp(self):
         try:
-            sequence = make_pulseq_radial_me_bssfp(
-                **self._radial_me_bssfp_pulseq_parameters()
+            yield from self._build_generated_pulseq(
+                make_pulseq_radial_me_bssfp,
+                self._radial_me_bssfp_pulseq_parameters(),
+                "internal-radial-me-bssfp-3d",
             )
-            self._set_generated_pulseq_sequence(sequence, "internal-radial-me-bssfp-3d")
             return True
         except Exception as exc:
             self._generated_pulseq_sequence = None
@@ -12860,8 +13216,11 @@ class SequenceSimulationWidget(QWidget):
 
     def _load_me_bssfp(self):
         try:
-            sequence = make_pulseq_me_bssfp(**self._me_bssfp_pulseq_parameters())
-            self._set_generated_pulseq_sequence(sequence, "internal-me-bssfp-3d")
+            yield from self._build_generated_pulseq(
+                make_pulseq_me_bssfp,
+                self._me_bssfp_pulseq_parameters(),
+                "internal-me-bssfp-3d",
+            )
             return True
         except Exception as exc:
             self._generated_pulseq_sequence = None
@@ -12874,25 +13233,24 @@ class SequenceSimulationWidget(QWidget):
             self._generation_error = f"Invalid Cartesian ME-bSSFP sequence: {exc}"
             return False
 
-    def _set_generated_pulseq_sequence(self, sequence, source):
-        self._apply_workspace_frequency_reference(sequence)
-        with tempfile.TemporaryDirectory(prefix="blochsimulator-pulseq-") as directory:
-            path = Path(directory) / "generated.seq"
-            sequence.write(str(path), v141_compat=True)
-            imported = load_pulseq(path)
-        self.program = SequenceProgram(
-            events=imported.events,
-            duration_s=imported.duration_s,
-            source=source,
-            version=imported.version,
-            metadata=imported.metadata,
+    def _build_generated_pulseq(self, builder, parameters, source):
+        """Build a generated sequence and show it; use with ``yield from``.
+
+        The pure build, import and analysis is yielded as a job, so the
+        generation driver can run it inline or in a worker thread. The rest
+        updates the widget when the result is sent back.
+        """
+        job = _GeneratedSequenceJob(
+            builder, parameters, source, self._workspace_frequency_definitions()
         )
-        self._generated_pulseq_sequence = sequence
-        self._infer_current_acquisition()
+        result = yield job
+        self._generated_pulseq_sequence = result.sequence
+        self._apply_acquisition_payload(result.payload)
         self._apply_probe_defaults_from_program()
         self._configure_frame_selector()
         self._configure_spectroscopy_selectors()
         self._show_program()
+        return result.sequence
 
     @staticmethod
     def _sync_sampling_bandwidth_control(control, sequence):
@@ -13395,14 +13753,18 @@ class SequenceSimulationWidget(QWidget):
             "ErnstT1Source": context.source,
         }
 
+    def _workspace_frequency_definitions(self):
+        """Return the active scanner and sequence reference definitions."""
+        return {
+            "FieldStrengthT": self.field_strength_t.value(),
+            "Nucleus": self.nucleus.currentText(),
+            "SequenceReferencePpm": self.sequence_reference_ppm.value(),
+            **self._ernst_pulseq_definitions(),
+        }
+
     def _apply_workspace_frequency_reference(self, sequence):
         """Attach the active scanner and sequence reference definitions."""
-        sequence.set_definition("FieldStrengthT", self.field_strength_t.value())
-        sequence.set_definition("Nucleus", self.nucleus.currentText())
-        sequence.set_definition(
-            "SequenceReferencePpm", self.sequence_reference_ppm.value()
-        )
-        for name, value in self._ernst_pulseq_definitions().items():
+        for name, value in self._workspace_frequency_definitions().items():
             sequence.set_definition(name, value)
         return sequence
 
@@ -15164,6 +15526,17 @@ class SequenceSimulationWidget(QWidget):
                     "Finishing the current file before stopping the loop…"
                 )
                 return
+        if self._run_waiting_for_generation:
+            # The generation goes on for the sequence preview; only the run
+            # that waited for it is dropped.
+            generation = self._sequence_generation
+            if (
+                generation is not None
+                and self._run_after_generation in generation.continuations
+            ):
+                generation.continuations.remove(self._run_after_generation)
+            self._run_after_generation(None)
+            return
         probe_running = self.probe_worker is not None and self.probe_worker.isRunning()
         sequence_running = self.worker is not None and self.worker.isRunning()
         if probe_running:
@@ -16132,6 +16505,66 @@ class SequenceSimulationWidget(QWidget):
         return answer == QMessageBox.Yes
 
     def _run(self):
+        if not self._sequence_run_allowed():
+            return False
+        # Apply a pending auto-adjusted grid before the sequence is checked.
+        if self._auto_spin_grid_pending:
+            self._auto_adjust_spin_grid()
+        if self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
+            if self.background_sequence_generation and (
+                self._sequence_generation is not None
+                or self._generated_sequence_needs_reload()
+            ):
+                return self._run_when_sequence_generated()
+            if not self._ensure_current_generated_sequence():
+                self._show_generation_error_dialog()
+                return False
+        return self._start_sequence_run()
+
+    def _run_when_sequence_generated(self):
+        """Generate the sequence in the background, then start the run.
+
+        Returns True: the run area reports a failure or cancellation once
+        the generation has ended.
+        """
+        self._run_waiting_for_generation = True
+        self.cancel_button.setEnabled(True)
+        self._update_run_action_availability()
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Generating sequence…")
+        self._status_update("Generating sequence…")
+        self._generate_selected_sequence(self._run_after_generation)
+        return True
+
+    def _run_after_generation(self, success):
+        """Start the waiting run, or report why it does not start."""
+        if not self._run_waiting_for_generation:
+            return
+        self._run_waiting_for_generation = False
+        if success and self._sequence_run_allowed() and self._start_sequence_run():
+            return
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("Stopped" if success is None else "Not started")
+        loop_running = self._parameter_loop_state is not None
+        if not loop_running:
+            self.cancel_button.setEnabled(False)
+        self._update_run_action_availability()
+        if success is None:
+            if loop_running:
+                self._finish_parameter_loop(cancelled=True)
+            else:
+                self.status.setText("Run cancelled before the sequence was ready")
+            return
+        if success is False:
+            self.status.setText("Sequence generation failed")
+            self._show_generation_error_dialog()
+        if loop_running:
+            self._finish_parameter_loop(
+                error="The next loop simulation could not start."
+            )
+
+    def _sequence_run_allowed(self):
         if self.probe_worker is not None and self.probe_worker.isRunning():
             QMessageBox.warning(
                 self,
@@ -16147,13 +16580,10 @@ class SequenceSimulationWidget(QWidget):
                 "configuration panel.",
             )
             return False
-        # Apply a pending auto-adjusted grid before the sequence is checked.
-        if self._auto_spin_grid_pending:
-            self._auto_adjust_spin_grid()
-        if self.sequence_source.currentIndex() in self.CONFIGURABLE_SOURCES:
-            if not self._ensure_current_generated_sequence():
-                self._show_generation_error_dialog()
-                return False
+        return True
+
+    def _start_sequence_run(self):
+        """Start the simulation worker for the loaded sequence."""
         loop_state = self._parameter_loop_state
         if loop_state is not None:
             loop_parameter = loop_state["parameter"]
@@ -16626,6 +17056,9 @@ class SequenceSimulationWidget(QWidget):
             self.status.setText("Cancelling after current chunk…")
 
     def closeEvent(self, event):
+        # Ignore the result of a generation that is still running.
+        self._sequence_generation = None
+        self._wait_for_sequence_generation_threads()
         process = self.script_process
         if process is not None and process.state() != QProcess.NotRunning:
             process.kill()

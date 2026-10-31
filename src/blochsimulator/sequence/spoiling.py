@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import product
+from math import prod
 
 import numpy as np
 
@@ -234,14 +235,15 @@ def recommend_spin_grid(
     candidates = [
         tuple(int(value) for value in counts)
         for counts in product(*axis_ranges)
-        if int(np.prod(counts)) <= maximum_spins
+        if prod(counts) <= maximum_spins
     ]
-    candidates.sort(key=lambda counts: (int(np.prod(counts)), max(counts), counts))
+    candidates.sort(key=lambda counts: (prod(counts), max(counts), counts))
 
+    sampling_error = _repeated_train_error_function(cycles, method, excitation_count)
     best_counts = candidates[0]
     best_error = float("inf")
     for counts in candidates:
-        error = _repeated_train_sampling_error(cycles, counts, method, excitation_count)
+        error = sampling_error(counts)
         if error < best_error:
             best_counts, best_error = counts, error
         if error <= target_error:
@@ -298,13 +300,14 @@ def recommend_spin_grid_for_phase_train(
     candidates = [
         tuple(int(value) for value in counts)
         for counts in product(*axis_ranges)
-        if int(np.prod(counts)) <= maximum_spins
+        if prod(counts) <= maximum_spins
     ]
-    candidates.sort(key=lambda counts: (int(np.prod(counts)), max(counts), counts))
+    candidates.sort(key=lambda counts: (prod(counts), max(counts), counts))
+    sampling_error = _phase_train_error_function(phases, method)
     best_counts = candidates[0]
     best_error = float("inf")
     for counts in candidates:
-        error = _phase_train_sampling_error(phases, counts, method)
+        error = sampling_error(counts)
         if error < best_error:
             best_counts, best_error = counts, error
         if error <= target_error:
@@ -333,56 +336,67 @@ def _finite_xyz(values, name: str) -> np.ndarray:
     return array
 
 
-def _repeated_train_sampling_error(
+def _repeated_train_error_function(
     cycles: np.ndarray,
-    counts: tuple[int, int, int],
     method: str,
     excitation_count: int,
-) -> float:
-    """Evaluate a candidate cheaply, retaining the public calculation exactly."""
+):
+    """Return the train error of a candidate grid, retaining the public result."""
     if method != "midpoint":
-        sampling = SpinSampling(counts, method=method)
-        return analyze_repeated_spoiler_train(
-            cycles, sampling, excitation_count
+        return lambda counts: analyze_repeated_spoiler_train(
+            cycles, SpinSampling(counts, method=method), excitation_count
         ).maximum_sampling_error
-
     orders = np.arange(1, max(2, excitation_count), dtype=np.float64)
     phases = orders[:, None] * cycles[None, :]
-    continuous = np.prod(np.abs(np.sinc(phases)), axis=1)
-    sampled = np.ones(orders.size, dtype=np.float64)
-    for axis_cycles, count in zip(cycles, counts):
-        offsets = (np.arange(count, dtype=np.float64) + 0.5) / count - 0.5
-        sampled *= np.abs(
-            np.mean(
-                np.exp(2j * np.pi * np.outer(orders * axis_cycles, offsets)),
-                axis=1,
-            )
-        )
-    return float(np.max(np.abs(sampled - continuous), initial=0.0))
+    return _MidpointTrainErrors(
+        [orders * axis_cycles for axis_cycles in cycles],
+        np.prod(np.abs(np.sinc(phases)), axis=1),
+    ).error
 
 
-def _phase_train_sampling_error(
-    phases: np.ndarray,
-    counts: tuple[int, int, int],
-    method: str,
-) -> float:
+def _phase_train_error_function(phases: np.ndarray, method: str):
     if phases.shape[0] == 0:
-        return 0.0
+        return lambda counts: 0.0
     if method != "midpoint":
-        return analyze_phase_cycle_train(
+        return lambda counts: analyze_phase_cycle_train(
             phases, SpinSampling(counts, method=method)
         ).maximum_sampling_error
-    continuous = np.prod(np.abs(np.sinc(phases)), axis=1)
-    sampled = np.ones(phases.shape[0], dtype=np.float64)
-    for axis_index, count in enumerate(counts):
-        offsets = (np.arange(count, dtype=np.float64) + 0.5) / count - 0.5
-        sampled *= np.abs(
-            np.mean(
-                np.exp(2j * np.pi * np.outer(phases[:, axis_index], offsets)),
-                axis=1,
+    return _MidpointTrainErrors(
+        [phases[:, axis_index] for axis_index in range(3)],
+        np.prod(np.abs(np.sinc(phases)), axis=1),
+    ).error
+
+
+class _MidpointTrainErrors:
+    """Midpoint-grid errors of one train with cached per-axis factors.
+
+    A recommendation tests up to a few thousand grids, but they share at most
+    one factor per axis and count. The arithmetic matches evaluating each grid
+    from scratch, so cached and direct errors are identical.
+    """
+
+    def __init__(self, axis_phases, continuous: np.ndarray) -> None:
+        self._axis_phases = axis_phases
+        self._continuous = continuous
+        self._factors: dict[tuple[int, int], np.ndarray] = {}
+
+    def _factor(self, axis: int, count: int) -> np.ndarray:
+        key = (axis, count)
+        if key not in self._factors:
+            offsets = (np.arange(count, dtype=np.float64) + 0.5) / count - 0.5
+            self._factors[key] = np.abs(
+                np.mean(
+                    np.exp(2j * np.pi * np.outer(self._axis_phases[axis], offsets)),
+                    axis=1,
+                )
             )
-        )
-    return float(np.max(np.abs(sampled - continuous), initial=0.0))
+        return self._factors[key]
+
+    def error(self, counts) -> float:
+        sampled = np.ones(self._continuous.size, dtype=np.float64)
+        for axis, count in enumerate(counts):
+            sampled *= self._factor(axis, count)
+        return float(np.max(np.abs(sampled - self._continuous), initial=0.0))
 
 
 def weighted_pathway_sampling_error(
@@ -484,9 +498,9 @@ def recommend_spin_grid_for_pathways(
     candidates = [
         tuple(int(value) for value in counts)
         for counts in product(*axis_ranges)
-        if int(np.prod(counts)) <= maximum_spins
+        if prod(counts) <= maximum_spins
     ]
-    candidates.sort(key=lambda counts: (int(np.prod(counts)), max(counts), counts))
+    candidates.sort(key=lambda counts: (prod(counts), max(counts), counts))
     # Strong pathways first: most candidates fail on the first few rows, so
     # testing them in growing blocks skips the long tail of weak pathways.
     order = np.argsort(-weights, kind="stable")

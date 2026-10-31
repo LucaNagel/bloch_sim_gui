@@ -395,7 +395,7 @@ def test_live_sequence_preview_moves_cursor_and_updates_cartesian_views():
     widget.sequence_source.setCurrentIndex(1)
     widget.read_matrix.setValue(4)
     widget.phase_matrix.setValue(4)
-    widget._load_cartesian_epi()
+    assert widget._reload_selected_generated_sequence()
     widget._configure_frame_selector()
 
     signal = np.ones(widget.acquisition.num_samples, dtype=np.complex128)

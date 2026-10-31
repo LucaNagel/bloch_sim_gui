@@ -74,6 +74,19 @@ def _forget_deleted_viewboxes():
 
 
 @pytest.fixture(autouse=True)
+def inline_sequence_generation(monkeypatch):
+    """Generate sequences inline so tests can check the result right away.
+
+    Tests of the background generation switch it back on themselves.
+    """
+    from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
+
+    monkeypatch.setattr(
+        SequenceSimulationWidget, "background_sequence_generation", False
+    )
+
+
+@pytest.fixture(autouse=True)
 def cleanup_qt_widgets(qt_application):
     """Close and destroy top-level widgets between tests.
 

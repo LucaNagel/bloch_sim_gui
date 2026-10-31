@@ -42,6 +42,15 @@ The project follows [Semantic Versioning](https://semver.org/).
   the screen.
 - Sequence runs report progress every few seconds. The remaining time follows
   the recent rate and grows when a report is overdue.
+- Generate sequence, live preview and Run build the sequence in a background
+  thread, so the window stays responsive while a long sequence is built and
+  analysed. Run waits for the sequence and can be cancelled meanwhile; settings
+  changed during a build start it again with the new values. The compiler
+  looks up the intervals of all events in one search, so a compiling worker no
+  longer starves the window.
+- The spin-grid recommendation for gradient spoilers reuses per-axis factors
+  across candidate grids, which makes it about 30 times faster with identical
+  results.
 
 ### Fixed
 
