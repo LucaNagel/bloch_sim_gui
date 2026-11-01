@@ -438,7 +438,11 @@ class SequenceDiagramWidget(pg.GraphicsLayoutWidget):
             xMax=self.total_ms + pad,
             minXRange=min(min_range, self.total_ms),
         )
-        self.show_full_sequence()
+        # The first TR is the default view; sequences without a TR show it all.
+        if self.first_tr_window_ms is not None:
+            self.show_first_tr()
+        else:
+            self.show_full_sequence()
         self._update_pulse_labels()
         self.playhead.setValue(0.0)
         self.playhead.show()

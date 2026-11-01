@@ -27,6 +27,7 @@ from ..sequence.rf_pulses import (
 )
 from ..units import rf_gauss_to_hz
 from .dialogs import PulseImportDialog
+from .plot_interaction import StaticPlotWidget
 from .theme import set_tone
 
 
@@ -326,7 +327,8 @@ class RFPulseDesigner(QGroupBox):
         control_layout.addStretch()
 
         # Plot Widget
-        self.plot_widget = pg.PlotWidget()
+        # The pulse is always shown over its full duration: no zoom or pan.
+        self.plot_widget = StaticPlotWidget()
         self.plot_widget.setLabel("left", "B1 Amplitude", "G")
         self.plot_widget.setLabel("bottom", "Time", "ms")
 

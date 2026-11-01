@@ -794,12 +794,36 @@ def test_sequence_diagram_annotates_pulses_and_scales_gradients_together():
     assert diagram.visible_pulse_labels() == ["90°x", "180°y"]
     assert diagram.gradient_zoomed["gx"] and not diagram.gradient_zoomed["gz"]
     assert diagram.collapsed["gy"] and not diagram.collapsed["gx"]
+    # The first TR is the default view; the whole sequence is one click away.
+    lo, hi = diagram.visible_time_range_ms()
+    assert lo < 0 and 5 < hi < 5.5
+    diagram.show_full_sequence()
     lo, hi = diagram.visible_time_range_ms()
     assert lo < 0 and hi > 9.99
     diagram.show_first_tr()
     lo, hi = diagram.visible_time_range_ms()
     assert lo < 0 and 5 < hi < 5.5
     diagram.close()
+
+
+def test_slice_select_rephase_defaults_to_5_ms_tr_and_first_tr_view():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    designer = window.sequence_designer
+    designer.sequence_type.setCurrentText("Slice Select + Rephase")
+    assert designer.tr_spin.value() == pytest.approx(5.0)
+    designer.repetitions_spin.setValue(4)
+    app.processEvents()
+    assert designer.diagram_first_tr_button.isEnabled()
+    lo, hi = designer.diagram_widget.visible_time_range_ms()
+    assert hi < 6.0
+
+
+def test_rf_pulse_designer_plot_cannot_be_zoomed():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = BlochSimulatorGUI()
+    plot = window.rf_designer.plot_widget
+    assert plot.getViewBox().state["mouseEnabled"] == [False, False]
 
 
 def test_sequence_diagram_click_moves_playback_to_that_time():
