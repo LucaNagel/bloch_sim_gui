@@ -94,6 +94,15 @@ def test_physical_3d_presets_have_expected_spatial_and_channel_profiles():
     center = tuple(count // 2 for count in shape)
     assert np.abs(birdcage.values).max() == pytest.approx(1.0)
     assert np.angle(birdcage.values[center], deg=True) == pytest.approx(35.0)
+    # Rungs stand outside the field of view, so no corner is a hot spot.
+    for rungs in (6, 8):
+        cage = create_b1_preset(
+            "birdcage_cp", shape, fov, kind="transmit", birdcage_rungs=rungs
+        )
+        assert cage.name == f"Birdcage CP ({rungs} rungs)"
+        assert np.abs(cage.values).max() / abs(cage.values[center]) < 2.0
+    with pytest.raises(ValueError, match="four rungs"):
+        create_b1_preset("birdcage_cp", shape, fov, birdcage_rungs=3)
 
     receive = create_b1_preset("circular_array", shape, fov, kind="receive")
     receive_rss = np.sqrt(np.sum(np.abs(receive.data) ** 2, axis=0))
@@ -315,8 +324,10 @@ def test_b1_editors_offer_and_create_kind_specific_3d_presets():
     tx_index = workspace.tx_editor.preset_combo.findData("birdcage_cp")
     workspace.tx_editor.preset_combo.setCurrentIndex(tx_index)
     workspace.tx_editor.dimension_combo.setCurrentText("3D")
+    assert workspace.tx_editor.birdcage_rungs_combo.isEnabled()
+    workspace.tx_editor.birdcage_rungs_combo.setCurrentText("8")
     workspace.tx_editor._create_preset()
-    assert workspace.tx_field.name == "Birdcage CP"
+    assert workspace.tx_field.name == "Birdcage CP (8 rungs)"
     assert workspace.tx_field.spatial_ndim == 3
     assert workspace.tx_field.spatial_shape == (64, 64, 64)
 

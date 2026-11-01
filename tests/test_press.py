@@ -75,11 +75,13 @@ def _assert_localised(program, centre):
     for axis in range(3):
         for side in (-1.0, 1.0):
             # A 4 mm wide column several crusher cycles long stands in for a
-            # voxel of isochromats; it lies fully outside one slab.
+            # voxel of isochromats; it lies fully outside one slab. Its mean
+            # keeps about 5 % from the incomplete average of the crusher
+            # phase over 4 mm, independent of the distance to the slab.
             positions = np.tile(centre, (161, 1))
             positions[:, axis] += side * (11e-3 + np.linspace(-2e-3, 2e-3, 161))
             outside = _echo_mxy(program, positions)
-            assert abs(outside.mean()) < 0.05, (axis, side)
+            assert abs(outside.mean()) < 0.06, (axis, side)
 
         positions = np.tile(centre, (41, 1))
         positions[:, axis] += np.linspace(-0.5e-3, 0.5e-3, 41)

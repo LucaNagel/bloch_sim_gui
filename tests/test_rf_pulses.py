@@ -6,7 +6,9 @@ from blochsimulator.simulator import design_rf_pulse
 from blochsimulator.sequence.rf_pulses import (
     design_rf_envelope,
     make_pulseq_rf_events,
-    rf_time_bandwidth_product_from_envelope,
+    rf_envelope_time_bandwidth_product,
+    rf_profile_fwhm_hz,
+    simulate_rf_frequency_profile,
     scale_rf_envelope_to_flip,
     slr_time_bandwidth_product,
 )
@@ -230,7 +232,8 @@ def test_sequence_gaussian_envelope_is_symmetric_and_reports_shape_tbw():
 
     assert pulse_type == "gaussian"
     assert duration_s == pytest.approx(3e-3)
-    assert tbw == pytest.approx(rf_time_bandwidth_product_from_envelope(envelope))
+    # The shape parameter is the designed small-tip spectral FWHM.
+    assert tbw == pytest.approx(4.0, abs=0.01)
     assert envelope.size == 300
     assert np.all(envelope.real > 0)
     assert np.allclose(envelope.imag, 0.0)
@@ -474,3 +477,87 @@ def test_pulseq_slr_events_use_flip_specific_shapes():
         _sample_slr(2000, 2e-3, 3, 90.0).real
         / np.max(_sample_slr(2000, 2e-3, 3, 90.0).real),
     )
+
+
+def test_simulated_profile_bandwidth_matches_the_small_tip_fourier_transform():
+    duration_s = 2e-3
+    raster_s = 4e-6
+    block = np.ones(500, dtype=complex)
+
+    # |sinc(f T)| falls to one half at f T = 0.6034.
+    assert rf_envelope_time_bandwidth_product(block, raster_s) == pytest.approx(
+        1.2067, abs=0.005
+    )
+    assert rf_profile_fwhm_hz(
+        scale_rf_envelope_to_flip(block, flip_angle_deg=5.0, raster_s=raster_s),
+        raster_s,
+    ) == pytest.approx(1.2067 / duration_s, rel=5e-3)
+
+
+def test_simulated_profile_bandwidth_follows_the_flip_angle():
+    raster_s = 4e-6
+    envelope, _, small_tip_tbw, _ = design_rf_envelope(
+        pulse_type="sinc", duration_s=2e-3, raster_s=raster_s
+    )
+    _, _, excitation_tbw, _ = design_rf_envelope(
+        pulse_type="sinc", duration_s=2e-3, raster_s=raster_s, flip_angle_deg=90.0
+    )
+    _, _, inversion_tbw, _ = design_rf_envelope(
+        pulse_type="sinc", duration_s=2e-3, raster_s=raster_s, flip_angle_deg=180.0
+    )
+
+    # The Hann sinc of TBW 4 keeps its band at small tip. Saturation widens
+    # the 90 degree |Mxy| band; the 180 degree inversion band is narrower.
+    assert small_tip_tbw == pytest.approx(4.0, abs=0.05)
+    assert excitation_tbw == pytest.approx(4.40, abs=0.05)
+    assert inversion_tbw == pytest.approx(2.66, abs=0.05)
+    assert rf_envelope_time_bandwidth_product(
+        envelope, raster_s, 180.0
+    ) == pytest.approx(inversion_tbw)
+
+
+def test_simulated_inversion_profile_matches_rotation_of_a_vector():
+    raster_s = 4e-6
+    envelope, _, _, _ = design_rf_envelope(
+        pulse_type="sinc", duration_s=2e-3, raster_s=raster_s
+    )
+    samples = scale_rf_envelope_to_flip(
+        envelope, flip_angle_deg=180.0, raster_s=raster_s
+    )
+    frequencies = np.array([0.0, 500.0, 800.0])
+    transverse, longitudinal = simulate_rf_frequency_profile(
+        samples, raster_s, frequencies
+    )
+    for frequency, mxy, mz in zip(frequencies, transverse, longitudinal):
+        magnetization = np.array([0.0, 0.0, 1.0])
+        for sample in samples:
+            axis = (
+                2.0 * np.pi * raster_s * np.array([sample.real, sample.imag, frequency])
+            )
+            angle = np.linalg.norm(axis)
+            unit = axis / angle
+            magnetization = (
+                magnetization * np.cos(angle)
+                + np.cross(unit, magnetization) * np.sin(angle)
+                + unit * np.dot(unit, magnetization) * (1.0 - np.cos(angle))
+            )
+        assert mz == pytest.approx(magnetization[2], abs=1e-9)
+        assert mxy == pytest.approx(np.hypot(*magnetization[:2]), abs=1e-9)
+
+
+def test_pulseq_slice_gradient_uses_the_played_flip_profile():
+    pytest.importorskip("pypulseq")
+    from blochsimulator.sequence.pulseq_builders import make_pulseq_epi
+
+    sequence = make_pulseq_epi(
+        matrix=(4, 3),
+        flip_angle_deg=90.0,
+        rf_pulse_type="sinc",
+        rf_duration_s=2e-3,
+        slice_thickness_m=20e-3,
+        repetition_time_s=50e-3,
+    )
+    definitions = dict(sequence.definitions)
+    # The nominal slice is the FWHM of the profile at the played 90° flip,
+    # which is wider than the small-tip profile (TBW 3.98).
+    assert float(definitions["RFTimeBandwidthProduct"]) == pytest.approx(4.40, abs=0.02)

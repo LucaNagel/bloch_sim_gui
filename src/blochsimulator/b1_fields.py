@@ -89,9 +89,13 @@ def _center_reference(values: np.ndarray, axes: Sequence[np.ndarray]) -> complex
 def _finite_wire_birdcage(
     xyz: Sequence[np.ndarray], fov_m: Sequence[float], kind: str, n_rungs: int
 ) -> np.ndarray:
-    """Approximate a quadrature birdcage using finite axial current rungs."""
+    """Approximate a quadrature birdcage using finite axial current rungs.
+
+    The rungs stand on a circle around the whole in-plane field of view, so
+    no rung passes through the grid as a singular hot spot.
+    """
     x, y, z = xyz
-    radius = 0.62 * min(fov_m[:2])
+    radius = 0.6 * float(np.hypot(fov_m[0], fov_m[1]))
     axial_extent = fov_m[2] if len(fov_m) == 3 else min(fov_m[:2])
     length = 1.35 * axial_extent
     bx = np.zeros_like(x, dtype=np.complex128)
@@ -512,7 +516,11 @@ def create_b1_preset(
         )
 
     if preset == "birdcage_cp":
-        values = _finite_wire_birdcage(xyz, fov_m, kind, max(4, int(birdcage_rungs)))
+        birdcage_rungs = int(birdcage_rungs)
+        if birdcage_rungs < 4:
+            raise ValueError("a quadrature birdcage needs at least four rungs")
+        values = _finite_wire_birdcage(xyz, fov_m, kind, birdcage_rungs)
+        name = f"Birdcage CP ({birdcage_rungs} rungs)"
     elif preset == "surface_loop":
         values = _surface_loop_field(xyz, fov_m, kind)
     elif preset == "circular_array":

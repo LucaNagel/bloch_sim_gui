@@ -26,6 +26,53 @@ from ..visualization import ImageExporter
 from .colormaps import COLORMAP_NAMES, colormap
 
 
+class _StrideLimitSpinBox(QSpinBox):
+    """Limit of drawn positions per axis that steps to the next real change.
+
+    Positions are subsampled with one integer stride, so many limits draw the
+    same sub-grid. Once the simulated counts are known, the arrows skip the
+    limits that would leave the picture unchanged.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._axis_counts = ()
+
+    def set_axis_counts(self, counts):
+        self._axis_counts = tuple(int(n) for n in counts or () if int(n) > 0)
+
+    def shown_counts(self, limit=None) -> tuple:
+        """Positions drawn per axis at ``limit`` (the current value by default)."""
+        limit = self.value() if limit is None else int(limit)
+        return tuple(len(centered_stride_indices(n, limit)) for n in self._axis_counts)
+
+    def stepBy(self, steps):
+        if not self._axis_counts:
+            super().stepBy(steps)
+            return
+        direction = 1 if steps > 0 else -1
+        value = self.value()
+        for _ in range(abs(int(steps))):
+            current = self.shown_counts(value)
+            candidate = value + direction
+            while (
+                self.minimum() <= candidate <= self.maximum()
+                and self.shown_counts(candidate) == current
+            ):
+                candidate += direction
+            if not self.minimum() <= candidate <= self.maximum():
+                break
+            # Land on the smallest limit that draws this sub-grid.
+            shown = self.shown_counts(candidate)
+            while (
+                candidate - 1 >= self.minimum()
+                and self.shown_counts(candidate - 1) == shown
+            ):
+                candidate -= 1
+            value = candidate
+        self.setValue(value)
+
+
 class MagnetizationViewer(QWidget):
     """3D visualization of magnetization vector."""
 
@@ -444,7 +491,7 @@ class MagnetizationViewer(QWidget):
         self.spatial_option_widgets = []
         max_label = QLabel("Max positions:")
         self.max_positions_label = max_label
-        self.max_positions_spin = QSpinBox()
+        self.max_positions_spin = _StrideLimitSpinBox()
         max_label.setBuddy(self.max_positions_spin)
         self.max_positions_spin.setObjectName("mag_3d_max_positions")
         self.max_positions_spin.setRange(2, 256)
@@ -455,6 +502,16 @@ class MagnetizationViewer(QWidget):
         )
         self.max_positions_spin.valueChanged.connect(
             lambda _: self.view_filter_changed.emit()
+        )
+        self.max_positions_spin.valueChanged.connect(
+            lambda _: self._update_shown_positions_label()
+        )
+        self.shown_positions_label = QLabel("")
+        self.shown_positions_label.setObjectName("mag_3d_shown_positions")
+        self.shown_positions_label.setToolTip(
+            "Positions actually drawn per axis, of the simulated positions. "
+            "One stride keeps the spacing uniform, so only some limits "
+            "change the drawn count."
         )
         length_label = QLabel("Vector length:")
         self.vector_length_spin = QDoubleSpinBox()
@@ -490,6 +547,7 @@ class MagnetizationViewer(QWidget):
         for widget in (
             max_label,
             self.max_positions_spin,
+            self.shown_positions_label,
             length_label,
             self.vector_length_spin,
             color_label,
@@ -664,6 +722,22 @@ class MagnetizationViewer(QWidget):
     def get_max_display_positions(self) -> int:
         """Return the largest number of positions drawn along the position axis."""
         return int(self.max_positions_spin.value())
+
+    def set_position_grid_counts(self, counts):
+        """Tell the limit control how many positions each axis simulates."""
+        self.max_positions_spin.set_axis_counts(counts)
+        self._update_shown_positions_label()
+
+    def _update_shown_positions_label(self):
+        spin = self.max_positions_spin
+        total = spin._axis_counts
+        if not total:
+            self.shown_positions_label.setText("")
+            return
+        shown = spin.shown_counts()
+        self.shown_positions_label.setText(
+            f"({' × '.join(map(str, shown))} of {' × '.join(map(str, total))})"
+        )
 
     def is_spatial_layout_active(self) -> bool:
         """Return whether vectors are currently drawn at separate origins."""

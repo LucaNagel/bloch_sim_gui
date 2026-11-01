@@ -88,13 +88,37 @@ def test_carbon_spiral_is_slower_than_the_proton_spiral():
     assert _adc_dwell(carbon) > 1.5 * _adc_dwell(proton)
 
 
-def test_infeasible_carbon_slice_reports_the_physical_gradient():
-    with pytest.raises(ValueError, match=r"needs 41 mT/m .* above the 32 mT/m limit"):
+def test_infeasible_carbon_slice_lengthens_the_rf_pulse():
+    # A 3 ms sinc would need 45 mT/m for a 3 mm 13C slice; the pulse is
+    # stretched until its slice gradient fits the 32 mT/m limit. The slice
+    # spoiler of so thin a 13C slice would not fit its default duration.
+    sequence = make_pulseq_epi(
+        nucleus="C13",
+        scanner_parameters=SCANNER,
+        slice_thickness_m=3e-3,
+        rf_duration_s=3e-3,
+        spoil_after_slice=False,
+    )
+    definitions = sequence.definitions
+    assert definitions["RequestedRFDuration"] == pytest.approx(3e-3)
+    assert definitions["RFDuration"] == pytest.approx(4.25e-3, abs=0.1e-3)
+    assert sequence.check_timing()[0]
+    assert _physical_peaks(sequence, "C13")[0] <= SCANNER["max_grad_mtm"] * 1.001
+
+
+def test_infeasible_designer_slice_reports_the_physical_gradient():
+    # A loaded waveform cannot be stretched, so the builder still refuses it.
+    with pytest.raises(ValueError, match=r"needs \d+(\.\d+)? mT/m .* above the 32"):
         make_pulseq_epi(
             nucleus="C13",
             scanner_parameters=SCANNER,
             slice_thickness_m=3e-3,
-            rf_duration_s=3e-3,
+            rf_pulse_type="designer",
+            rf_duration_s=1e-3,
+            rf_custom_waveform_hz=np.ones(100),
+            rf_custom_raster_s=10e-6,
+            rf_custom_flip_angle_deg=90.0,
+            rf_time_bandwidth_product=4.0,
         )
 
 

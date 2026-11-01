@@ -860,7 +860,18 @@ def _shortest_common_lobe_duration(
         if abs(float(area)) > 0:
             lobe = pp.make_trapezoid("x", area=float(area), system=system)
             duration = max(duration, float(pp.calc_duration(lobe)))
-    return _ceil_to_raster(duration, system.grad_raster_time)
+    duration = _ceil_to_raster(duration, system.grad_raster_time)
+    # Pulseq's own minimum can round a hair above a duration on the raster;
+    # one more raster step then fits every lobe.
+    for area in areas:
+        if abs(float(area)) > 0:
+            try:
+                pp.make_trapezoid(
+                    "x", area=float(area), duration=duration, system=system
+                )
+            except AssertionError:
+                duration += float(system.grad_raster_time)
+    return duration
 
 
 def _slice_rephase_area(

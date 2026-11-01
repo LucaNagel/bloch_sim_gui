@@ -22,7 +22,10 @@ from ..simulator import RF_PULSE_TYPE_OPTIONS, design_rf_pulse
 from ..sequence.rf_pulses import (
     analytic_rf_shape_parameter,
     rf_envelope_integration_factor,
+    rf_envelope_time_bandwidth_product,
+    rf_profile_time_bandwidth_product,
 )
+from ..units import rf_gauss_to_hz
 from .dialogs import PulseImportDialog
 from .theme import set_tone
 
@@ -170,7 +173,9 @@ class RFPulseDesigner(QGroupBox):
         self.tbw_auto_label = QLabel("— (auto)")
         self.tbw_auto_label.setObjectName(f"{prefix}tbw_auto_label")
         self.tbw_auto_label.setToolTip(
-            "Calculated automatically from the RF pulse shape"
+            "RF bandwidth times pulse duration. The bandwidth is the FWHM of "
+            "the simulated small-tip frequency profile, the value that sets "
+            "the slice-select gradient"
         )
         tbw_layout.addWidget(self.tbw_auto_label, 1)
         control_layout.addLayout(tbw_layout)
@@ -213,7 +218,8 @@ class RFPulseDesigner(QGroupBox):
         self.rf_bandwidth_auto_label = QLabel("— Hz (auto)")
         self.rf_bandwidth_auto_label.setObjectName(f"{prefix}rf_bandwidth_auto_label")
         self.rf_bandwidth_auto_label.setToolTip(
-            "Time-bandwidth product divided by the pulse duration"
+            "FWHM of the simulated small-tip |Mxy| profile. Adiabatic and "
+            "BIR-4 pulses are simulated at their B1 amplitude instead"
         )
         rf_bandwidth_layout.addWidget(self.rf_bandwidth_auto_label, 1)
         control_layout.addLayout(rf_bandwidth_layout)
@@ -447,6 +453,26 @@ class RFPulseDesigner(QGroupBox):
             return 4.0  # modulation parameter for adiabatic-style pulses
         return analytic_rf_shape_parameter(pt, self.sinc_lobes.value())
 
+    def _measured_time_bandwidth_product(self, b1_wave, t_wave):
+        """Return FWHM times duration of the simulated pulse profile, or None.
+
+        Area-defined pulses use their small-tip profile, as the sequence
+        builders do for slice selection. Adiabatic and BIR-4 pulses have no
+        area-defined flip, so their profile is simulated at the played B1.
+        None leaves the shape-only integration-factor estimate in place, for
+        example for an adiabatic pulse whose B1 amplitude is still zero.
+        """
+        b1_wave = np.asarray(b1_wave, dtype=complex)
+        t_wave = np.asarray(t_wave, dtype=float)
+        if b1_wave.size == 0 or not np.any(np.abs(b1_wave)):
+            return None
+        dt = float(np.median(np.diff(t_wave))) if t_wave.size > 1 else 0.0
+        if not np.isfinite(dt) or dt <= 0:
+            return None
+        if self.is_adiabatic_passage() or self.pulse_type.currentText() == "BIR-4":
+            return rf_profile_time_bandwidth_product(rf_gauss_to_hz(b1_wave), dt)
+        return rf_envelope_time_bandwidth_product(b1_wave, dt)
+
     def _compute_integration_factor_from_wave(self, b1_wave, t_wave):
         """Compute the shape-only integration factor of a complex waveform."""
         try:
@@ -610,8 +636,6 @@ class RFPulseDesigner(QGroupBox):
             else:
                 integfac = self._compute_integration_factor_from_wave(b1, time)
 
-            self._update_tbw_auto(integfac, explicit_tbw)
-            self._update_rf_bandwidth_auto(integfac, duration, explicit_tbw)
             self.last_integration_factor = float(integfac)
 
             # Amplitude scaling: B1 override vs Flip Angle
@@ -626,6 +650,10 @@ class RFPulseDesigner(QGroupBox):
             # Store a baseband waveform. The sequence rasterizer applies the
             # RF carrier later using absolute sequence time.
             b1 = self._apply_phase(b1)
+            if explicit_tbw is None:
+                explicit_tbw = self._measured_time_bandwidth_product(b1, time)
+            self._update_tbw_auto(integfac, explicit_tbw)
+            self._update_rf_bandwidth_auto(integfac, duration, explicit_tbw)
 
             self.current_pulse = (b1, time)
             self.pulse_changed.emit(self.current_pulse)
@@ -685,12 +713,7 @@ class RFPulseDesigner(QGroupBox):
             aligned_area = 1e-12
         integration_factor = self._compute_integration_factor_from_wave(shape, time)
 
-        self._update_tbw_auto(integration_factor)
         self.last_integration_factor = float(integration_factor)
-
-        self._update_rf_bandwidth_auto(
-            integration_factor=integration_factor, duration=duration
-        )
 
         # Amplitude scaling
         if self.is_adiabatic_passage():
@@ -711,6 +734,13 @@ class RFPulseDesigner(QGroupBox):
         # Combine
         total_phase = opt_phase + phase_rad
         b1 = shape * pulse_amp_G * np.exp(1j * total_phase)
+        measured_tbw = self._measured_time_bandwidth_product(b1, time)
+        self._update_tbw_auto(integration_factor, measured_tbw)
+        self._update_rf_bandwidth_auto(
+            integration_factor=integration_factor,
+            duration=duration,
+            time_bandwidth_product=measured_tbw,
+        )
 
         self.current_pulse = (b1, time)
         self.pulse_changed.emit(self.current_pulse)

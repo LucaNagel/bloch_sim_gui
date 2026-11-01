@@ -191,8 +191,14 @@ def main(
         delay=gx.rise_time + gx_flat_time / 2 - adc_duration / 2,
     )
 
-    # Pre-phasing gradients
-    pre_time = 8e-4
+    # Pre-phasing gradients; the slice rephaser of a strong slice gradient
+    # may need longer than the nominal 0.8 ms.
+    pre_time = max(
+        8e-4,
+        pp.calc_duration(
+            pp.make_trapezoid(channel="z", system=system, area=-gz.area / 2)
+        ),
+    )
     gx_pre = pp.make_trapezoid(
         channel="x", system=system, area=-gx.area / 2, duration=pre_time
     )

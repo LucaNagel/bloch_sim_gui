@@ -1,5 +1,7 @@
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor, QIcon, QPixmap
 from PyQt5.QtWidgets import (
+    QColorDialog,
     QDialog,
     QVBoxLayout,
     QFormLayout,
@@ -39,7 +41,7 @@ from .styles import (
     normalize_interface_style,
 )
 from ..sequence.signal_units import SIGNAL_UNITS, normalize_signal_unit
-from .theme import set_tone
+from .theme import ACCENT_CHOICES, ACCENT_DEFAULT, normalize_accent, set_tone
 
 
 class SettingsDialog(QDialog):
@@ -177,6 +179,7 @@ class SettingsDialog(QDialog):
         sequence_timing_visible: bool = False,
         color_accents: bool = True,
         signal_unit: str = "physical",
+        accent_color: str = ACCENT_DEFAULT,
     ):
         super().__init__(parent)
         scanner_parameters = ScannerParameters.from_mapping(scanner_parameters)
@@ -818,6 +821,20 @@ class SettingsDialog(QDialog):
             "immediately after the settings are accepted."
         )
         interface_form.addRow("Appearance:", self.interface_style_combo)
+        self.accent_color_combo = QComboBox()
+        self.accent_color_combo.setObjectName("accent_color")
+        for label, accent in ACCENT_CHOICES:
+            self.accent_color_combo.addItem(self._accent_swatch(accent), label, accent)
+        self.accent_color_combo.addItem("Custom…", "custom")
+        self._set_accent_color(accent_color)
+        self.accent_color_combo.activated.connect(self._accent_color_activated)
+        self.accent_color_combo.setToolTip(
+            "Colour of selected tabs, primary buttons, focus frames and "
+            "selections. Custom… picks any colour; the dark theme uses a "
+            "lighter shade of it. The change takes effect immediately after "
+            "the settings are accepted."
+        )
+        interface_form.addRow("Accent colour:", self.accent_color_combo)
         self.signal_unit_combo = QComboBox()
         self.signal_unit_combo.setObjectName("signal_unit")
         for label, unit in SIGNAL_UNITS:
@@ -943,6 +960,39 @@ class SettingsDialog(QDialog):
 
     def interface_style(self) -> str:
         return normalize_interface_style(self.interface_style_combo.currentData())
+
+    @staticmethod
+    def _accent_swatch(accent):
+        pixmap = QPixmap(14, 14)
+        pixmap.fill(QColor(accent or "#0b7a8f"))
+        return QIcon(pixmap)
+
+    def _set_accent_color(self, accent):
+        """Select ``accent`` in the combo, adding it as a custom entry if new."""
+        accent = normalize_accent(accent)
+        index = self.accent_color_combo.findData(accent)
+        if index < 0:
+            index = self.accent_color_combo.count() - 1
+            self.accent_color_combo.insertItem(
+                index, self._accent_swatch(accent), f"Custom ({accent})", accent
+            )
+        self.accent_color_combo.setCurrentIndex(index)
+        self._accent_index = index
+
+    def _accent_color_activated(self, index):
+        if self.accent_color_combo.itemData(index) != "custom":
+            self._accent_index = index
+            return
+        current = self.accent_color() or "#0b7a8f"
+        chosen = QColorDialog.getColor(QColor(current), self, "Accent colour")
+        if chosen.isValid():
+            self._set_accent_color(chosen.name())
+        else:
+            self.accent_color_combo.setCurrentIndex(self._accent_index)
+
+    def accent_color(self) -> str:
+        data = self.accent_color_combo.itemData(self._accent_index)
+        return normalize_accent(data if data != "custom" else "")
 
     def signal_unit(self) -> str:
         return normalize_signal_unit(self.signal_unit_combo.currentData())

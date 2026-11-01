@@ -143,6 +143,26 @@ def _interpolate_image(values, interpolation: str):
     )
 
 
+# Log k-space shows this many dB below the peak; weaker samples are clipped.
+KSPACE_DB_FLOOR = -80.0
+
+
+def _kspace_decibels(magnitude):
+    """|k-space| in dB relative to its peak, clipped at ``KSPACE_DB_FLOOR``.
+
+    Scaling by the peak keeps the view independent of the signal unit; a
+    plain log(1 + |k|) is linear for the small values of most results.
+    """
+    magnitude = np.asarray(magnitude, dtype=float)
+    finite = magnitude[np.isfinite(magnitude)]
+    peak = float(finite.max()) if finite.size else 0.0
+    if peak <= 0.0:
+        return np.full(magnitude.shape, KSPACE_DB_FLOOR)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        decibels = 20.0 * np.log10(magnitude / peak)
+    return np.clip(np.nan_to_num(decibels, nan=KSPACE_DB_FLOOR), KSPACE_DB_FLOOR, 0.0)
+
+
 class _DoubleRangeSlider(QWidget):
     """A compact horizontal float slider with independently draggable ends."""
 
@@ -891,10 +911,11 @@ class SequenceReconstructionExplorer(QWidget):
         appearance_layout = QFormLayout(appearance_group)
         self.kspace_scale_combo = QComboBox()
         self.kspace_scale_combo.addItem("Magnitude", "magnitude")
-        self.kspace_scale_combo.addItem("Log magnitude", "log")
+        self.kspace_scale_combo.addItem("Log magnitude (dB)", "log")
         self.kspace_scale_combo.setCurrentIndex(1)
         self.kspace_scale_combo.setToolTip(
-            "Show gridded k-space as linear magnitude or log(1 + magnitude)"
+            "Show gridded k-space as linear magnitude or in dB relative to its "
+            f"peak, floored at {KSPACE_DB_FLOOR:g} dB"
         )
         self.kspace_scale_combo.currentIndexChanged.connect(self._refresh)
         appearance_layout.addRow("K-space view", self.kspace_scale_combo)
@@ -1985,7 +2006,7 @@ class SequenceReconstructionExplorer(QWidget):
     def _kspace_display(self, values):
         magnitude = np.abs(np.asarray(values))
         if self.kspace_scale_combo.currentData() == "log":
-            return np.log1p(magnitude), "log(1 + |gridded k-space|)"
+            return _kspace_decibels(magnitude), "|gridded k-space| [dB re peak]"
         return magnitude, "|gridded k-space|"
 
     def _image_interpolation(self):

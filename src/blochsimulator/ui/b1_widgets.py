@@ -49,6 +49,11 @@ def _magnitude_label(kind: str) -> str:
     return "B1+" if kind == "transmit" else "B1−"
 
 
+# Rung counts offered for the quadrature birdcage preset.
+BIRDCAGE_RUNG_CHOICES = (4, 6, 8, 12, 16)
+DEFAULT_BIRDCAGE_RUNGS = 16
+
+
 class B1FieldEditor(QGroupBox):
     """Load/create one B1 field and edit its object-space geometry."""
 
@@ -120,9 +125,23 @@ class B1FieldEditor(QGroupBox):
         source_layout.addWidget(self.ramp_mode_combo, 3, 1)
         source_layout.addWidget(self.ramp_axis_label, 3, 2)
         source_layout.addWidget(self.ramp_axis_combo, 3, 3)
+        self.birdcage_rungs_label = QLabel("Birdcage rungs")
+        self.birdcage_rungs_combo = QComboBox()
+        self.birdcage_rungs_combo.setObjectName("b1_birdcage_rungs")
+        for rungs in BIRDCAGE_RUNG_CHOICES:
+            self.birdcage_rungs_combo.addItem(str(rungs), rungs)
+        self.birdcage_rungs_combo.setCurrentIndex(
+            BIRDCAGE_RUNG_CHOICES.index(DEFAULT_BIRDCAGE_RUNGS)
+        )
+        self.birdcage_rungs_combo.setToolTip(
+            "Number of rungs (legs) of the quadrature birdcage. Fewer rungs "
+            "make the field less uniform near the coil."
+        )
+        source_layout.addWidget(self.birdcage_rungs_label, 4, 0)
+        source_layout.addWidget(self.birdcage_rungs_combo, 4, 1)
         self.create_button = QPushButton("Create preset")
         self.create_button.clicked.connect(self._create_preset)
-        source_layout.addWidget(self.create_button, 4, 0, 1, 4)
+        source_layout.addWidget(self.create_button, 5, 0, 1, 4)
         source_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         layout.addWidget(source_group)
 
@@ -241,6 +260,9 @@ class B1FieldEditor(QGroupBox):
 
     def _preset_changed(self, _value=None) -> None:
         is_ramp = self.preset_combo.currentData() == "linear_ramp"
+        is_birdcage = self.preset_combo.currentData() == "birdcage_cp"
+        self.birdcage_rungs_label.setEnabled(is_birdcage)
+        self.birdcage_rungs_combo.setEnabled(is_birdcage)
         for widget in (
             self.ramp_mode_label,
             self.ramp_mode_combo,
@@ -274,6 +296,7 @@ class B1FieldEditor(QGroupBox):
                 phase_deg=self.uniform_phase.value(),
                 ramp_axis=str(self.ramp_axis_combo.currentData()),
                 ramp_mode=str(self.ramp_mode_combo.currentData()),
+                birdcage_rungs=int(self.birdcage_rungs_combo.currentData()),
             )
         except Exception as exc:
             QMessageBox.critical(self, "Could not create B1 preset", str(exc))

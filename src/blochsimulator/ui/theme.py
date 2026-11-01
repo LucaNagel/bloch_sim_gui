@@ -72,10 +72,30 @@ NATIVE_ACCENT = "#0a64d8"
 
 TONES = ("muted", "ok", "warning", "error", "info", "accent")
 
+# Accent presets offered under Settings -> Interface. The empty default keeps
+# the theme's own teal; any other entry replaces the accent of both themes.
+ACCENT_DEFAULT = ""
+ACCENT_CHOICES = (
+    ("Teal (default)", ACCENT_DEFAULT),
+    ("Blue", "#1f5fbf"),
+    ("Indigo", "#4f46e5"),
+    ("Purple", "#7c3aed"),
+    ("Magenta", "#b5267a"),
+    ("Red", "#c0392b"),
+    ("Orange", "#c2570c"),
+    ("Green", "#2e7d32"),
+    ("Graphite", "#3f4a56"),
+)
+
 _TONE_PROPERTY = "blochSimulatorTone"
 _TONE_EXTRA_PROPERTY = "blochSimulatorToneExtra"
 
-_state = {"tokens": LIGHT, "appearance": INTERFACE_STYLE_LIGHT}
+_state = {
+    "tokens": LIGHT,
+    "appearance": INTERFACE_STYLE_LIGHT,
+    "dark": False,
+    "accent": ACCENT_DEFAULT,
+}
 _system_palette = {}
 _icon_directory = {}
 
@@ -96,7 +116,71 @@ def color(name: str) -> str:
 
 
 def is_dark() -> bool:
-    return _state["tokens"] is DARK
+    return bool(_state["dark"])
+
+
+def current_accent() -> str:
+    """The custom accent applied last, or ``""`` for the theme's own."""
+    return _state["accent"]
+
+
+def normalize_accent(value) -> str:
+    """A ``#rrggbb`` accent colour, or ``""`` for the theme default."""
+    text = str(value or "").strip()
+    if not text:
+        return ACCENT_DEFAULT
+    colour = QColor(text)
+    if not colour.isValid():
+        return ACCENT_DEFAULT
+    return colour.name()
+
+
+def _mix(first: str, second: str, amount: float) -> str:
+    """``first`` moved ``amount`` (0..1) of the way towards ``second``."""
+    a, b = QColor(first), QColor(second)
+    channels = (
+        round(a.red() + (b.red() - a.red()) * amount),
+        round(a.green() + (b.green() - a.green()) * amount),
+        round(a.blue() + (b.blue() - a.blue()) * amount),
+    )
+    return QColor(*channels).name()
+
+
+def _relative_luminance(value: str) -> float:
+    colour = QColor(value)
+
+    def linear(channel):
+        channel /= 255.0
+        if channel <= 0.03928:
+            return channel / 12.92
+        return ((channel + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * linear(colour.red())
+        + 0.7152 * linear(colour.green())
+        + 0.0722 * linear(colour.blue())
+    )
+
+
+def with_accent(tokens, accent) -> dict:
+    """``tokens`` with the accent family derived from one chosen colour.
+
+    The dark theme lifts the colour towards white so that it keeps its
+    contrast on the dark cards; the soft tint mixes it into the card colour.
+    """
+    accent = normalize_accent(accent)
+    if not accent:
+        return tokens
+    dark = _relative_luminance(tokens["card"]) < 0.2
+    base = _mix(accent, "#ffffff", 0.35) if dark else accent
+    result = dict(tokens)
+    result["accent"] = base
+    result["accent_hover"] = _mix(base, "#ffffff", 0.15)
+    result["accent_soft"] = _mix(tokens["card"], base, 0.22 if dark else 0.12)
+    result["on_accent"] = (
+        "#ffffff" if _relative_luminance(base) < 0.35 else tokens["window"]
+    )
+    return result
 
 
 def tone_style(tone: str, extra: str = "") -> str:
@@ -363,8 +447,9 @@ QFrame[role="rule"] {{ background: {c['border']}; max-height: 1px; min-height: 1
     )
 
 
-def native_stylesheet() -> str:
+def native_stylesheet(accent=None) -> str:
     """Role rules for the platform style; everything else stays native."""
+    accent = normalize_accent(accent) or NATIVE_ACCENT
     return (
         'QFrame[role="rule"] { background: palette(mid); max-height: 1px;'
         " min-height: 1px; border: none; }"
@@ -372,7 +457,7 @@ def native_stylesheet() -> str:
         'QPushButton[dimWhenDisabled="true"]:disabled { color: rgba(70, 70, 70, 145);'
         " background-color: rgba(210, 210, 210, 150); }"
         + _segmented_rules(
-            NATIVE_ACCENT,
+            accent,
             "#ffffff",
             "palette(mid)",
             "palette(button)",
@@ -383,10 +468,14 @@ def native_stylesheet() -> str:
     )
 
 
-def apply_appearance(app, appearance, *, system_style_name=None, platform=None):
+def apply_appearance(
+    app, appearance, *, system_style_name=None, platform=None, accent=None
+):
     """Apply an appearance identifier from Settings to ``app``.
 
-    Returns the concrete appearance: ``light``, ``dark`` or ``system``.
+    ``accent`` is a ``#rrggbb`` colour replacing the theme's teal accent;
+    ``None`` or ``""`` keeps it. Returns the concrete appearance: ``light``,
+    ``dark`` or ``system``.
     """
     if app is None:
         return None
@@ -400,20 +489,26 @@ def apply_appearance(app, appearance, *, system_style_name=None, platform=None):
             app.setStyle(str(system_style_name))
         app.setPalette(system_palette)
         dark = system_prefers_dark(system_palette, platform=platform)
-        _state["tokens"] = DARK if dark else LIGHT
-        app.setStyleSheet(native_stylesheet())
+        _state["tokens"] = with_accent(DARK if dark else LIGHT, accent)
+        _state["dark"] = dark
+        app.setStyleSheet(native_stylesheet(accent))
     else:
-        tokens = DARK if concrete == INTERFACE_STYLE_DARK else LIGHT
+        dark = concrete == INTERFACE_STYLE_DARK
+        tokens = with_accent(DARK if dark else LIGHT, accent)
         _state["tokens"] = tokens
+        _state["dark"] = dark
         app.setStyle("Fusion")
         app.setPalette(palette_for(tokens))
         app.setStyleSheet(stylesheet_for(tokens))
+    _state["accent"] = normalize_accent(accent)
     _state["appearance"] = concrete
     _refresh_tones(app)
     return concrete
 
 
 __all__ = [
+    "ACCENT_CHOICES",
+    "ACCENT_DEFAULT",
     "DARK",
     "INTERFACE_STYLE_DARK",
     "INTERFACE_STYLE_LIGHT",
@@ -421,14 +516,17 @@ __all__ = [
     "TONES",
     "apply_appearance",
     "color",
+    "current_accent",
     "current_appearance",
     "current_tokens",
     "is_dark",
     "native_stylesheet",
+    "normalize_accent",
     "palette_for",
     "remember_system_palette",
     "set_tone",
     "stylesheet_for",
     "system_prefers_dark",
     "tone_style",
+    "with_accent",
 ]
