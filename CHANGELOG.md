@@ -6,6 +6,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.9.7] - 2026-11-01
+
 ### Added
 
 - The main tabs are grouped into Setup, Results and Analysis. A header row
@@ -29,6 +31,15 @@ The project follows [Semantic Versioning](https://semver.org/).
   labels are greyed out.
 - `docs/ui_module_split_plan.md` plans splitting `main_window.py` and
   `sequence_simulation_widget.py` into topic modules.
+- The Sequence tab shows a gradient load plot: amplitude and slew rate per
+  axis against the scanner limits at the gamma of the imaged nucleus, with a
+  warning (display only, the sequence is not changed).
+- The birdcage coil offers 4, 6, 8, 12 or 16 rungs.
+- Settings > Interface > Appearance has an accent colour for the light theme.
+- Spin probes: "Open Result" opens a finished run in the Reconstruction
+  Explorer or the probe view, the ADC samples can be jumped to and scrolled
+  through, and the Signal view can show "ADC samples only".
+- The k-space view offers a dB scale.
 
 ### Changed
 
@@ -60,6 +71,13 @@ The project follows [Semantic Versioning](https://semver.org/).
   menus. A status line says whether the sequence is up to date, being
   generated, outdated by changed settings or failed, and links to the PSF
   Analysis tab; it replaces the sequence summary table.
+- The RF bandwidth is the full width at half maximum of a simulated slice
+  profile. Slice-selection gradients follow the profile at the played flip
+  angle; analytic pulses whose slice gradient would exceed the scanner limit
+  are lengthened and the status line says so.
+- The setup viewer keeps its tab bar on the left.
+- PSF Analysis shows the full profiles, the spin probe buttons are always
+  enabled, and Free Mode shows the maximum per axis.
 
 ### Fixed
 
