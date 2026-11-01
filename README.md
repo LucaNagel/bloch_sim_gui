@@ -42,14 +42,22 @@ xattr -cr /Applications/BlochSimulator.app
 
 ## Demo
 
+### Sequence Mode
 ![Sequence workspace](docs/_static/media/sequence_mode_demo.gif)
 
-***Sequence Mode:** EPI variants on a spherical object, including
-multi-repetition and multi-slice acquisitions with B0 inhomogeneity.*
+***Sequence Mode:*** Demo of a typical workflow: Free phantom design, optional $B_0$ - inhomogeneites, defining transmit (birdcage in this case) and receive $B_1$ (surface coil). Followed by running the simulations and inspecting them in the Reconstruction viewer. Showcasing Point Spread Function (PSF) and *k*-space trajectory simulations.
+Exporting simulations results, as well as a jupyter notebook for analysis of sequence simuation results.
 
-![Spin Echo Animation](docs/_static/media/spin_echo_v240.gif)
+### Free Mode
 
-***Free Mode:** a spin-echo simulation.*
+![Free Mode](docs/_static/media/free_mode_demo.gif)
+
+***Free Mode:*** A 1D spin-echo simulation, and a 2D RF + Gradient Tour.
+
+### Modern UI
+
+![Improved UI](docs/_static/media/dark_bright_mode_example.png)
+***Now with Dark mode!***
 
 ## Features
 
