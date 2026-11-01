@@ -455,7 +455,7 @@ class SequenceDesigner(QGroupBox):
         self.diagram_first_tr_button = QPushButton("First TR")
         self.diagram_first_tr_button.setObjectName("sequence_diagram_first_tr")
         self.diagram_first_tr_button.setToolTip(
-            "Zoom to the start pulse and the first repetition of a pulse train."
+            "Zoom to the first repetition (TR), including the start pulse of an SSFP train."
         )
         zoom_layout.addWidget(self.diagram_full_button)
         zoom_layout.addWidget(self.diagram_first_tr_button)
@@ -909,7 +909,7 @@ class SequenceDesigner(QGroupBox):
             },
             "Slice Select + Rephase": {
                 "te_ms": 5,
-                "tr_ms": 20,
+                "tr_ms": 5,
                 "num_positions": 99,
                 "num_frequencies": 3,
                 "pulse_type": "Sinc",
@@ -1866,6 +1866,7 @@ class SequenceDesigner(QGroupBox):
                 annotations.brackets.append(
                     TimingMarker(f"TR {tr * 1e3:.3g} ms", 0.0, tr, 1)
                 )
+                annotations.first_tr_window_s = (0.0, tr)
         return annotations
 
     def set_cursor_index(self, idx: int):

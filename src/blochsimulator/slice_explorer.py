@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QSizePolicy,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QSize, Qt
 import pyqtgraph as pg
 
 from .memory import SimulationMemoryError
@@ -33,6 +33,13 @@ from .simulator import (
     design_rf_pulse,
 )
 from .ui.theme import set_tone
+
+
+class _CompactPlotWidget(pg.PlotWidget):
+    """A plot with a small size hint, so stacked plots share the visible height."""
+
+    def sizeHint(self):
+        return QSize(400, 160)
 
 
 class SliceSelectionExplorer(QWidget):
@@ -217,19 +224,27 @@ class SliceSelectionExplorer(QWidget):
         viz_panel = QSplitter(Qt.Vertical)
 
         # RF Pulse Plot
-        self.plot_rf = pg.PlotWidget(title="RF Pulse & Gradient")
+        self.plot_rf = _CompactPlotWidget(title="RF Pulse & Gradient")
         self.plot_rf.setLabel("left", "B1 (G) / Gz (G/cm)")
         self.plot_rf.setLabel("bottom", "Time (ms)")
         self.plot_rf.addLegend()
         viz_panel.addWidget(self.plot_rf)
 
         # Slice Profile Plot
-        self.plot_profile = pg.PlotWidget(title="Excitation Profile (Mz vs Position)")
+        self.plot_profile = _CompactPlotWidget(
+            title="Excitation Profile (Mz vs Position)"
+        )
         self.plot_profile.setLabel("left", "Mz")
         self.plot_profile.setLabel("bottom", "Position (mm)")
         self.plot_profile.setYRange(-1.1, 1.1)
         self.plot_profile.addLegend()
         viz_panel.addWidget(self.plot_profile)
+
+        # The default plot size hint (448 px each) would make the page taller than
+        # the window; the plots instead share the visible height, so pulse and
+        # slice profile are in view together.
+        viz_panel.setChildrenCollapsible(False)
+        viz_panel.setSizes([1, 1])
 
         content_layout.addWidget(control_panel)
         content_layout.addWidget(viz_panel, 1)
