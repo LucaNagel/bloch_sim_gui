@@ -2992,3 +2992,21 @@ def test_color_accents_tint_run_buttons_and_progress_bars():
     assert sequence.run_button.property("dimWhenDisabled") is True
     sequence.progress.setValue(40)
     assert sequence.progress.styleSheet() == ""
+
+
+def test_slice_explorer_shows_pulse_and_profile_without_scrolling():
+    app = QApplication.instance() or QApplication(sys.argv)
+    from PyQt5.QtWidgets import QScrollArea
+    from blochsimulator.slice_explorer import SliceSelectionExplorer
+
+    explorer = SliceSelectionExplorer()
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(explorer)
+    scroll.resize(1400, 700)
+    scroll.show()
+    app.processEvents()
+
+    assert scroll.verticalScrollBar().maximum() == 0
+    assert explorer.plot_rf.height() > 140 and explorer.plot_profile.height() > 140
+    scroll.close()
