@@ -23,7 +23,7 @@ from PyQt5.QtCore import Qt
 import pyqtgraph as pg
 
 from .memory import SimulationMemoryError
-from .sequence.rf_pulses import rf_time_bandwidth_product_from_envelope
+from .sequence.rf_pulses import rf_envelope_time_bandwidth_product
 from .simulator import (
     BlochSimulator,
     RF_PULSE_TYPE_OPTIONS,
@@ -395,7 +395,7 @@ class SliceSelectionExplorer(QWidget):
                 )
 
         try:
-            tbw = rf_time_bandwidth_product_from_envelope(b1)
+            tbw = rf_envelope_time_bandwidth_product(b1, dt)
         except ValueError:
             tbw = construction_parameter
         if source == "Custom" and window_type == "None":

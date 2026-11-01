@@ -265,10 +265,9 @@ def test_explorer_applies_and_restores_image_display_options(qt_application):
 
     selected_kspace = dataset.cartesian_kspace.isel(cartesian_frame=0)
     assert explorer.kspace_scale_combo.currentData() == "log"
-    np.testing.assert_allclose(
-        explorer.kspace_panel.image.image,
-        np.log1p(np.abs(selected_kspace)).T,
-    )
+    magnitude = np.abs(np.asarray(selected_kspace))
+    expected_db = np.clip(20 * np.log10(magnitude / magnitude.max()), -80.0, 0.0)
+    np.testing.assert_allclose(explorer.kspace_panel.image.image, expected_db.T)
 
     explorer.colormap_combo.setCurrentText("magma")
     explorer.display_strength.setValue(1.8)

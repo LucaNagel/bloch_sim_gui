@@ -51,8 +51,6 @@ SPIRAL_COLOR = "#0f766e"
 SLICE_COLOR = "#15803d"
 OTHER_SLICE_COLOR = "#94a3b8"
 NOMINAL_FILL = (21, 128, 61, 28)
-# Profiles open on the main lobe and first side lobes; zoom out for the FOV.
-PROFILE_VIEW_VOXELS = 4.0
 # The page scrolls, so the plots keep a readable size in small windows.
 PLOT_MINIMUM_HEIGHT = 340
 # Floor of the dB image, relative to the ideal peak.
@@ -859,15 +857,16 @@ class PSFAnalysisView(QWidget):
                 pen=pg.mkPen(color, width=1, style=Qt.DashLine),
             )
         plot.plot([], [], pen=pg.mkPen("#334155", style=Qt.DashLine), name="ideal")
-        # Zooming out stops at the field of view; |PSF| is never negative.
+        # The whole field of view is shown; |PSF| is never negative.
         extent = np.concatenate(
             [
                 psf.profiles[role][0] / psf.voxel_size_m[psf.roles.index(role)]
                 for role in psf.roles
             ]
         )
-        plot.setLimits(xMin=float(extent.min()), xMax=float(extent.max()), yMin=0.0)
-        plot.setXRange(-PROFILE_VIEW_VOXELS, PROFILE_VIEW_VOXELS, padding=0.0)
+        x_min, x_max = float(extent.min()), float(extent.max())
+        plot.setLimits(xMin=x_min, xMax=x_max, yMin=0.0)
+        plot.setXRange(x_min, x_max, padding=0.0)
 
     def _modulation_lines(self, psf):
         """Yield ``(role, k in Δk, values)`` through the k-space centre."""

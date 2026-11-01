@@ -88,6 +88,7 @@ from ..sequence import (
     SpectroscopicAcquisition,
     RFEvent,
     SequenceCompiler,
+    SequenceProbeResult,
     SequenceProgram,
     ScannerParameters,
     SpectralSpatialPulseLibrary,
@@ -130,6 +131,7 @@ from ..sequence import (
 )
 from ..sequence.bruker_export import suggest_bruker_method
 from ..sequence.compiler import IDEAL_SPOILER_DEFINITION
+from ..sequence.gradient_load import GradientLoadEstimate
 from ..sequence.encoding_order import (
     AXIS_ORDERS,
     ELLIPTICAL_CENTRIC,
@@ -172,7 +174,7 @@ from ..sequence.rf_pulses import (
     RF_PULSE_TYPE_LABELS,
     analytic_rf_shape_parameter,
     design_rf_envelope,
-    rf_time_bandwidth_product_from_envelope,
+    rf_envelope_time_bandwidth_product,
 )
 from ..simulator import BlochSimulator, resolve_num_threads
 from ..units import (
@@ -238,6 +240,7 @@ from .widgets import (
     IMAGE_CANVAS_BACKGROUND,
     CollapsibleSection,
     GroupedComboBox,
+    HeaderTabWidget,
     compact_image_histogram,
     install_tab_bar_wheel_scroll,
     style_image_item,
@@ -1643,6 +1646,28 @@ class ReceiverNoiseSetupError(ValueError):
     """The receiver noise settings cannot be used for the requested run."""
 
 
+def _adc_only_time_axis(time_ms):
+    """Acquisition-only time axis for ADC samples taken at ``time_ms``.
+
+    Gaps between readouts are replaced by one sample spacing, so consecutive
+    events sit end to end. Returns the new axis, a ``connect`` mask that
+    breaks the line between events, and the start of every event on the new
+    axis.
+    """
+    time_ms = np.asarray(time_ms, dtype=float).reshape(-1)
+    steps = np.diff(time_ms)
+    positive = steps[steps > 0]
+    spacing = float(np.median(positive)) if positive.size else 0.0
+    # A step clearly longer than the sample spacing leaves one event.
+    gap = steps > 1.5 * spacing
+    compressed = np.where(gap, spacing, steps)
+    axis = np.concatenate(([0.0], np.cumsum(compressed)))
+    connect = np.ones(time_ms.size, dtype=bool)
+    connect[:-1] = ~gap
+    starts = np.concatenate(([0], np.flatnonzero(gap) + 1))
+    return axis, connect, axis[starts]
+
+
 class SequenceSimulationWidget(QWidget):
     """Load/build sequences, configure a 3D object, and inspect sparse output."""
 
@@ -1665,6 +1690,8 @@ class SequenceSimulationWidget(QWidget):
     # which causes an unnecessary horizontal scrollbar on headless Qt.
     MINIMUM_FOCUSED_CONTROL_WIDTH = 576
     MINIMUM_FOCUSED_VIEWER_WIDTH = 540
+    # Below this height the Spin Probe page scrolls instead of shrinking.
+    PROBE_PAGE_MINIMUM_HEIGHT = 760
     # Generate, live preview and Run build sequences in a worker thread, so a
     # long build does not freeze the window. Other callers that need the
     # sequence at once build it inline.
@@ -1794,6 +1821,7 @@ class SequenceSimulationWidget(QWidget):
         self._preserve_sequence_plot_range_on_next_show = False
         self._rf_waveform_item = None
         self._rf_phase_item = None
+        self._gradient_load_cache = None
         self._gradient_waveform_items = {}
         self._sequence_spoiler_markers = []
         self._sequence_timing_markers = []
@@ -2272,8 +2300,8 @@ class SequenceSimulationWidget(QWidget):
                 else 0.0
             )
             if not np.isfinite(time_bandwidth_product) or time_bandwidth_product <= 0:
-                time_bandwidth_product = rf_time_bandwidth_product_from_envelope(
-                    waveform_hz
+                time_bandwidth_product = rf_envelope_time_bandwidth_product(
+                    waveform_hz, raster_s
                 )
             reference_flip_angle_deg = float(state.get("flip_angle", 0.0))
             if (
@@ -2458,8 +2486,8 @@ class SequenceSimulationWidget(QWidget):
         except (TypeError, ValueError):
             time_bandwidth_product = 0.0
         if not np.isfinite(time_bandwidth_product) or time_bandwidth_product <= 0.0:
-            time_bandwidth_product = rf_time_bandwidth_product_from_envelope(
-                waveform_hz
+            time_bandwidth_product = rf_envelope_time_bandwidth_product(
+                waveform_hz, event.raster_s
             )
         return {
             "waveform_hz": np.array(waveform_hz, copy=True),
@@ -2496,8 +2524,8 @@ class SequenceSimulationWidget(QWidget):
             raise ValueError("Saved RF Designer flip angle is invalid")
         time_bandwidth_product = float(state.get("time_bandwidth_product", 0.0))
         if not np.isfinite(time_bandwidth_product) or time_bandwidth_product <= 0.0:
-            time_bandwidth_product = rf_time_bandwidth_product_from_envelope(
-                waveform_hz
+            time_bandwidth_product = rf_envelope_time_bandwidth_product(
+                waveform_hz, raster_s
             )
         frequency_offset_hz = float(state.get("frequency_offset_hz", 0.0))
         if not np.isfinite(frequency_offset_hz):
@@ -2845,13 +2873,18 @@ class SequenceSimulationWidget(QWidget):
 
     def _build_ui(self):
         self.setStyleSheet(BOLD_GROUP_TITLES_STYLE)
-        root = QHBoxLayout(self)
+        root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root.setSpacing(4)
+        # The view tabs sit in this row above both the parameter column and
+        # the views, so they keep their place when the column shows or hides.
+        views_header = QHBoxLayout()
+        views_header.setContentsMargins(0, 0, 0, 0)
+        root.addLayout(views_header)
         splitter = QSplitter()
         splitter.setHandleWidth(6)
         splitter.setChildrenCollapsible(False)
-        root.addWidget(splitter)
+        root.addWidget(splitter, 1)
 
         control_column = QWidget()
         self.control_column = control_column
@@ -5728,7 +5761,9 @@ class SequenceSimulationWidget(QWidget):
         self.export_button.clicked.connect(self._export_results)
         self.open_result_button = QPushButton("Open result…")
         self.open_result_button.setToolTip(
-            "Open an exported sequence-result NetCDF file in the reconstruction explorer"
+            "Open an exported sequence result (.nc) in the Reconstruction "
+            "Explorer, or an exported spin probe (.nc or .npz) in the Spin "
+            "Probe tab"
         )
         self.open_result_button.clicked.connect(self._open_reconstruction_result)
         export_cancel_row = QHBoxLayout()
@@ -6335,8 +6370,18 @@ class SequenceSimulationWidget(QWidget):
         self.split_signal_source.setEnabled(False)
         self.split_signal_source.currentIndexChanged.connect(self._refresh_split_view)
         view_mode_row.addWidget(self.split_signal_source)
+        view_mode_row.addSpacing(16)
+        self.signal_adc_only_checkbox = QCheckBox("ADC samples only")
+        self.signal_adc_only_checkbox.setObjectName("signal_adc_only")
+        self.signal_adc_only_checkbox.setToolTip(
+            "Join the ADC events end to end so the plot shows only acquired "
+            "samples, without the time between readouts. The time axis then "
+            "counts acquisition time only; dotted lines mark event boundaries."
+        )
+        self.signal_adc_only_checkbox.toggled.connect(self._signal_adc_only_toggled)
+        view_mode_row.addWidget(self.signal_adc_only_checkbox)
         view_mode_row.addStretch()
-        views = QTabWidget()
+        views = HeaderTabWidget()
         self.views = views
         install_tab_bar_wheel_scroll(views)
         # The sequence parameter column takes a large share of the window, so
@@ -6352,7 +6397,12 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_settings_toggle.toggled.connect(
             self._explorer_sequence_settings_requested
         )
-        views.setCornerWidget(self.sequence_settings_toggle, Qt.TopRightCorner)
+        # Hiding the toggle on the Explorer tab must not change the row height.
+        toggle_policy = self.sequence_settings_toggle.sizePolicy()
+        toggle_policy.setRetainSizeWhenHidden(True)
+        self.sequence_settings_toggle.setSizePolicy(toggle_policy)
+        views_header.addWidget(views.tabBar(), 1)
+        views_header.addWidget(self.sequence_settings_toggle)
         views_font = views.tabBar().font()
         views_font.setBold(True)
         views.tabBar().setFont(views_font)
@@ -6382,6 +6432,14 @@ class SequenceSimulationWidget(QWidget):
         waveform_controls.addWidget(self.waveform_units)
         self.waveform_nucleus_label = QLabel("Conversion: H1")
         waveform_controls.addWidget(self.waveform_nucleus_label)
+        self.gradient_load_toggle = QCheckBox("Gradient load")
+        self.gradient_load_toggle.setChecked(True)
+        self.gradient_load_toggle.setToolTip(
+            "Show a rough estimate of gradient amplitude and slew rate as a "
+            "percentage of the scanner limits (Settings → Scanner)"
+        )
+        self.gradient_load_toggle.toggled.connect(self._gradient_load_toggled)
+        waveform_controls.addWidget(self.gradient_load_toggle)
         waveform_controls.addStretch()
         timeline_layout.addLayout(waveform_controls)
         self.waveform_value_summary = QLabel("No sequence waveforms")
@@ -6426,6 +6484,31 @@ class SequenceSimulationWidget(QWidget):
             self._rf_phase_view,
         ):
             view_box.auto_data_limits = False
+        self.gradient_load_plot = pg.PlotWidget(title="Gradient load (estimate)")
+        self.gradient_load_plot.setLabel("left", "Load", "%")
+        self.gradient_load_plot.setLabel("bottom", "Time", "ms")
+        self.gradient_load_plot.addLegend()
+        self.gradient_load_plot.getViewBox().auto_data_limits = False
+        self.gradient_load_plot.setMouseEnabled(x=True, y=False)
+        self.gradient_load_warning = QLabel(
+            "Visualization only — do not rely on this for hardware safety. "
+            "Peak amplitude and slew rate per axis as % of the scanner "
+            "limits; no coil heating, duty cycle, amplifier, or PNS model."
+        )
+        self.gradient_load_warning.setObjectName("gradient_load_warning")
+        self.gradient_load_warning.setWordWrap(True)
+        set_tone(self.gradient_load_warning, "warning")
+        self.gradient_load_summary = QLabel("No gradient load available")
+        self.gradient_load_summary.setObjectName("gradient_load_summary")
+        self.gradient_load_summary.setWordWrap(True)
+        self.gradient_load_summary.setToolTip(
+            "Peak values are the largest per-axis amplitude and slew rate in "
+            "the sequence. RMS is the time-averaged gradient amplitude of the "
+            "busiest axis, a crude indicator of sustained load."
+        )
+        # Equal left axes keep the time axes of the stacked plots aligned.
+        for plot in (self.rf_plot, self.gradient_plot, self.gradient_load_plot):
+            plot.getAxis("left").setWidth(64)
         self.rf_overview = _SequenceOverviewPlot(self.rf_plot)
         self.gradient_overview = _SequenceOverviewPlot(self.gradient_plot)
         zero_line_pen = pg.mkPen("#757575", width=1)
@@ -6439,6 +6522,9 @@ class SequenceSimulationWidget(QWidget):
         self.gradient_zero_line.setZValue(-100)
         self.rf_plot.sigXRangeChanged.connect(self._sequence_plot_range_changed)
         self.gradient_plot.sigXRangeChanged.connect(self._sequence_plot_range_changed)
+        self.gradient_load_plot.sigXRangeChanged.connect(
+            self._sequence_plot_range_changed
+        )
         self.rf_progress_cursor = pg.InfiniteLine(
             pos=0.0, angle=90, movable=False, pen=pg.mkPen("y", width=2)
         )
@@ -6447,8 +6533,11 @@ class SequenceSimulationWidget(QWidget):
         )
         self.rf_progress_cursor.setVisible(self.live_preview_enabled)
         self.gradient_progress_cursor.setVisible(self.live_preview_enabled)
-        timeline_layout.addWidget(self.rf_plot)
-        timeline_layout.addWidget(self.gradient_plot)
+        timeline_layout.addWidget(self.rf_plot, 3)
+        timeline_layout.addWidget(self.gradient_plot, 3)
+        timeline_layout.addWidget(self.gradient_load_warning)
+        timeline_layout.addWidget(self.gradient_load_summary)
+        timeline_layout.addWidget(self.gradient_load_plot, 2)
         self.sequence_tab_index = views.addTab(timeline, "Sequence")
         views.setTabToolTip(
             self.sequence_tab_index,
@@ -6616,6 +6705,39 @@ class SequenceSimulationWidget(QWidget):
         self.probe_adc_status.setObjectName("sequence_probe_adc_status")
         self.probe_adc_status.setVisible(False)
         playback_mode_row.addWidget(self.probe_adc_status)
+        playback_mode_row.addSpacing(12)
+        self.probe_previous_adc_button = QToolButton()
+        self.probe_previous_adc_button.setObjectName("sequence_probe_previous_adc")
+        self.probe_previous_adc_button.setText("◀ ADC")
+        self.probe_previous_adc_button.setToolTip(
+            "Jump back to the start of the previous ADC event."
+        )
+        self.probe_previous_adc_button.clicked.connect(
+            lambda: self._jump_probe_adc_event(-1)
+        )
+        playback_mode_row.addWidget(self.probe_previous_adc_button)
+        self.probe_adc_event_label = QLabel("ADC –")
+        self.probe_adc_event_label.setObjectName("sequence_probe_adc_event")
+        self.probe_adc_event_label.setToolTip(
+            "ADC event (readout) at the shown time, counted over the whole "
+            "sequence. Between two events the label names the last one."
+        )
+        playback_mode_row.addWidget(self.probe_adc_event_label)
+        self.probe_next_adc_button = QToolButton()
+        self.probe_next_adc_button.setObjectName("sequence_probe_next_adc")
+        self.probe_next_adc_button.setText("ADC ▶")
+        self.probe_next_adc_button.setToolTip(
+            "Jump forward to the start of the next ADC event."
+        )
+        self.probe_next_adc_button.clicked.connect(
+            lambda: self._jump_probe_adc_event(1)
+        )
+        playback_mode_row.addWidget(self.probe_next_adc_button)
+        for control in (
+            self.probe_previous_adc_button,
+            self.probe_next_adc_button,
+        ):
+            control.setEnabled(False)
         playback_mode_row.addStretch()
         probe_layout.addLayout(playback_mode_row)
         self.probe_time_control = UniversalTimeControl()
@@ -6663,7 +6785,16 @@ class SequenceSimulationWidget(QWidget):
         )
         self.probe_views.currentChanged.connect(self._probe_view_changed)
         probe_layout.addWidget(self.probe_views, 1)
-        spin_probe_index = views.addTab(probe_page, "Spin Probe")
+        # On short windows the page scrolls as a whole instead of squeezing
+        # the probe plots below a usable height.
+        probe_page.setMinimumHeight(self.PROBE_PAGE_MINIMUM_HEIGHT)
+        self.probe_scroll = QScrollArea()
+        self.probe_scroll.setObjectName("sequence_probe_scroll")
+        self.probe_scroll.setWidgetResizable(True)
+        self.probe_scroll.setFrameShape(QFrame.NoFrame)
+        self.probe_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.probe_scroll.setWidget(probe_page)
+        spin_probe_index = views.addTab(self.probe_scroll, "Spin Probe")
         self.spin_probe_tab_index = spin_probe_index
         views.setTabToolTip(
             spin_probe_index,
@@ -6799,6 +6930,7 @@ class SequenceSimulationWidget(QWidget):
         for plot in (
             self.rf_plot,
             self.gradient_plot,
+            self.gradient_load_plot,
             self.signal_plot,
             self.split_signal_plot,
         ):
@@ -8623,11 +8755,12 @@ class SequenceSimulationWidget(QWidget):
                 self._apply_probe_defaults_from_phantom(phantom)
 
     def _update_probe_button_hints(self, probe_selected):
-        """Say on the probe buttons why they are dimmed."""
+        """Say on the probe buttons what a click does or why they are dimmed."""
         if not probe_selected:
             hint = (
-                "Select <b>Spin probe</b> as <b>Source</b> under Simulation "
-                "object to run a probe."
+                "Click to select <b>Spin probe</b> as <b>Source</b> under "
+                "Simulation object and edit the probe settings; click again "
+                "to run the probe."
             )
         elif self.program is None:
             hint = "Generate or load a sequence first."
@@ -8657,12 +8790,10 @@ class SequenceSimulationWidget(QWidget):
             and not loop_running
             and not self._run_waiting_for_generation
         )
-        self.run_probe_button.setEnabled(
-            probe_selected and self.program is not None and idle
-        )
-        self.run_geometry_probe_button.setEnabled(
-            probe_selected and self.program is not None and idle
-        )
+        # With another source a click switches to the spin probe instead.
+        probe_available = idle and (not probe_selected or self.program is not None)
+        self.run_probe_button.setEnabled(probe_available)
+        self.run_geometry_probe_button.setEnabled(probe_available)
         self._update_probe_button_hints(probe_selected)
         self.run_button.setEnabled(
             not probe_selected and self.program is not None and idle
@@ -9215,8 +9346,45 @@ class SequenceSimulationWidget(QWidget):
             tone = "warning"
         else:
             text, tone = f"{self._sequence_status_name()} · up to date", "ok"
+            lengthened = self._lengthened_rf_pulses()
+            if lengthened:
+                text += " · " + "; ".join(
+                    f"{name} lengthened {requested * 1e3:.3g} → {actual * 1e3:.3g} ms"
+                    for name, requested, actual in lengthened
+                )
+                tone = "warning"
         label.setText(f"● {text}")
         set_tone(label, tone)
+        label.setToolTip(
+            "A slice-selective pulse is stretched when its slice gradient "
+            "would exceed the scanner's maximum gradient; the slice gradient "
+            "follows the FWHM of the profile at the played flip angle."
+            if self.program is not None and self._lengthened_rf_pulses()
+            else ""
+        )
+
+    def _lengthened_rf_pulses(self):
+        """Return (name, requested, played) for RF pulses the builder stretched."""
+        definitions = (
+            dict(getattr(self.program, "metadata", {}) or {}).get("definitions", {})
+            if self.program is not None
+            else {}
+        )
+        lengthened = []
+        for key, requested in definitions.items():
+            if not str(key).endswith("RequestedRFDuration"):
+                continue
+            prefix = str(key)[: -len("RequestedRFDuration")]
+            try:
+                requested = float(np.ravel(requested)[0])
+                actual = float(np.ravel(definitions[f"{prefix}RFDuration"])[0])
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+            # Raster rounding changes the duration by at most a few µs.
+            if actual > requested + 20e-6:
+                name = f"{prefix} RF pulse" if prefix else "RF pulse"
+                lengthened.append((name, requested, actual))
+        return lengthened
 
     def _sequence_generation_thread_finished(self):
         for thread in list(self._sequence_generation_threads):
@@ -14059,6 +14227,7 @@ class SequenceSimulationWidget(QWidget):
             self._refresh_sequence_overviews()
             self._update_waveform_y_ranges()
             self._update_waveform_value_summary()
+            self._update_gradient_load_summary()
         self._emit_physical_b1_changed()
 
     def physical_b1_display_context(self):
@@ -14612,6 +14781,7 @@ class SequenceSimulationWidget(QWidget):
             self._sequence_spoiler_markers.append(marker)
         self.rf_plot.addItem(self.rf_progress_cursor)
         self.gradient_plot.addItem(self.gradient_progress_cursor)
+        self._reset_gradient_load_plot()
         self._sequence_plot_window_s = None
         duration = max(float(self.program.duration_s), 1e-9)
         duration_ms = duration * 1000.0
@@ -14624,7 +14794,7 @@ class SequenceSimulationWidget(QWidget):
             start_ms = min(max(start_ms, 0.0), duration_ms - visible_span_ms)
             end_ms = start_ms + visible_span_ms
         # Keep zoom and pan inside the sequence so the time axis starts at 0.
-        for plot in (self.rf_plot, self.gradient_plot):
+        for plot in (self.rf_plot, self.gradient_plot, self.gradient_load_plot):
             plot.setLimits(xMin=0.0, xMax=duration_ms)
         self.rf_plot.setXRange(start_ms, end_ms, padding=0)
         self._refresh_sequence_waveforms(start_ms / 1000.0, end_ms / 1000.0)
@@ -14943,14 +15113,15 @@ class SequenceSimulationWidget(QWidget):
         # ViewBox.setXLink aligns pixels, which gives different time ranges when
         # the RF phase axis makes one plot narrower. Share the actual range so
         # both previews show exactly the same repetition, also after resizing.
-        other_plot = (
-            self.gradient_plot
-            if _view_box is self.rf_plot.getViewBox()
-            else self.rf_plot
-        )
         self._syncing_sequence_plot_ranges = True
         try:
-            other_plot.setXRange(*x_range, padding=0)
+            for other_plot in (
+                self.rf_plot,
+                self.gradient_plot,
+                self.gradient_load_plot,
+            ):
+                if other_plot.getViewBox() is not _view_box:
+                    other_plot.setXRange(*x_range, padding=0)
         finally:
             self._syncing_sequence_plot_ranges = False
         if self.program is None:
@@ -15036,7 +15207,126 @@ class SequenceSimulationWidget(QWidget):
             self._gradient_waveform_items[axis].setData(
                 grad_x, grad_y, connect="finite"
             )
+        self._refresh_gradient_load_plot()
         self._refresh_sequence_timing_markers()
+
+    def _gradient_load_estimate(self):
+        """Return the cached gradient load of the shown program, if any."""
+        if self.program is None:
+            return None
+        nucleus = self._waveform_nucleus()
+        gamma_hz_per_t = float(NUCLEUS_GAMMA_HZ_PER_T[nucleus])
+        max_gradient_mtm = float(self.scanner_parameters.max_grad_mtm)
+        max_slew_tms = float(self.scanner_parameters.max_slew_tms)
+        key = (id(self.program), gamma_hz_per_t, max_gradient_mtm, max_slew_tms)
+        if self._gradient_load_cache is not None:
+            cached_key, cached_program, estimate = self._gradient_load_cache
+            if cached_key == key and cached_program is self.program:
+                return estimate
+        try:
+            estimate = GradientLoadEstimate(
+                self.program.gradient_events,
+                duration_s=float(self.program.duration_s),
+                max_gradient_hz_per_m=max_gradient_mtm * 1e-3 * gamma_hz_per_t,
+                max_slew_hz_per_m_s=max_slew_tms * gamma_hz_per_t,
+            )
+        except ValueError:
+            estimate = None
+        self._gradient_load_cache = (key, self.program, estimate)
+        return estimate
+
+    def _reset_gradient_load_plot(self):
+        plot = self.gradient_load_plot
+        plot.clear()
+        limit_line = pg.InfiniteLine(
+            pos=100.0,
+            angle=0,
+            movable=False,
+            pen=pg.mkPen("#e53935", width=1.25, style=Qt.DashLine),
+            label="100 %",
+            labelOpts={"position": 0.02, "color": "#e53935"},
+        )
+        limit_line.setZValue(-50)
+        plot.addItem(limit_line, ignoreBounds=True)
+        self._gradient_load_items = {
+            "amplitude": plot.plot(
+                np.zeros(1),
+                np.zeros(0),
+                stepMode="center",
+                pen=pg.mkPen("#43a047", width=1.25),
+                name="Amplitude",
+            ),
+            "slew": plot.plot(
+                np.zeros(1),
+                np.zeros(0),
+                stepMode="center",
+                pen=pg.mkPen("#fb8c00", width=1.25),
+                name="Slew rate",
+            ),
+        }
+        self._update_gradient_load_summary()
+
+    def _refresh_gradient_load_plot(self):
+        items = getattr(self, "_gradient_load_items", None)
+        window = self._sequence_plot_window_s
+        if not items or window is None or not self.gradient_load_toggle.isChecked():
+            return
+        estimate = self._gradient_load_estimate()
+        if estimate is None:
+            for item in items.values():
+                item.setData(np.zeros(1), np.zeros(0), stepMode="center")
+            return
+        # One bin per few pixels keeps short ramps visible without drawing
+        # every raster cell of a long acquisition.
+        width_px = max(int(self.gradient_load_plot.width()), 400)
+        edges, amplitude, slew = estimate.binned(
+            window[0], window[1], min(2000, width_px)
+        )
+        edges_ms = edges * 1000.0
+        items["amplitude"].setData(edges_ms, 100.0 * amplitude, stepMode="center")
+        items["slew"].setData(edges_ms, 100.0 * slew, stepMode="center")
+        peak = max(
+            100.0,
+            float(np.max(amplitude, initial=0.0)) * 100.0,
+            float(np.max(slew, initial=0.0)) * 100.0,
+        )
+        self.gradient_load_plot.setYRange(0.0, 1.05 * peak, padding=0)
+
+    def _update_gradient_load_summary(self):
+        estimate = self._gradient_load_estimate()
+        if estimate is None:
+            self.gradient_load_summary.setText("No gradient load available")
+            return
+        amplitude, amplitude_axis = estimate.peak_amplitude()
+        slew, slew_axis = estimate.peak_slew()
+        rms, rms_axis = estimate.rms_amplitude()
+
+        def describe(value, axis):
+            return f"{100.0 * value:.1f} %" + (f" (G{axis})" if axis else "")
+
+        limits = (
+            f"{float(self.scanner_parameters.max_grad_mtm):.4g} mT/m, "
+            f"{float(self.scanner_parameters.max_slew_tms):.4g} T/m/s"
+        )
+        text = (
+            f"Peak amplitude {describe(amplitude, amplitude_axis)} · "
+            f"peak slew {describe(slew, slew_axis)} · "
+            f"RMS amplitude {describe(rms, rms_axis)} · limits {limits} "
+            f"({self._waveform_nucleus()})"
+        )
+        self.gradient_load_summary.setText(text)
+        over_limit = amplitude > 1.0 + 1e-6 or slew > 1.0 + 1e-6
+        set_tone(self.gradient_load_summary, "error" if over_limit else "muted")
+
+    def _gradient_load_toggled(self, visible):
+        for widget in (
+            self.gradient_load_plot,
+            self.gradient_load_warning,
+            self.gradient_load_summary,
+        ):
+            widget.setVisible(bool(visible))
+        if visible:
+            self._refresh_gradient_load_plot()
 
     def _build_phantom(self):
         source_index = self.object_source.currentIndex()
@@ -15512,7 +15802,29 @@ class SequenceSimulationWidget(QWidget):
             return False
         return True
 
+    def _select_probe_source_for_editing(self, mode):
+        """Switch the source to the spin probe and show its settings."""
+        self.object_source.setCurrentIndex(2)
+        self._sequence_settings_shown_by_tab[self.views.currentIndex()] = True
+        self._update_control_column_visibility()
+        self.probe_status.setText(
+            f"Spin probe selected. Adjust the settings, then click {mode} "
+            "Probe to run it."
+        )
+
+        def reveal():
+            # The probe settings sit at the end of the column.
+            bar = self.controls_scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+            self.controls_scroll.ensureWidgetVisible(self.probe_group, 0, 0)
+            self.probe_points.setFocus(Qt.OtherFocusReason)
+
+        QTimer.singleShot(0, reveal)
+
     def _run_spectral_probe(self):
+        if self.object_source.currentIndex() != 2:
+            self._select_probe_source_for_editing("Spectral")
+            return False
         if not self._can_start_probe():
             return False
         try:
@@ -15526,6 +15838,9 @@ class SequenceSimulationWidget(QWidget):
         return True
 
     def _run_geometry_probe(self):
+        if self.object_source.currentIndex() != 2:
+            self._select_probe_source_for_editing("Geometry")
+            return False
         if not self._can_start_probe():
             return False
         try:
@@ -15639,10 +15954,8 @@ class SequenceSimulationWidget(QWidget):
         self._log_message(f"Sequence probe: {message}")
 
     def _probe_failed(self, message):
-        probe_selected = self.object_source.currentIndex() == 2
-        self.run_probe_button.setEnabled(probe_selected)
-        self.run_geometry_probe_button.setEnabled(probe_selected)
         self.cancel_probe_button.setEnabled(False)
+        self._update_run_action_availability()
         self.probe_status.setText(message)
         self._update_probe_empty_hint()
         self._show_run_end(self._probe_started_at, False)
@@ -15681,10 +15994,8 @@ class SequenceSimulationWidget(QWidget):
         loop_metadata = self._parameter_loop_metadata()
         if loop_metadata is not None:
             result.metadata["parameter_loop"] = loop_metadata
-        probe_selected = self.object_source.currentIndex() == 2
-        self.run_probe_button.setEnabled(probe_selected)
-        self.run_geometry_probe_button.setEnabled(probe_selected)
         self.cancel_probe_button.setEnabled(False)
+        self._update_run_action_availability()
         self.probe_status.setText("Spin probe complete")
         self._mark_result_tab_ready(self.spin_probe_tab_index, True)
         self._update_probe_stale_warning()
@@ -16274,11 +16585,97 @@ class SequenceSimulationWidget(QWidget):
             vectors = frame.reshape(-1, 3)
         self.probe_magnetization_viewer.update_magnetization(vectors)
 
+    def _probe_adc_windows(self):
+        """``(start, end)`` times in seconds of every ADC event of the probe."""
+        result = self.probe_result
+        if result is None:
+            return np.zeros((0, 2), dtype=float)
+        windows = np.asarray(result.metadata.get("adc_windows_s", ()), dtype=float)
+        if windows.size:
+            return windows.reshape(-1, 2)
+        times = np.asarray(result.metadata.get("adc_times_s", ()), dtype=float)
+        events = np.asarray(result.metadata.get("adc_event_indices", ()), dtype=int)
+        if times.size == 0 or times.size != events.size:
+            return np.zeros((0, 2), dtype=float)
+        return np.asarray(
+            [
+                (times[events == event].min(), times[events == event].max())
+                for event in np.unique(events)
+            ],
+            dtype=float,
+        )
+
+    def _probe_adc_event_position(self, time_s):
+        """Index of the last ADC event starting at or before ``time_s`` and
+        whether ``time_s`` lies inside it; ``(-1, False)`` before the first."""
+        windows = self._probe_adc_windows()
+        if windows.shape[0] == 0:
+            return -1, False
+        tolerance = max(1e-12, abs(float(time_s)) * 1e-9)
+        started = np.flatnonzero(windows[:, 0] <= time_s + tolerance)
+        if started.size == 0:
+            return -1, False
+        index = int(started[-1])
+        return index, bool(time_s <= windows[index, 1] + tolerance)
+
+    def _jump_probe_adc_event(self, step):
+        """Move the probe playback to the start of the next/previous ADC event."""
+        result = self.probe_result
+        indices = self._probe_playback_indices
+        windows = self._probe_adc_windows()
+        if result is None or indices.size == 0 or windows.shape[0] == 0:
+            return
+        current_index = self._probe_result_index()
+        current_time = float(result.time_s[current_index])
+        event, inside = self._probe_adc_event_position(current_time)
+        tolerance = max(1e-12, abs(current_time) * 1e-9)
+        if step > 0:
+            target_event = event + 1
+        elif inside and current_time > windows[event, 0] + tolerance:
+            # Inside an event the first step back returns to its start.
+            target_event = event
+        else:
+            target_event = event - 1 if inside else event
+        target_event = int(np.clip(target_event, 0, windows.shape[0] - 1))
+        target_time = windows[target_event, 0]
+        playback_times = np.asarray(result.time_s, dtype=float)[indices]
+        # The first stored state inside the event; otherwise the nearest one.
+        inside_target = np.flatnonzero(
+            (playback_times >= target_time - tolerance)
+            & (playback_times <= windows[target_event, 1] + tolerance)
+        )
+        if inside_target.size:
+            playback_index = int(inside_target[0])
+        else:
+            playback_index = int(np.argmin(np.abs(playback_times - target_time)))
+        self._set_probe_time_index(playback_index)
+
+    def _update_probe_adc_event_label(self, time_s):
+        windows = self._probe_adc_windows()
+        count = windows.shape[0]
+        for control in (
+            self.probe_previous_adc_button,
+            self.probe_next_adc_button,
+        ):
+            control.setEnabled(count > 0 and self._probe_playback_indices.size > 0)
+        if count == 0:
+            self.probe_adc_event_label.setText("No ADC")
+            return
+        event, inside = self._probe_adc_event_position(time_s)
+        if event < 0:
+            self.probe_adc_event_label.setText(f"Before ADC 1 / {count}")
+        elif inside:
+            self.probe_adc_event_label.setText(f"ADC {event + 1} / {count}")
+        else:
+            self.probe_adc_event_label.setText(f"After ADC {event + 1} / {count}")
+
     def _update_probe_adc_status(self, time_index):
         result = self.probe_result
         if result is None or result.time_s.size == 0:
             self.probe_adc_status.setText("ADC: off")
+            self.probe_adc_event_label.setText("ADC –")
             return
+        self._update_probe_adc_event_label(float(result.time_s[time_index]))
         time_s = float(result.time_s[time_index])
         windows = np.asarray(result.metadata.get("adc_windows_s", ()), dtype=float)
         active = False
@@ -16906,6 +17303,9 @@ class SequenceSimulationWidget(QWidget):
     def set_scanner_parameters(self, parameters):
         """Apply scanner hardware limits to generated sequences and exports."""
         self.scanner_parameters = ScannerParameters.from_mapping(parameters)
+        if self.program is not None and hasattr(self, "gradient_load_summary"):
+            self._update_gradient_load_summary()
+            self._refresh_gradient_load_plot()
         for prefix in (
             "fid",
             "epi",
@@ -17167,6 +17567,10 @@ class SequenceSimulationWidget(QWidget):
                 self._set_signal_axis(plot, SignalDisplay("simulation"))
         self.receiver_noise.preview_changed.emit()
 
+    def _signal_adc_only_toggled(self, _checked):
+        if self.result is not None:
+            self._plot_received_signal(self.result)
+
     def _plot_received_signal(self, result):
         display = signal_display(result, self.signal_unit)
         result = display_result(result, display)
@@ -17178,6 +17582,8 @@ class SequenceSimulationWidget(QWidget):
         self._set_signal_axis(self.split_signal_plot, display)
         time_ms = result.adc_times_s * 1000
         signal = np.asarray(result.signal)
+        connect = "all"
+        event_starts_ms = ()
         if self.spectroscopic_acquisition is not None:
             csi = self.spectroscopic_acquisition
             center_event = csi.encoding_event_index(
@@ -17192,13 +17598,28 @@ class SequenceSimulationWidget(QWidget):
         else:
             plot_signal = signal
             plot_time = time_ms
+            if self.signal_adc_only_checkbox.isChecked() and np.size(time_ms) > 1:
+                plot_time, connect, event_starts_ms = _adc_only_time_axis(time_ms)
+                self.signal_plot.setLabel(
+                    "bottom", "Acquisition time (gaps removed)", "ms"
+                )
         if plot_signal.ndim == 1:
             self.signal_plot.plot(
-                plot_time, np.abs(plot_signal), pen="w", name="Magnitude"
+                plot_time,
+                np.abs(plot_signal),
+                pen="w",
+                name="Magnitude",
+                connect=connect,
             )
-            self.signal_plot.plot(plot_time, plot_signal.real, pen="g", name="Real")
             self.signal_plot.plot(
-                plot_time, plot_signal.imag, pen="r", name="Imaginary"
+                plot_time, plot_signal.real, pen="g", name="Real", connect=connect
+            )
+            self.signal_plot.plot(
+                plot_time,
+                plot_signal.imag,
+                pen="r",
+                name="Imaginary",
+                connect=connect,
             )
         else:
             for coil, coil_signal in enumerate(plot_signal):
@@ -17207,6 +17628,7 @@ class SequenceSimulationWidget(QWidget):
                     np.abs(coil_signal),
                     pen=pg.intColor(coil, hues=plot_signal.shape[0]),
                     name=f"Coil {coil + 1}",
+                    connect=connect,
                 )
         if (
             (signal.ndim == 1 or signal.shape[0] == 1)
@@ -17218,6 +17640,7 @@ class SequenceSimulationWidget(QWidget):
                 np.abs(np.asarray(result.signal_noiseless).reshape(-1)),
                 pen=pg.mkPen("#a0a0a0", style=Qt.DashLine),
                 name="Noiseless magnitude",
+                connect=connect,
             )
         if result.species_signal is not None:
             pool_signal = np.asarray(result.species_signal)
@@ -17236,9 +17659,19 @@ class SequenceSimulationWidget(QWidget):
                     magnitude,
                     pen=pg.mkPen(colors[pool_index % len(colors)], width=2),
                     name=f"|{name}|",
+                    connect=connect,
+                )
+        # Too many boundary lines would hide the signal itself.
+        if 1 < len(event_starts_ms) <= 512:
+            boundary_pen = pg.mkPen("#808080", width=1, style=Qt.DotLine)
+            for start_ms in event_starts_ms[1:]:
+                self.signal_plot.addItem(
+                    pg.InfiniteLine(pos=start_ms, angle=90, pen=boundary_pen)
                 )
         # Zooming out stops at the measurement, from 0 to its end.
         measurement_ms = 1000.0 * float(result.metadata.get("duration_s") or 0.0)
+        if len(event_starts_ms):
+            measurement_ms = 0.0
         if np.size(plot_time):
             self.signal_plot.setLimits(
                 xMin=0.0, xMax=max(measurement_ms, float(np.max(plot_time)))
@@ -18517,21 +18950,50 @@ class SequenceSimulationWidget(QWidget):
     def _open_reconstruction_result(self):
         filename, _ = QFileDialog.getOpenFileName(
             self,
-            "Open sequence reconstruction result",
+            "Open sequence result or spin probe",
             str(self._export_directory()),
-            "xarray NetCDF (*.nc)",
+            "Results (*.nc *.npz);;xarray NetCDF (*.nc);;NumPy archive (*.npz)",
         )
         if not filename:
             return
+        self.open_result_file(filename)
+
+    def open_result_file(self, filename):
+        """Show an exported result in the Explorer, or a spin probe in its tab."""
+        path = Path(filename)
         try:
+            probe = SequenceProbeResult.load(path)
+        except Exception:
+            probe = None
+        try:
+            if probe is not None:
+                self._show_loaded_probe_result(probe, path)
+                return True
             from ..sequence.reconstruction import load_reconstruction_dataset
 
-            dataset = load_reconstruction_dataset(filename)
-            self.reconstruction_explorer.set_dataset(dataset, source=filename)
+            dataset = load_reconstruction_dataset(path)
+            self.reconstruction_explorer.set_dataset(dataset, source=str(path))
+            self._mark_result_tab_ready(self.reconstruction_explorer_tab_index, True)
             self.views.setCurrentIndex(self.reconstruction_explorer_tab_index)
-            self._status_update(f"Opened result {Path(filename).name}")
+            self._status_update(f"Opened result {path.name}")
+            return True
         except Exception as exc:
             QMessageBox.critical(self, "Open result failed", str(exc))
+            return False
+
+    def _show_loaded_probe_result(self, result, path):
+        """Show a spin probe read from disk in the Spin Probe tab."""
+        self._stop_probe_playback()
+        self.probe_result = result
+        self.probe_status.setText(f"Spin probe loaded from {path.name}")
+        # A loaded probe belongs to its file, not to the current sequence.
+        self._probe_sequence_revision = self._sequence_revision
+        self._mark_result_tab_ready(self.spin_probe_tab_index, True)
+        self._update_probe_stale_warning()
+        self._show_probe_result()
+        self.export_button.setEnabled(True)
+        self.views.setCurrentIndex(self.spin_probe_tab_index)
+        self._status_update(f"Opened spin probe {path.name}")
 
     def _default_bruker_spatial_metadata(self):
         acquisition = self.acquisition

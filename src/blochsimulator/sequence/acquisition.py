@@ -2576,8 +2576,10 @@ def make_cartesian_epi(
         "custom_waveform": rf_custom_waveform_hz,
         "custom_raster_s": rf_custom_raster_s,
     }
+    # The shared slice gradient follows the profile of the strongest pulse.
     rf_envelope, rf_duration_s, effective_rf_tbw, rf_pulse_type = design_rf_envelope(
-        **rf_design_kwargs
+        **rf_design_kwargs,
+        flip_angle_deg=float(np.max(np.abs(flip_angle_schedule_deg))),
     )
     rf_samples_by_repetition = [
         scale_rf_envelope_to_flip(

@@ -93,6 +93,163 @@ def rf_time_bandwidth_product_from_envelope(envelope: np.ndarray) -> float:
     return 1.0 / rf_envelope_integration_factor(envelope)
 
 
+# Flip angle at which the small-tip profile of an unscaled envelope is
+# measured. It is far enough below 90 degrees that the profile follows the
+# Fourier transform of the envelope.
+SMALL_TIP_PROFILE_FLIP_DEG = 5.0
+# The profile is simulated on a time grid of at most this many samples. The
+# resampled raster keeps its Nyquist band far above the measured band.
+_PROFILE_MAX_SAMPLES = 512
+_PROFILE_FREQUENCY_POINTS = 1025
+_PROFILE_SPAN_DOUBLINGS = 4
+# Pulses that rotate the on-resonance magnetization further than this are
+# measured by their inversion profile; the excitation profile of such a pulse
+# dips at resonance.
+_INVERSION_PROFILE_MIN_FLIP_DEG = 135.0
+
+
+def simulate_rf_frequency_profile(
+    samples_hz: np.ndarray, raster_s: float, frequencies_hz: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(|Mxy|, Mz)`` after an RF pulse, starting from ``Mz = 1``.
+
+    ``samples_hz`` are complex nutation frequencies on a piecewise constant
+    raster. Relaxation is ignored and each frequency is an isochromat at that
+    off-resonance, so the result is the exact hard-pulse Bloch profile.
+    """
+    samples = np.asarray(samples_hz, dtype=np.complex128).reshape(-1)
+    frequencies = np.asarray(frequencies_hz, dtype=float).reshape(-1)
+    # Cayley-Klein parameters of the accumulated rotation, one per frequency.
+    alpha = np.ones(frequencies.size, dtype=np.complex128)
+    beta = np.zeros(frequencies.size, dtype=np.complex128)
+    off_resonance = 2.0 * np.pi * float(raster_s) * frequencies
+    for sample in samples:
+        nutation = 2.0 * np.pi * float(raster_s) * sample
+        angle = np.sqrt(np.abs(nutation) ** 2 + off_resonance**2)
+        half_sin = np.sinc(angle / (2.0 * np.pi)) / 2.0  # sin(angle/2) / angle
+        step_alpha = np.cos(angle / 2.0) - 1j * off_resonance * half_sin
+        step_beta = -1j * nutation * half_sin
+        alpha, beta = (
+            step_alpha * alpha - np.conj(step_beta) * beta,
+            step_beta * alpha + np.conj(step_alpha) * beta,
+        )
+    transverse = np.abs(2.0 * np.conj(alpha) * beta)
+    longitudinal = np.abs(alpha) ** 2 - np.abs(beta) ** 2
+    return transverse, longitudinal
+
+
+def _half_maximum_width(frequencies: np.ndarray, profile: np.ndarray):
+    """Return the FWHM of the band around the profile peak, or None.
+
+    None means the band reaches the edge of the frequency grid.
+    """
+    peak_index = int(np.argmax(profile))
+    half = 0.5 * float(profile[peak_index])
+    if not np.isfinite(half) or half <= 0.0:
+        return None
+    below = np.flatnonzero(profile < half)
+    right = below[below > peak_index]
+    left = below[below < peak_index]
+    if right.size == 0 or left.size == 0:
+        return None
+
+    def crossing(inside: int, outside: int) -> float:
+        fraction = (profile[inside] - half) / (profile[inside] - profile[outside])
+        return float(
+            frequencies[inside]
+            + fraction * (frequencies[outside] - frequencies[inside])
+        )
+
+    upper = crossing(int(right[0]) - 1, int(right[0]))
+    lower = crossing(int(left[-1]) + 1, int(left[-1]))
+    return upper - lower
+
+
+def rf_profile_fwhm_hz(samples_hz: np.ndarray, raster_s: float) -> float:
+    """Measure the RF bandwidth as the FWHM of the simulated pulse profile.
+
+    A pulse that rotates the on-resonance magnetization by less than 135
+    degrees is an excitation pulse: its band is the FWHM of ``|Mxy|``. A
+    stronger pulse is measured by its inversion profile ``(1 - Mz) / 2``,
+    which is also the refocusing efficiency ``|beta|^2`` of a spin echo.
+    """
+    samples = np.asarray(samples_hz, dtype=np.complex128).reshape(-1)
+    if samples.size == 0 or not np.all(np.isfinite(samples)):
+        raise ValueError("RF samples must be non-empty and finite")
+    if not np.isfinite(raster_s) or raster_s <= 0:
+        raise ValueError("RF raster must be positive and finite")
+    duration_s = samples.size * float(raster_s)
+    if samples.size > _PROFILE_MAX_SAMPLES:
+        samples = _resample_complex(samples, _PROFILE_MAX_SAMPLES)
+        raster_s = duration_s / _PROFILE_MAX_SAMPLES
+    try:
+        half_span_hz = max(4.0 * rf_time_bandwidth_product_from_envelope(samples), 4.0)
+    except ValueError:
+        half_span_hz = 4.0
+    half_span_hz /= duration_s
+    _, center_mz = simulate_rf_frequency_profile(samples, raster_s, [0.0])
+    inversion = bool(center_mz[0] < np.cos(np.deg2rad(_INVERSION_PROFILE_MIN_FLIP_DEG)))
+    for _ in range(_PROFILE_SPAN_DOUBLINGS):
+        frequencies = np.linspace(
+            -half_span_hz, half_span_hz, _PROFILE_FREQUENCY_POINTS
+        )
+        transverse, longitudinal = simulate_rf_frequency_profile(
+            samples, raster_s, frequencies
+        )
+        profile = 0.5 * (1.0 - longitudinal) if inversion else transverse
+        width = _half_maximum_width(frequencies, profile)
+        if width is not None:
+            return width
+        half_span_hz *= 2.0
+    raise ValueError("RF profile does not fall to half maximum")
+
+
+@lru_cache(maxsize=256)
+def _cached_profile_time_bandwidth_product(
+    samples_bytes: bytes, raster_s: float
+) -> float:
+    samples = np.frombuffer(samples_bytes, dtype=np.complex128)
+    return rf_profile_fwhm_hz(samples, raster_s) * samples.size * raster_s
+
+
+def rf_profile_time_bandwidth_product(samples_hz: np.ndarray, raster_s: float) -> float:
+    """Return FWHM times duration of the simulated profile of a scaled pulse.
+
+    The value falls back to :func:`rf_time_bandwidth_product_from_envelope`
+    when the profile has no measurable band, for example a zero pulse.
+    """
+    samples = np.ascontiguousarray(samples_hz, dtype=np.complex128).reshape(-1)
+    try:
+        return _cached_profile_time_bandwidth_product(
+            samples.tobytes(), float(raster_s)
+        )
+    except ValueError:
+        return rf_time_bandwidth_product_from_envelope(samples)
+
+
+def rf_envelope_time_bandwidth_product(
+    envelope: np.ndarray, raster_s: float, flip_angle_deg: float | None = None
+) -> float:
+    """Return the simulated TBW of an envelope played at a flip angle.
+
+    The envelope is scaled to ``flip_angle_deg`` by its area. ``None`` and
+    angles below :data:`SMALL_TIP_PROFILE_FLIP_DEG` give the small-tip
+    profile, which is the Fourier transform of the envelope.
+    """
+    flip = 0.0 if flip_angle_deg is None else abs(float(flip_angle_deg))
+    if not np.isfinite(flip):
+        raise ValueError("flip_angle_deg must be finite")
+    if flip < SMALL_TIP_PROFILE_FLIP_DEG:
+        flip = SMALL_TIP_PROFILE_FLIP_DEG
+    signal = np.asarray(envelope, dtype=np.complex128).reshape(-1)
+    area_cycles = abs(np.sum(signal)) * float(raster_s)
+    if not np.isfinite(area_cycles) or area_cycles <= 0:
+        return rf_time_bandwidth_product_from_envelope(signal)
+    return rf_profile_time_bandwidth_product(
+        signal * (float(flip) / 360.0 / area_cycles), raster_s
+    )
+
+
 def analytic_rf_shape_parameter(pulse_type: str, sinc_lobes: int = 3) -> float:
     """Return the non-editable construction parameter for an analytic shape."""
     normalized = normalize_rf_pulse_type(pulse_type)
@@ -274,8 +431,10 @@ def design_rf_envelope(
     The returned waveform has an arbitrary amplitude but a positive real
     integral. Consumers scale it to the requested flip angle. For analytic
     pulses, the input ``time_bandwidth_product`` is retained as a construction
-    parameter for backward compatibility; the third return value is calculated
-    from the completed normalized pulse shape and is used for slice selection.
+    parameter for backward compatibility; the third return value is the FWHM
+    of the simulated profile of the completed pulse times its duration, and is
+    used for slice selection. ``flip_angle_deg`` selects the flip angle of
+    that profile; ``None`` measures the small-tip profile.
 
     SLR pulses ignore ``time_bandwidth_product``: their TBW follows from
     ``slr_sharpness`` and is returned as designed. Their shape depends on the
@@ -298,6 +457,8 @@ def design_rf_envelope(
         raise ValueError("rf_time_bandwidth_product must be positive and finite")
     if not np.isfinite(apodization) or not 0 <= apodization <= 1:
         raise ValueError("rf_apodization must be between 0 and 1")
+    if flip_angle_deg is not None and not np.isfinite(flip_angle_deg):
+        raise ValueError("flip_angle_deg must be finite")
 
     sample_count = int(round(float(duration_s) / float(raster_s)))
     if sample_count <= 0:
@@ -329,8 +490,6 @@ def design_rf_envelope(
         signal = window * np.sinc(shape_parameter * centered_s / actual_duration_s)
         signal = signal.astype(np.complex128)
     elif pulse_type == "slr":
-        if flip_angle_deg is not None and not np.isfinite(flip_angle_deg):
-            raise ValueError("flip_angle_deg must be finite")
         signal = _design_slr_waveform(
             sample_count,
             _validate_slr_sharpness(slr_sharpness),
@@ -382,7 +541,7 @@ def design_rf_envelope(
         effective_tbw = (
             slr_time_bandwidth_product(slr_sharpness)
             if pulse_type == "slr"
-            else rf_time_bandwidth_product_from_envelope(signal)
+            else rf_envelope_time_bandwidth_product(signal, raster_s, flip_angle_deg)
         )
     else:
         # Loaded formats may provide an independently measured bandwidth
@@ -507,6 +666,9 @@ def make_pulseq_rf_events(
     their complex phase and are rescaled from their reference flip angle.
     ``include_slice_gradient=False`` also omits the coupled gradient of an
     SPSP pulse, returning its RF waveform alone without gradient limit checks.
+    The slice gradient follows the FWHM of the simulated profile at the
+    largest flip angle. An analytic pulse whose gradient would exceed the
+    scanner limit is lengthened; the returned duration is the played one.
     """
     if not include_slice_gradient:
         slice_thickness_m = None
@@ -620,10 +782,21 @@ def make_pulseq_rf_events(
         "custom_waveform": custom_waveform_hz,
         "custom_raster_s": custom_raster_s,
     }
+    # All pulses of one call share a single slice gradient so that their
+    # rephasers agree; it follows the profile of the strongest pulse.
+    reference_flip_deg = max(abs(angle) for angle in angles)
     envelope, actual_duration_s, effective_tbw, normalized_type = design_rf_envelope(
-        **design_kwargs
+        **design_kwargs, flip_angle_deg=reference_flip_deg
     )
     loaded = normalized_type == "designer"
+    if slice_thickness_m is not None and not loaded:
+        envelope, actual_duration_s, effective_tbw = _lengthen_for_slice_gradient(
+            system,
+            design_kwargs,
+            flip_angle_deg=reference_flip_deg,
+            slice_thickness_m=slice_thickness_m,
+            design=(envelope, actual_duration_s, effective_tbw),
+        )
     results = []
     for angle_deg in angles:
         if normalized_type == "slr":
@@ -669,6 +842,32 @@ def make_pulseq_rf_events(
         rf_event.freq_offset = float(frequency_offset_hz)
         results.append(event)
     return tuple(results), actual_duration_s, effective_tbw, normalized_type
+
+
+def _lengthen_for_slice_gradient(
+    system, design_kwargs, *, flip_angle_deg, slice_thickness_m, design
+):
+    """Stretch an analytic pulse until its slice gradient fits the limit.
+
+    The TBW of an analytic shape does not change when it is stretched in
+    time, so a longer pulse needs a proportionally weaker slice gradient.
+    The duration is rounded up to the gradient raster and written back into
+    ``design_kwargs``, so later per-flip designs use the same length.
+    """
+    envelope, duration_s, tbw = design
+    limit_hz = float(system.max_grad) * float(slice_thickness_m)
+    step_s = max(float(system.rf_raster_time), float(system.grad_raster_time))
+    for _ in range(8):
+        if tbw / duration_s <= limit_hz * (1.0 + 1e-9):
+            break
+        target_s = np.ceil(tbw / limit_hz / step_s - 1e-9) * step_s
+        if target_s <= duration_s:
+            target_s = duration_s + step_s
+        design_kwargs["duration_s"] = target_s
+        envelope, duration_s, tbw, _ = design_rf_envelope(
+            **design_kwargs, flip_angle_deg=flip_angle_deg
+        )
+    return envelope, duration_s, tbw
 
 
 def _check_slice_gradient(system, *, bandwidth_hz: float, slice_thickness_m: float):

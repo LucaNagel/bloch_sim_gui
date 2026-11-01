@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QTabBar,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -545,6 +546,75 @@ class _TabBarWheelScroller(QObject):
 def install_tab_bar_wheel_scroll(tab_widget: QTabWidget) -> _TabBarWheelScroller:
     """Let the wheel/trackpad slide ``tab_widget``'s tabs without switching."""
     return _TabBarWheelScroller(tab_widget.tabBar())
+
+
+class HeaderTabWidget(QTabWidget):
+    """A tab widget whose tab bar can be placed outside the widget.
+
+    ``tabBar()`` returns :attr:`header_bar`, a separate bar that a parent lays
+    out above other widgets, for example above a column that appears beside
+    the pages. The tabs then keep their place while that column shows or
+    hides. The tab widget's own bar stays hidden; tab edits made through this
+    class are mirrored onto the header bar.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.header_bar = QTabBar()
+        self.header_bar.setObjectName("header_tab_bar")
+        self.header_bar.setExpanding(False)
+        self.header_bar.setUsesScrollButtons(True)
+        self.header_bar.setElideMode(Qt.ElideNone)
+        super().tabBar().hide()
+        self.header_bar.currentChanged.connect(self._header_current_changed)
+        self.currentChanged.connect(self._pages_current_changed)
+
+    def tabBar(self):
+        return self.header_bar
+
+    def _header_current_changed(self, index):
+        if index >= 0 and index != self.currentIndex():
+            self.setCurrentIndex(index)
+
+    def _pages_current_changed(self, index):
+        if index != self.header_bar.currentIndex():
+            self.header_bar.setCurrentIndex(index)
+
+    def addTab(self, widget, *args):
+        return self.insertTab(self.count(), widget, *args)
+
+    def insertTab(self, index, widget, *args):
+        index = super().insertTab(index, widget, *args)
+        if len(args) == 2:
+            self.header_bar.insertTab(index, args[0], args[1])
+        else:
+            self.header_bar.insertTab(index, args[0])
+        self.header_bar.setCurrentIndex(self.currentIndex())
+        return index
+
+    def removeTab(self, index):
+        super().removeTab(index)
+        self.header_bar.removeTab(index)
+
+    def setTabText(self, index, text):
+        super().setTabText(index, text)
+        self.header_bar.setTabText(index, text)
+
+    def setTabToolTip(self, index, tip):
+        super().setTabToolTip(index, tip)
+        self.header_bar.setTabToolTip(index, tip)
+
+    def setTabVisible(self, index, visible):
+        super().setTabVisible(index, visible)
+        self.header_bar.setTabVisible(index, visible)
+
+    def setTabEnabled(self, index, enabled):
+        super().setTabEnabled(index, enabled)
+        self.header_bar.setTabEnabled(index, enabled)
+
+    def setTabIcon(self, index, icon):
+        super().setTabIcon(index, icon)
+        self.header_bar.setTabIcon(index, icon)
 
 
 class SegmentedButtons(QWidget):

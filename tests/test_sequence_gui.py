@@ -1000,10 +1000,12 @@ def test_completed_spin_probe_is_retained_and_can_be_reopened(tmp_path, monkeypa
     window.set_workspace_mode("sequence")
     widget = window.sequence_simulation_widget
     widget.object_source.setCurrentIndex(0)
-    # Dimmed probe buttons say which source they need.
-    assert not widget.run_probe_button.isEnabled()
+    # With another source the probe button selects the spin probe first.
+    assert widget.run_probe_button.isEnabled()
     assert "Spin probe" in widget.run_probe_button.toolTip()
-    widget.object_source.setCurrentIndex(2)
+    assert widget._run_spectral_probe() is False
+    assert widget.object_source.currentIndex() == 2
+    assert "Adjust the settings" in widget.probe_status.text()
     tab_bar = widget.views.tabBar()
     assert not tab_bar.tabTextColor(widget.spin_probe_tab_index).isValid()
     result = SequenceProbeResult(
@@ -1020,6 +1022,13 @@ def test_completed_spin_probe_is_retained_and_can_be_reopened(tmp_path, monkeypa
 
     widget._probe_finished(result, np.array([-100.0, 100.0]), "Hz", "spectral")
     assert tab_bar.tabTextColor(widget.spin_probe_tab_index).isValid()
+    # Open result shows an exported probe in the Spin Probe tab.
+    probe_file = tmp_path / "probe.npz"
+    result.save(probe_file)
+    assert widget.open_result_file(probe_file)
+    assert widget.views.currentIndex() == widget.spin_probe_tab_index
+    assert "probe.npz" in widget.probe_status.text()
+    widget.probe_result = result
 
     retained = window.simulation_explorer.runs
     assert len(retained) == 1
@@ -1656,8 +1665,12 @@ def test_sequence_workspace_scopes_object_controls_to_the_selected_source():
     widget.object_source.setCurrentIndex(0)
     assert widget.probe_group.isHidden()
     assert widget.run_button.isEnabled()
-    assert not widget.run_probe_button.isEnabled()
-    assert not widget.run_geometry_probe_button.isEnabled()
+    # A click switches to the spin probe, so the buttons stay available.
+    assert widget.run_probe_button.isEnabled()
+    assert widget.run_geometry_probe_button.isEnabled()
+    widget.run_geometry_probe_button.click()
+    assert widget.object_source.currentIndex() == 2
+    assert not widget.probe_group.isHidden()
 
     widget.close()
     widget.deleteLater()
@@ -2691,7 +2704,9 @@ def test_sequence_workspace_configures_rf_pulse_for_epi_and_spiral(tmp_path):
     assert widget.program.metadata["definitions"]["RFPulseType"] == "block"
     assert widget.program.metadata["definitions"][
         "RFTimeBandwidthProduct"
-    ] == pytest.approx(1.0)
+    ] == pytest.approx(
+        1.229, abs=0.005
+    )  # block profile FWHM at 35°
 
     designer_raster_s = 10e-6
     designer_samples = 100
@@ -3789,6 +3804,80 @@ def test_sequence_workspace_timeline_cannot_leave_the_sequence():
     widget.gradient_plot.setXRange(-5.0, 30.0, padding=0)
     for plot in (widget.rf_plot, widget.gradient_plot):
         assert plot.getViewBox().viewRange()[0] == pytest.approx([0.0, 20.0])
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_status_reports_lengthened_rf_pulses():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.program = SequenceProgram(
+        (),
+        duration_s=1e-2,
+        source="epi",
+        metadata={
+            "definitions": {
+                "RequestedRFDuration": 3e-3,
+                "RFDuration": 4.25e-3,
+                "RefocusingRequestedRFDuration": 2e-3,
+                "RefocusingRFDuration": 2.000001e-3,
+            }
+        },
+    )
+    widget._sequence_generation_pending = False
+    widget._sequence_generation_failed = False
+
+    widget._refresh_sequence_status()
+
+    text = widget.sequence_status_label.text()
+    assert "RF pulse lengthened 3 → 4.25 ms" in text
+    # Raster rounding of the refocusing pulse is not reported.
+    assert "Refocusing" not in text
+    assert "maximum gradient" in widget.sequence_status_label.toolTip()
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_sequence_workspace_shows_gradient_load_against_scanner_limits():
+    app = QApplication.instance() or QApplication(sys.argv)
+    widget = SequenceSimulationWidget()
+    widget.nucleus.setCurrentText("H1")
+    widget.set_scanner_parameters({"max_grad_mtm": 100.0, "max_slew_tms": 1000.0})
+    gamma = NUCLEUS_GAMMA_HZ_PER_T["H1"]
+    # A 50 mT/m plateau reached in 100 µs ramps at 500 T/m/s: half of both
+    # limits.
+    raster_s = 10e-6
+    ramp = (np.arange(10) + 0.5) / 10 * gamma * 0.05
+    samples = np.concatenate((ramp, np.full(80, gamma * 0.05), ramp[::-1]))
+    widget.program = SequenceProgram(
+        (GradientEvent("z", 1e-3, samples, raster_s),), duration_s=4e-3
+    )
+    widget._acquisition_compiled = None
+
+    widget._show_program()
+
+    assert "Visualization only" in widget.gradient_load_warning.text()
+    summary = widget.gradient_load_summary.text()
+    assert "Peak amplitude 50.0 % (Gz)" in summary
+    assert "peak slew 50.0 % (Gz)" in summary
+    amplitude_item = widget._gradient_load_items["amplitude"]
+    slew_item = widget._gradient_load_items["slew"]
+    assert np.max(amplitude_item.yData) == pytest.approx(50.0)
+    assert np.max(slew_item.yData) == pytest.approx(50.0)
+
+    widget.gradient_plot.setXRange(1.0, 2.0, padding=0)
+    assert widget.gradient_load_plot.getViewBox().viewRange()[0] == pytest.approx(
+        [1.0, 2.0]
+    )
+
+    widget.set_scanner_parameters({"max_grad_mtm": 40.0, "max_slew_tms": 1000.0})
+    assert "Peak amplitude 125.0 % (Gz)" in widget.gradient_load_summary.text()
+
+    widget.gradient_load_toggle.setChecked(False)
+    assert widget.gradient_load_plot.isHidden()
+    assert widget.gradient_load_warning.isHidden()
     widget.close()
     widget.deleteLater()
     app.processEvents()

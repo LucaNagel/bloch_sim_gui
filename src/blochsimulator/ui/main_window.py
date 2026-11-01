@@ -166,7 +166,7 @@ from .styles import (
     ProgressAccent,
     normalize_interface_style,
 )
-from .theme import apply_appearance
+from .theme import apply_appearance, normalize_accent
 
 
 _SYSTEM_STYLE_PROPERTY = "blochSimulatorSystemStyle"
@@ -3366,8 +3366,15 @@ class BlochSimulatorGUI(QMainWindow):
             limit = self.mag_3d.get_max_display_positions()
             if layout.ndim >= 1:
                 pos_idx = layout.grid_indices(limit)
+                axis_counts = (
+                    layout.counts
+                    if layout.ndim > 1 and layout.is_grid
+                    else layout.counts[:1]
+                )
             else:
                 pos_idx = self._display_subsample_indices(npos, limit)
+                axis_counts = (npos,)
+            self.mag_3d.set_position_grid_counts(axis_counts)
             selected = base_vectors[:, pos_idx]
             if mean_only:
                 position_means = selected.mean(axis=2)
@@ -3393,6 +3400,7 @@ class BlochSimulatorGUI(QMainWindow):
             return anim, None, position_means, net, positions_m[pos_idx]
 
         self.mag_3d.set_spatial_groups(None)
+        self.mag_3d.set_position_grid_counts(())
         if mean_only or (npos == 1 and nfreq == 1):
             anim = np.mean(base_vectors, axis=(1, 2))[:, None, :]
             colors = [self._color_tuple(pg.mkColor("c"))]
@@ -6591,6 +6599,10 @@ class BlochSimulatorGUI(QMainWindow):
             self.app_settings.value("interface/style", INTERFACE_STYLE_DEFAULT)
         )
 
+    def _load_accent_color(self) -> str:
+        """Load the persistent accent colour (``""`` keeps the theme's own)."""
+        return normalize_accent(self.app_settings.value("interface/accent_color", ""))
+
     def _load_sequence_section_titles_bold(self) -> bool:
         """Load the application-wide sequence section-heading preference."""
         return bool(
@@ -6608,6 +6620,7 @@ class BlochSimulatorGUI(QMainWindow):
         )
         previous_workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
         previous_interface_style = self._load_interface_style()
+        previous_accent_color = self._load_accent_color()
         previous_sequence_section_titles_bold = (
             self._load_sequence_section_titles_bold()
         )
@@ -6645,6 +6658,7 @@ class BlochSimulatorGUI(QMainWindow):
             scanner_profiles=load_scanner_profiles(self.app_settings),
             workspace_defaults=previous_workspace_defaults,
             interface_style=previous_interface_style,
+            accent_color=previous_accent_color,
             signal_unit=self.app_settings.value("sequence/signal_unit", "physical"),
             sequence_section_titles_bold=previous_sequence_section_titles_bold,
             sequence_timing_visible=self.app_settings.value(
@@ -6682,6 +6696,8 @@ class BlochSimulatorGUI(QMainWindow):
         self.app_settings.setValue("interface/tooltips_enabled", tooltips_enabled)
         interface_style = normalize_interface_style(dialog.interface_style())
         self.app_settings.setValue("interface/style", interface_style)
+        accent_color = normalize_accent(dialog.accent_color())
+        self.app_settings.setValue("interface/accent_color", accent_color)
         signal_unit = normalize_signal_unit(dialog.signal_unit())
         self.app_settings.setValue("sequence/signal_unit", signal_unit)
         sequence_section_titles_bold = bool(dialog.sequence_section_titles_bold())
@@ -6737,12 +6753,14 @@ class BlochSimulatorGUI(QMainWindow):
         self._update_spoiling_analysis_tab_visibility()
         if (
             interface_style != previous_interface_style
+            or accent_color != previous_accent_color
             or interface_style == INTERFACE_STYLE_MATCH_SYSTEM
         ):
             _apply_platform_style(
                 QApplication.instance(),
                 style_mode=interface_style,
                 system_style_name=self._system_style_name,
+                accent=accent_color,
             )
         set_default_memory_policy(policy)
         self._set_tooltips_enabled(tooltips_enabled)
@@ -10822,6 +10840,7 @@ def _apply_platform_style(
     *,
     style_mode=INTERFACE_STYLE_DEFAULT,
     system_style_name=None,
+    accent=None,
 ):
     """Apply the selected appearance: a light or dark theme, or native."""
     return apply_appearance(
@@ -10829,6 +10848,7 @@ def _apply_platform_style(
         style_mode,
         system_style_name=system_style_name,
         platform=platform,
+        accent=accent,
     )
 
 
@@ -10849,6 +10869,7 @@ def main():
         app,
         style_mode=settings.value("interface/style", INTERFACE_STYLE_DEFAULT),
         system_style_name=system_style_name,
+        accent=normalize_accent(settings.value("interface/accent_color", "")),
     )
     install_input_feedback(app)
 
