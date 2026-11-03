@@ -21,6 +21,16 @@ The project follows [Semantic Versioning](https://semver.org/).
 - The Reconstruction Explorer shows spectra in Hz or ppm. A click into the
   spectrum marks that frequency, and the image shows its spatial distribution
   ("Frequency map", on by default) for CSI spectra and EPSI echo spectra.
+- A B0 Field tab between B1 Fields and Receiver / Noise edits the B0 field of
+  any phantom, including the mouse perfusion phantom: a spatial pattern,
+  constant offsets per shape or tissue, and a drift over time for
+  time-resolved phantoms. It replaces the B0 tab of the Phantom Designer.
+
+### Changed
+
+- The Phantom tab opens the mouse perfusion phantom on its anatomy labels.
+- In the Phantom Designer, shapes have the same colour in the XY drag/resize
+  view as in the live 3D preview; the selected shape is lightly shaded.
 
 ## [2.9.7] - 2026-11-01
 

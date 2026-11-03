@@ -494,10 +494,11 @@ def test_budget_context_follows_the_sequence_workspace():
     widget.close()
 
 
-def test_receiver_tab_lives_between_phantom_b1_and_simulations(qt_application):
+def test_receiver_tab_lives_between_b0_and_simulations(qt_application):
     window = BlochSimulatorGUI()
     index = window.receiver_noise_tab_index
-    assert index == window.b1_tab_index + 1
+    assert window.b0_tab_index == window.b1_tab_index + 1
+    assert index == window.b0_tab_index + 1
     assert window.spoiling_analysis_tab_index == index + 1
     assert window.psf_analysis_tab_index == index + 2
     assert window.kspace_tab_index == index + 3

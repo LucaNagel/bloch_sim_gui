@@ -137,6 +137,7 @@ from .default_settings import (
 )
 from .sequence_simulation_widget import SequenceSimulationWidget
 from .receiver_noise_preview import ReceiverNoiseWorkspace
+from .b0_widgets import B0WorkspaceWidget
 from .b1_widgets import B1PhantomCombinationWidget, B1WorkspaceWidget
 from .project_explorer import ProjectExplorerDialog
 from .project_export_dialog import SimulationProjectExportDialog
@@ -1530,6 +1531,17 @@ class BlochSimulatorGUI(QMainWindow):
         self.tab_widget.currentChanged.connect(self._place_b1_combo_workspace)
         self.tab_widget.currentChanged.connect(self._show_default_phantom_preview)
 
+        # === STATIC B0 FIELD TAB ===
+        self.b0_widget = None
+        self.b0_page = QWidget()
+        self.b0_page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        b0_layout = QVBoxLayout(self.b0_page)
+        b0_layout.setContentsMargins(0, 0, 0, 0)
+        b0_layout.addWidget(QLabel("Open this tab to initialize the B0 workspace."))
+        b0_layout.addStretch()
+        self.b0_tab_index = self.tab_widget.addTab(self.b0_page, "B0 Field")
+        self.tab_widget.currentChanged.connect(self._ensure_b0_workspace)
+
         self.receiver_noise_workspace = None
         self.receiver_noise_page = QWidget()
         self.receiver_noise_page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
@@ -2017,6 +2029,25 @@ class BlochSimulatorGUI(QMainWindow):
         )
         self._connect_sequence_b1_display()
 
+    def _ensure_b0_workspace(self, index: int):
+        """Create the B0 editor only when its tab is opened."""
+        if index != getattr(self, "b0_tab_index", -1) or self.b0_widget is not None:
+            return
+        layout = self.b0_page.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        self.b0_widget = B0WorkspaceWidget(self)
+        layout.addWidget(self.b0_widget)
+        self.b0_widget.phantom_updated.connect(self._on_b0_phantom_updated)
+        phantom_widget = getattr(self, "phantom_widget", None)
+        self.b0_widget.set_phantom(
+            None if phantom_widget is None else phantom_widget.current_phantom
+        )
+
     def _b1_combo_subtab_widgets(self):
         """The Phantom and B1 Fields sub-tab bars that hold Phantom + B1."""
         subtabs = [getattr(self, "phantom_subtabs", None), self.b1_subtabs]
@@ -2272,6 +2303,9 @@ class BlochSimulatorGUI(QMainWindow):
         b1_widget = getattr(self, "b1_widget", None)
         if b1_widget is not None:
             b1_widget.set_phantom(phantom)
+        b0_widget = getattr(self, "b0_widget", None)
+        if b0_widget is not None:
+            b0_widget.set_phantom(phantom)
         combo_widget = getattr(self, "b1_combo_widget", None)
         if combo_widget is not None:
             combo_widget.set_phantom(phantom)
@@ -2298,6 +2332,15 @@ class BlochSimulatorGUI(QMainWindow):
         combo_widget = getattr(self, "b1_combo_widget", None)
         if combo_widget is not None:
             combo_widget.set_phantom(phantom)
+
+    def _on_b0_phantom_updated(self, phantom):
+        sequence_widget = getattr(self, "sequence_simulation_widget", None)
+        if sequence_widget is not None:
+            sequence_widget.refresh_object_summary()
+        phantom_widget = getattr(self, "phantom_widget", None)
+        if phantom_widget is not None:
+            # The phantom viewer shows frequency maps that include B0.
+            phantom_widget.refresh_current_phantom_view()
 
     def _connect_sequence_b1_display(self):
         sequence_widget = getattr(self, "sequence_simulation_widget", None)
@@ -2355,6 +2398,10 @@ class BlochSimulatorGUI(QMainWindow):
             "B1 Fields": (
                 "Define, load, stretch, rotate, preview, and apply transmit B1+ "
                 "and receive B1− fields."
+            ),
+            "B0 Field": (
+                "Add a spatial B0 inhomogeneity, per-region B0 offsets and an "
+                "optional drift to the current phantom (designer or mouse)."
             ),
             "Simulations": (
                 "Switch between completed sequence simulations retained for this "
@@ -3602,6 +3649,12 @@ class BlochSimulatorGUI(QMainWindow):
         ):
             self.tab_widget.setCurrentIndex(previous_index)
             return
+        if (
+            previous_index == self.b0_tab_index
+            and index != previous_index
+            and self.b0_widget is not None
+        ):
+            self.b0_widget.confirm_pending_changes()
         free_mode = getattr(self, "workspace_mode", "free") == "free"
         magnetization_active = free_mode and index == self.magnetization_tab_index
         signal_active = free_mode and index == self.signal_tab_index
@@ -6120,6 +6173,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
                 self.b1_tab_index,
+                self.b0_tab_index,
                 self.receiver_noise_tab_index,
                 self.rf_design_tab_index,
             ),
@@ -6354,6 +6408,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
                 self.b1_tab_index,
+                self.b0_tab_index,
                 self.receiver_noise_tab_index,
                 self.spoiling_analysis_tab_index,
                 self.psf_analysis_tab_index,
@@ -6396,6 +6451,7 @@ class BlochSimulatorGUI(QMainWindow):
                 self.sequence_simulation_tab_index,
                 self.phantom_tab_index,
                 self.b1_tab_index,
+                self.b0_tab_index,
                 self.receiver_noise_tab_index,
                 self.psf_analysis_tab_index,
                 self.kspace_tab_index,
@@ -6434,6 +6490,7 @@ class BlochSimulatorGUI(QMainWindow):
                     self.sequence_simulation_tab_index,
                     self.phantom_tab_index,
                     self.b1_tab_index,
+                    self.b0_tab_index,
                     self.receiver_noise_tab_index,
                     self.spoiling_analysis_tab_index,
                     self.psf_analysis_tab_index,
@@ -6447,6 +6504,7 @@ class BlochSimulatorGUI(QMainWindow):
             self._set_main_tab_visible(self.sequence_simulation_tab_index, False)
             self._set_main_tab_visible(self.phantom_tab_index, False)
             self._set_main_tab_visible(self.b1_tab_index, False)
+            self._set_main_tab_visible(self.b0_tab_index, False)
             self._set_main_tab_visible(self.receiver_noise_tab_index, False)
             self._set_main_tab_visible(self.spoiling_analysis_tab_index, False)
             self._set_main_tab_visible(self.psf_analysis_tab_index, False)

@@ -748,7 +748,9 @@ def test_session_simulations_tab_is_next_to_phantom_b1_and_accepts_runs():
     app = QApplication.instance() or QApplication(sys.argv)
     window = BlochSimulatorGUI()
 
-    assert window.receiver_noise_tab_index == window.b1_tab_index + 1
+    assert window.b0_tab_index == window.b1_tab_index + 1
+    assert window.tab_widget.tabText(window.b0_tab_index) == "B0 Field"
+    assert window.receiver_noise_tab_index == window.b0_tab_index + 1
     assert window.spoiling_analysis_tab_index == window.receiver_noise_tab_index + 1
     assert window.psf_analysis_tab_index == window.spoiling_analysis_tab_index + 1
     assert window.kspace_tab_index == window.psf_analysis_tab_index + 1

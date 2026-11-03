@@ -83,6 +83,15 @@ class _SliceScrollViewBox(pg.ViewBox):
         super().wheelEvent(event, axis=axis)
 
 
+def anatomy_label_lookup_table(phantom):
+    """RGBA lookup table of the phantom's tissue labels, None if unknown."""
+    if not hasattr(phantom, "tissue_label_names"):
+        return None
+    from ..mouse_phantom import MOUSE_TISSUE_COLORS
+
+    return np.array([(*color, 255) for color in MOUSE_TISSUE_COLORS], dtype=np.ubyte)
+
+
 class VolumeViewerWidget(QWidget):
     """Show a scalar 3D volume as linked orthogonal planes and a point cloud."""
 
@@ -96,6 +105,8 @@ class VolumeViewerWidget(QWidget):
         self.display_levels = None
         self.color_map = None
         self.lookup_table = None
+        # Slice value shown outside the mask; None uses the lower display level.
+        self.outside_value = None
         self.interpolation = "nearest"
         self._gl_sample_indices = None
         self._gl_sample_positions = None
@@ -492,7 +503,7 @@ class VolumeViewerWidget(QWidget):
         display = np.nan_to_num(
             np.asarray(values, dtype=float),
             copy=True,
-            nan=low,
+            nan=low if self.outside_value is None else self.outside_value,
             posinf=high,
             neginf=low,
         )
@@ -719,11 +730,21 @@ class PhantomInspectorWidget(QWidget):
             getattr(phantom, "config", None), "breathing_enabled", False
         ):
             self.map_combo.addItem("Breathing amplitude")
+        anatomy_index = self.map_combo.findText("Anatomy labels")
+        if anatomy_index >= 0:
+            # Anatomical phantoms open on their tissue labels, the contrast
+            # that identifies the organs.
+            self.map_combo.setCurrentIndex(anatomy_index)
         self.map_combo.blockSignals(False)
         self._map_changed()
         # Updating the volume normally emits an index change, but an already
         # selected centre voxel may not emit one on every Qt backend. Refresh
         # explicitly so a just-loaded phantom always displays its spectrum.
+        self._update_spectrum()
+
+    def refresh(self) -> None:
+        """Redraw the selected map after the phantom changed in place."""
+        self._map_changed()
         self._update_spectrum()
 
     def _frequency_display_changed(self, *_):
@@ -788,6 +809,8 @@ class PhantomInspectorWidget(QWidget):
             return
         choice = self.map_combo.currentText()
         unit = ""
+        levels = None
+        lookup_table = None
         if choice == "Proton density":
             data = self.phantom.pd_map
         elif choice == "T1":
@@ -811,6 +834,9 @@ class PhantomInspectorWidget(QWidget):
         elif choice == "Anatomy labels":
             data = self.phantom.anatomy_labels
             unit = "label"
+            lookup_table = anatomy_label_lookup_table(self.phantom)
+            if lookup_table is not None:
+                levels = (0.0, float(len(lookup_table) - 1))
         elif choice == "pH":
             data = self.phantom.ph_map
             unit = "pH"
@@ -846,6 +872,8 @@ class PhantomInspectorWidget(QWidget):
             fov_m=self.phantom.fov,
             name=choice,
             unit=unit,
+            levels=levels,
+            lookup_table=lookup_table,
         )
 
     def _update_spectrum(self, index=None):
