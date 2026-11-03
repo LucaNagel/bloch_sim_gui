@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import html
 from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QRectF, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QPoint, QRectF, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QCursor, QGuiApplication
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -31,7 +34,10 @@ from PyQt5.QtWidgets import (
 from ..mouse_dce import CONTRAST_AGENTS, TOFTS_TISSUE_NAMES
 from ..mouse_phantom import (
     MOUSE_TISSUE_COLORS,
+    MOUSE_TISSUE_LABELS,
+    RENAL_PH_MODELS,
     TRANSVERSE_DECAY_MODES,
+    URINARY_LUMEN_LABELS,
     MousePerfusionConfig,
     MousePerfusionPhantom,
     build_reference_mouse_anatomy,
@@ -53,6 +59,16 @@ MOUSE_NUCLEI = {
     "C13": "13C (hyperpolarized injection)",
     "H1": "1H (tissue water, contrast-agent DCE)",
 }
+POOL_COLORS = (
+    "#f4a261",
+    "#2a9d8f",
+    "#e76f51",
+    "#8ecae6",
+    "#e9c46a",
+    "#d62828",
+    "#b5838d",
+    "#90be6d",
+)
 
 
 class ClickableImageItem(pg.ImageItem):
@@ -69,14 +85,77 @@ class ClickableImageItem(pg.ImageItem):
         super().mouseClickEvent(event)
 
 
+class AnatomyHoverPopup(QFrame):
+    """Floating tooltip with anatomy properties and a small time course."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setFrameShape(QFrame.StyledPanel)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+        self.label = QLabel()
+        self.label.setTextFormat(Qt.RichText)
+        layout.addWidget(self.label)
+        self.plot = pg.PlotWidget()
+        self.plot.setFixedSize(300, 140)
+        self.plot.setMouseEnabled(False, False)
+        self.plot.hideButtons()
+        self.plot.setLabel("bottom", "Time", "s")
+        self.plot.addLegend(offset=(-4, 4), labelTextSize="7pt")
+        layout.addWidget(self.plot)
+
+    def show_info(self, global_position, info):
+        self.label.setText(info.get("text", ""))
+        self.plot.clear()
+        curves = info.get("curves") or ()
+        self.plot.setVisible(bool(curves))
+        for name, times, values, color in curves:
+            self.plot.plot(times, values, pen=pg.mkPen(color, width=2), name=name)
+        if curves:
+            self.plot.setLabel("left", info.get("unit", ""))
+            time_s = info.get("time_s")
+            if time_s is not None:
+                self.plot.addItem(
+                    pg.InfiniteLine(
+                        float(time_s), angle=90, movable=False, pen=pg.mkPen("w")
+                    )
+                )
+        self.adjustSize()
+        position = global_position + QPoint(18, 18)
+        screen = QGuiApplication.screenAt(global_position)
+        if screen is not None:
+            bounds = screen.availableGeometry()
+            if position.x() + self.width() > bounds.right():
+                position.setX(global_position.x() - self.width() - 18)
+            if position.y() + self.height() > bounds.bottom():
+                position.setY(global_position.y() - self.height() - 18)
+        self.move(position)
+        self.show()
+        self.raise_()
+
+
 class MouseSlicePreviewWidget(QWidget):
-    """Three orthogonal anatomy slices with an optional perfusion overlay."""
+    """Three scrollable orthogonal anatomy slices with a perfusion overlay.
+
+    ``anatomy_slice_provider(orientation, position_m, fast)`` may return the
+    displayed label slice at a physical slice position (high-resolution
+    outlines); otherwise the label volume is sliced. ``hover_info_provider
+    (label, voxel)`` may return ``{"text", "curves", "time_s", "unit"}`` for
+    the hover pop-up.
+    """
 
     voxel_clicked = pyqtSignal(tuple)
 
     _ANATOMY_COLORS = np.asarray(
         [(*color, 255) for color in MOUSE_TISSUE_COLORS], dtype=np.ubyte
     )
+    # Normal axis of the axial, coronal and sagittal slices, and the volume
+    # axes along their horizontal and vertical display axes.
+    _NORMAL_AXES = (2, 1, 0)
+    _DISPLAY_AXES = ((1, 0), (2, 0), (2, 1))
+    _AXIS_NAMES = "xyz"
 
     def __init__(self, *, show_anatomy=True, parent=None):
         super().__init__(parent)
@@ -84,10 +163,13 @@ class MouseSlicePreviewWidget(QWidget):
         self.labels = np.zeros((1, 1, 1), dtype=np.uint8)
         self.perfusion = np.zeros((1, 1, 1), dtype=float)
         self.precomputed_anatomy_slices = None
+        self.anatomy_slice_provider = None
+        self.hover_info_provider = None
         self.selected_voxel = None
         self.fov_m = None
         self.display_extent_m = None
         self.display_center_m = None
+        self.slice_indices = [0, 0, 0]
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.canvas = pg.GraphicsLayoutWidget()
@@ -95,7 +177,9 @@ class MouseSlicePreviewWidget(QWidget):
         self.items = []
         self.plots = []
         self.selection_items = []
-        for column, title in enumerate(("Axial", "Coronal", "Sagittal")):
+        self.slice_lines = []
+        titles = ("Axial", "Coronal", "Sagittal")
+        for column, title in enumerate(titles):
             plot = self.canvas.addPlot(row=0, col=column, title=title)
             plot.setAspectLocked(True)
             plot.hideAxis("left")
@@ -126,6 +210,22 @@ class MouseSlicePreviewWidget(QWidget):
             )
             selection_item.setZValue(30)
             plot.addItem(selection_item)
+            # Dashed lines mark where the other two slices cut this one.
+            lines = {}
+            for other in range(3):
+                normal = self._NORMAL_AXES[other]
+                if normal not in self._DISPLAY_AXES[column]:
+                    continue
+                angle = 90 if normal == self._DISPLAY_AXES[column][0] else 0
+                line = pg.InfiniteLine(
+                    angle=angle,
+                    movable=False,
+                    pen=pg.mkPen(255, 255, 255, 110, width=1, style=Qt.DashLine),
+                )
+                line.setZValue(15)
+                plot.addItem(line)
+                lines[other] = line
+            self.slice_lines.append(lines)
             self.plots.append(plot)
             self.items.append((anatomy_item, perfusion_item))
             self.selection_items.append(selection_item)
@@ -141,23 +241,182 @@ class MouseSlicePreviewWidget(QWidget):
             plot.addItem(item)
             self.fov_items.append(item)
 
-    @staticmethod
-    def _slices(volume):
-        nx, ny, nz = volume.shape
-        return (
-            np.asarray(volume[:, :, nz // 2]).T,
-            np.asarray(volume[:, ny // 2, :]).T,
-            np.asarray(volume[nx // 2, :, :]).T,
+        slider_row = QHBoxLayout()
+        slider_row.setContentsMargins(4, 0, 4, 0)
+        self.slice_sliders = []
+        self.slice_labels = []
+        for column, title in enumerate(titles):
+            label = QLabel()
+            label.setMinimumWidth(118)
+            slider = QSlider(Qt.Horizontal)
+            slider.setToolTip(f"Scroll through the {title.lower()} slices")
+            slider.valueChanged.connect(
+                lambda value, orientation=column: self._slice_slider_changed(
+                    orientation, value
+                )
+            )
+            slider_row.addWidget(label)
+            slider_row.addWidget(slider, 1)
+            self.slice_sliders.append(slider)
+            self.slice_labels.append(label)
+        layout.addLayout(slider_row)
+        self._slice_refine_timer = QTimer(self)
+        self._slice_refine_timer.setSingleShot(True)
+        self._slice_refine_timer.setInterval(250)
+        self._slice_refine_timer.timeout.connect(self._refine_slices)
+        self._unrefined_slices = set()
+
+        self.hover_popup = AnatomyHoverPopup(self)
+        self.hover_popup.hide()
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(120)
+        self._hover_timer.timeout.connect(self._show_hover)
+        self._pending_hover = None
+        self._shown_hover = None
+        self.canvas.scene().sigMouseMoved.connect(self._mouse_moved)
+        self.canvas.viewport().installEventFilter(self)
+        self._update_slice_ranges(reset=True)
+
+    def _slices(self, volume):
+        """Return the current axial, coronal and sagittal slices of a volume."""
+
+        result = []
+        for orientation, normal in enumerate(self._NORMAL_AXES):
+            index = self.slice_indices[orientation]
+            if 0 <= index < volume.shape[normal]:
+                plane = np.take(volume, index, axis=normal)
+            else:
+                shape = [n for axis, n in enumerate(volume.shape) if axis != normal]
+                plane = np.zeros(shape, dtype=volume.dtype)
+            result.append(np.asarray(plane).T)
+        return tuple(result)
+
+    def _anatomy_slices(self):
+        if self.precomputed_anatomy_slices is None:
+            return self._slices(self.labels)
+        return self.precomputed_anatomy_slices
+
+    def _voxel_size(self, axis):
+        if self.fov_m is None:
+            return 1.0
+        return float(self.fov_m[axis]) / self.labels.shape[axis]
+
+    def slice_position_m(self, orientation):
+        """Return the physical position of one slice (voxel units without FOV)."""
+
+        normal = self._NORMAL_AXES[orientation]
+        index = self.slice_indices[orientation]
+        if self.fov_m is None:
+            return index + 0.5
+        return (index + 0.5) * self._voxel_size(normal) - 0.5 * self.fov_m[normal]
+
+    def _slice_index_range(self, orientation):
+        normal = self._NORMAL_AXES[orientation]
+        count = self.labels.shape[normal]
+        if self.fov_m is None or self.display_extent_m is None:
+            return 0, count - 1
+        step = self._voxel_size(normal)
+        center = 0.0 if self.display_center_m is None else self.display_center_m[normal]
+        half = 0.5 * self.display_extent_m[normal]
+        offset = 0.5 * self.fov_m[normal]
+        lower = int(np.ceil((center - half + offset) / step - 0.5 - 1e-9))
+        upper = int(np.floor((center + half + offset) / step - 0.5 + 1e-9))
+        return min(lower, 0), max(upper, count - 1)
+
+    def _update_slice_ranges(self, reset=False):
+        for orientation, slider in enumerate(self.slice_sliders):
+            lower, upper = self._slice_index_range(orientation)
+            if reset:
+                index = self.labels.shape[self._NORMAL_AXES[orientation]] // 2
+            else:
+                index = self.slice_indices[orientation]
+            self.slice_indices[orientation] = int(np.clip(index, lower, upper))
+            slider.blockSignals(True)
+            slider.setRange(lower, upper)
+            slider.setValue(self.slice_indices[orientation])
+            slider.blockSignals(False)
+            self._update_slice_label(orientation)
+
+    def _update_slice_label(self, orientation):
+        normal = self._NORMAL_AXES[orientation]
+        position = self.slice_position_m(orientation)
+        text = f"{self._AXIS_NAMES[normal]} = "
+        if self.fov_m is None:
+            text += f"{self.slice_indices[orientation]}"
+        else:
+            text += f"{1e3 * position:+.1f} mm"
+        if not 0 <= self.slice_indices[orientation] < self.labels.shape[normal]:
+            text += " (outside FOV)"
+        self.slice_labels[orientation].setText(text)
+
+    def set_slice_index(self, orientation, index):
+        """Move one slice to a voxel index along its normal axis."""
+
+        self.slice_sliders[orientation].setValue(int(index))
+
+    def _slice_slider_changed(self, orientation, value):
+        if value == self.slice_indices[orientation]:
+            return
+        self.slice_indices[orientation] = int(value)
+        self._update_slice_label(orientation)
+        if (
+            self.anatomy_slice_provider is not None
+            and self.precomputed_anatomy_slices is not None
+        ):
+            # A coarse slice follows the slider at once; the high-resolution
+            # outline replaces it once scrolling pauses.
+            self._replace_anatomy_slice(orientation, fast=True)
+            self._unrefined_slices.add(orientation)
+            self._slice_refine_timer.start()
+        self._render()
+
+    def _replace_anatomy_slice(self, orientation, fast):
+        values = self.anatomy_slice_provider(
+            orientation, self.slice_position_m(orientation), fast
+        )
+        slices = list(self.precomputed_anatomy_slices)
+        slices[orientation] = np.asarray(values, dtype=np.uint8)
+        self.precomputed_anatomy_slices = tuple(slices)
+
+    def _refine_slices(self):
+        if (
+            self.anatomy_slice_provider is None
+            or self.precomputed_anatomy_slices is None
+        ):
+            self._unrefined_slices.clear()
+            return
+        for orientation in sorted(self._unrefined_slices):
+            self._replace_anatomy_slice(orientation, fast=False)
+        self._unrefined_slices.clear()
+        self._render()
+
+    def refresh_anatomy_slices(self):
+        """Fetch all three displayed slices from ``anatomy_slice_provider``."""
+
+        if self.anatomy_slice_provider is None:
+            return
+        self._slice_refine_timer.stop()
+        self._unrefined_slices.clear()
+        self.set_anatomy_slices(
+            *(
+                self.anatomy_slice_provider(
+                    orientation, self.slice_position_m(orientation), False
+                )
+                for orientation in range(3)
+            )
         )
 
     def set_anatomy(self, labels):
         values = np.asarray(labels, dtype=np.uint8)
         if values.ndim != 3:
             raise ValueError("mouse anatomy preview requires a 3D label volume")
+        reset = values.shape != self.labels.shape
         self.labels = values
         self.precomputed_anatomy_slices = None
         if self.perfusion.shape != values.shape:
             self.perfusion = np.zeros(values.shape, dtype=float)
+        self._update_slice_ranges(reset=reset)
         self._render()
 
     def set_anatomy_slices(self, axial, coronal, sagittal):
@@ -192,6 +451,7 @@ class MouseSlicePreviewWidget(QWidget):
             (0.0, 0.0, 0.0) if display_center_m is None else display_center_m,
             dtype=float,
         )
+        self._update_slice_ranges()
         self._render()
 
     @staticmethod
@@ -213,6 +473,11 @@ class MouseSlicePreviewWidget(QWidget):
     def _image_clicked(self, orientation, image_x, image_y):
         voxel = self._voxel_for_image_position(orientation, image_x, image_y)
         if voxel is not None:
+            # Like an orthogonal viewer, the other two slices follow the
+            # clicked voxel.
+            for other, normal in enumerate(self._NORMAL_AXES):
+                if other != orientation:
+                    self.set_slice_index(other, voxel[normal])
             self.set_selected_voxel(voxel)
             self.voxel_clicked.emit(voxel)
 
@@ -280,22 +545,34 @@ class MouseSlicePreviewWidget(QWidget):
                 [bottom, bottom, top, top, bottom],
             )
 
+    def _update_slice_lines(self, anatomy_slices):
+        for orientation, lines in enumerate(self.slice_lines):
+            displayed = anatomy_slices[orientation].shape
+            for other, line in lines.items():
+                normal = self._NORMAL_AXES[other]
+                if self.fov_m is not None:
+                    line.setValue(self.slice_position_m(other))
+                    continue
+                display_axis = self._DISPLAY_AXES[orientation].index(normal)
+                scale = displayed[display_axis] / self.labels.shape[normal]
+                line.setValue((self.slice_indices[other] + 0.5) * scale)
+
     def _voxel_for_image_position(self, orientation, image_x, image_y):
         """Map an orthogonal preview position to a simulation voxel."""
 
-        nx, ny, nz = self.labels.shape
-        anatomy_slices = (
-            self._slices(self.labels)
-            if self.precomputed_anatomy_slices is None
-            else self.precomputed_anatomy_slices
-        )
+        normal = self._NORMAL_AXES[orientation]
+        index = self.slice_indices[orientation]
+        if not 0 <= index < self.labels.shape[normal]:
+            return None
+        anatomy_slices = self._anatomy_slices()
         height, width = anatomy_slices[orientation].shape
         first = int(np.floor(image_x * height / max(height, 1)))
         second = int(np.floor(image_y * width / max(width, 1)))
         if not (0 <= first < height and 0 <= second < width):
             return None
-        source_shapes = self._slices(self.labels)
-        source_height, source_width = source_shapes[orientation].shape
+        horizontal_axis, vertical_axis = self._DISPLAY_AXES[orientation]
+        source_height = self.labels.shape[horizontal_axis]
+        source_width = self.labels.shape[vertical_axis]
         if (
             self.fov_m is not None
             and self.display_extent_m is not None
@@ -330,11 +607,11 @@ class MouseSlicePreviewWidget(QWidget):
         elif self.precomputed_anatomy_slices is not None:
             first = min(int(first * source_height / height), source_height - 1)
             second = min(int(second * source_width / width), source_width - 1)
-        if orientation == 0:
-            return (second, first, nz // 2)
-        if orientation == 1:
-            return (second, ny // 2, first)
-        return (nx // 2, second, first)
+        voxel = [0, 0, 0]
+        voxel[normal] = index
+        voxel[horizontal_axis] = first
+        voxel[vertical_axis] = second
+        return tuple(voxel)
 
     def set_selected_voxel(self, voxel):
         self.selected_voxel = None if voxel is None else tuple(int(v) for v in voxel)
@@ -344,30 +621,21 @@ class MouseSlicePreviewWidget(QWidget):
             return
         x, y, z = self.selected_voxel
         points = ((y, x), (z, x), (z, y))
-        source_shapes = self._slices(self.labels)
-        anatomy_slices = (
-            source_shapes
-            if self.precomputed_anatomy_slices is None
-            else self.precomputed_anatomy_slices
-        )
+        source_shapes = [
+            tuple(self.labels.shape[axis] for axis in axes)
+            for axes in self._DISPLAY_AXES
+        ]
+        anatomy_slices = self._anatomy_slices()
         for orientation, (marker, point, source, displayed) in enumerate(
             zip(self.selection_items, points, source_shapes, anatomy_slices)
         ):
             if self.fov_m is not None:
                 fov_extent = self._oriented_extents(self.fov_m)[orientation]
-                display_first = ((point[0] + 0.5) / source.shape[0] - 0.5) * fov_extent[
-                    0
-                ]
-                display_second = (
-                    (point[1] + 0.5) / source.shape[1] - 0.5
-                ) * fov_extent[1]
+                display_first = ((point[0] + 0.5) / source[0] - 0.5) * fov_extent[0]
+                display_second = ((point[1] + 0.5) / source[1] - 0.5) * fov_extent[1]
             else:
-                display_first = (point[0] + 0.5) * (
-                    displayed.shape[0] / source.shape[0]
-                )
-                display_second = (point[1] + 0.5) * (
-                    displayed.shape[1] / source.shape[1]
-                )
+                display_first = (point[0] + 0.5) * (displayed.shape[0] / source[0])
+                display_second = (point[1] + 0.5) * (displayed.shape[1] / source[1])
             marker.setData(
                 pos=np.asarray(
                     [[float(display_first), float(display_second)]], dtype=float
@@ -375,11 +643,7 @@ class MouseSlicePreviewWidget(QWidget):
             )
 
     def _render(self):
-        anatomy_slices = (
-            self._slices(self.labels)
-            if self.precomputed_anatomy_slices is None
-            else self.precomputed_anatomy_slices
-        )
+        anatomy_slices = self._anatomy_slices()
         perfusion_slices = self._slices(self.perfusion)
         high = float(np.nanmax(self.perfusion)) if self.perfusion.size else 0.0
         high = max(high, np.finfo(float).eps)
@@ -392,7 +656,9 @@ class MouseSlicePreviewWidget(QWidget):
                 perfusion, orientation, anatomy.shape
             )
             base = anatomy if self.show_anatomy else np.zeros_like(anatomy)
-            anatomy_item.setImage(base, autoLevels=False, levels=(0, 14))
+            anatomy_item.setImage(
+                base, autoLevels=False, levels=(0, len(MOUSE_TISSUE_COLORS) - 1)
+            )
             perfusion_item.setImage(
                 np.nan_to_num(perfusion), autoLevels=False, levels=(0.0, high)
             )
@@ -408,8 +674,66 @@ class MouseSlicePreviewWidget(QWidget):
                 anatomy_item.setRect(rect)
                 perfusion_item.setRect(rect)
         self._update_fov_boxes(anatomy_slices)
+        self._update_slice_lines(anatomy_slices)
         if self.selected_voxel is not None:
             self.set_selected_voxel(self.selected_voxel)
+
+    def hover_target(self, scene_position):
+        """Return ``(label, voxel)`` under a scene position, or ``None``."""
+
+        anatomy_slices = self._anatomy_slices()
+        for orientation, (plot, (anatomy_item, _)) in enumerate(
+            zip(self.plots, self.items)
+        ):
+            if not plot.vb.sceneBoundingRect().contains(scene_position):
+                continue
+            local = anatomy_item.mapFromScene(scene_position)
+            displayed = anatomy_slices[orientation]
+            first, second = int(np.floor(local.x())), int(np.floor(local.y()))
+            if not (
+                0 <= first < displayed.shape[0] and 0 <= second < displayed.shape[1]
+            ):
+                return None
+            voxel = self._voxel_for_image_position(orientation, local.x(), local.y())
+            return int(displayed[first, second]), voxel
+        return None
+
+    def _mouse_moved(self, scene_position):
+        target = self.hover_target(scene_position)
+        if target is None or (target[0] == 0 and target[1] is None):
+            self.hide_hover()
+            return
+        if target == self._shown_hover and self.hover_popup.isVisible():
+            return
+        self._pending_hover = target
+        self._hover_timer.start()
+
+    def _show_hover(self):
+        if self._pending_hover is None:
+            return
+        label, voxel = self._pending_hover
+        info = None
+        if self.hover_info_provider is not None:
+            info = self.hover_info_provider(label, voxel)
+        if info is None:
+            info = {"text": f"<b>{MOUSE_TISSUE_LABELS.get(label, label)}</b>"}
+        self._shown_hover = self._pending_hover
+        self.hover_popup.show_info(QCursor.pos(), info)
+
+    def hide_hover(self):
+        self._hover_timer.stop()
+        self._pending_hover = None
+        self._shown_hover = None
+        self.hover_popup.hide()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Leave:
+            self.hide_hover()
+        return super().eventFilter(watched, event)
+
+    def hideEvent(self, event):
+        self.hide_hover()
+        super().hideEvent(event)
 
 
 class MousePhantomDesignerDialog(ExplicitAcceptDialog):
@@ -438,6 +762,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.phantom = None
         self._selected_voxel = None
         self._anatomy_slice_cache = {}
+        self._hover_curve_cache = {}
+        self._display_extent_m = None
+        self._display_center_m = None
         self._animation_bounds_s = (0.0, 1.0)
         self._animation_timer = QTimer(self)
         self._animation_timer.setInterval(50)
@@ -781,9 +1108,25 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             "Mean residence of urine in each well-mixed ureter before it "
             "drains into the bladder. 0 passes urine straight to the bladder."
         )
+        self.renal_pelvis_enabled = QCheckBox("Renal pelvis compartment")
+        self.renal_pelvis_enabled.setToolTip(
+            "Collect urine in a well-mixed renal pelvis inside each kidney "
+            "(at the hilum) before it enters the ureter. The pelvis carries the "
+            "urine pH and lies in the same slices as the kidneys."
+        )
+        self.renal_pelvis_transit = self._float_spin(
+            0.0, 10000.0, decimals=2, suffix=" s", step=1.0
+        )
+        self.renal_pelvis_transit.setToolTip(
+            "Mean residence of urine in each well-mixed renal pelvis. "
+            "0 passes urine straight on to the ureter."
+        )
+        self.renal_pelvis_enabled.toggled.connect(self.renal_pelvis_transit.setEnabled)
         clearance_form.addRow("Tissue clearance", self.tissue_clearance)
         clearance_form.addRow("Renal excretion", self.renal_excretion)
         clearance_form.addRow("Tubular transit", self.renal_tubular_transit)
+        clearance_form.addRow(self.renal_pelvis_enabled)
+        clearance_form.addRow("Pelvis transit", self.renal_pelvis_transit)
         clearance_form.addRow("Ureter transit", self.ureter_transit)
         injection_controls_layout.addWidget(clearance_group)
 
@@ -948,6 +1291,61 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.ph_spins[key] = spin
             ph_grid.addWidget(spin, row, 1)
         kidney_layout.addWidget(ph_group)
+
+        nephron_group = QGroupBox("Renal pH model")
+        nephron_form = QFormLayout(nephron_group)
+        self.renal_ph_model = QComboBox()
+        for key, label in RENAL_PH_MODELS.items():
+            self.renal_ph_model.addItem(label, key)
+        self.renal_ph_model.setToolTip(
+            "Regional: one pH per cortex, medulla and urine region.\n"
+            "Nephron segments (Z-OMPD only): excreted Z-OMPD fills proximal "
+            "and distal tubular fluid pools with their own pH and shift, "
+            "placed in cortex, outer and inner medulla by the time it spends "
+            "in each nephron segment."
+        )
+        self.renal_ph_model.setMaximumWidth(300)
+        nephron_form.addRow("Model", self.renal_ph_model)
+        self.nephron_ph_spins = {}
+        for key, label, tooltip in (
+            (
+                "proximal_tubule",
+                "Proximal tubule fluid",
+                "Proximal tubule and descending limb fluid; stays close to "
+                "plasma pH (Layton & Layton 2019: 7.4 → ~7.0).",
+            ),
+            (
+                "distal_tubule",
+                "Distal tubule + collecting duct",
+                "Thick ascending limb, distal tubule and collecting duct "
+                "fluid, acidified towards urine. Renal pelvis, ureters and "
+                "bladder keep the urine pH.",
+            ),
+            (
+                "papilla_interstitial",
+                "Papillary interstitium",
+                "Extracellular pH at the papilla tip; the medulla's "
+                "extracellular pH falls to it from the cortex value.",
+            ),
+        ):
+            spin = self._float_spin(0.0, 14.0, decimals=3, step=0.05)
+            spin.setMaximumWidth(300)
+            spin.setToolTip(tooltip)
+            self.nephron_ph_spins[key] = spin
+            nephron_form.addRow(label, spin)
+        nephron_note = QLabel(
+            "Nephron segments follow Layton & Layton (2019, Fig. 3F) and "
+            "Bokacheva (2009): the kidney holds plasma-pH extracellular "
+            "fluid next to acidifying tubular fluid, so medulla voxels show "
+            "a near-plasma and an acidic Z-OMPD peak instead of one medulla "
+            "pH. It adds four Z-OMPD pools; the medulla pH rows are unused."
+        )
+        nephron_note.setWordWrap(True)
+        nephron_form.addRow(nephron_note)
+        self.renal_ph_model.currentIndexChanged.connect(
+            self._update_renal_ph_model_controls
+        )
+        kidney_layout.addWidget(nephron_group)
         ph_help = QLabel(
             "pH is stored as ground truth and shown in the preview. For Z-OMPD "
             "it sets the voxelwise C5 and C1 shifts via the Grashei titration "
@@ -1026,6 +1424,22 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         combined_layout.addWidget(time_help)
         self.combined_preview = MouseSlicePreviewWidget(show_anatomy=True)
         self.combined_preview.voxel_clicked.connect(self._voxel_selected)
+        self.anatomy_preview.anatomy_slice_provider = (
+            lambda orientation, position, fast: self._anatomy_slice(
+                self.anatomy_resolution, orientation, position, fast
+            )
+        )
+        self.combined_preview.anatomy_slice_provider = (
+            lambda orientation, position, fast: self._anatomy_slice(
+                self.combined_anatomy_resolution, orientation, position, fast
+            )
+        )
+        for preview in (
+            self.anatomy_preview,
+            self.perfusion_preview,
+            self.combined_preview,
+        ):
+            preview.hover_info_provider = self._anatomy_hover_info
         combined_layout.addWidget(self.combined_preview, 1)
         self.voxel_spectrum_label = QLabel(
             "Click an anatomy slice to inspect the local dynamic spectrum."
@@ -1199,6 +1613,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.contrast_agent.currentIndexChanged.connect(self._schedule_live_preview)
         self.body_mass.valueChanged.connect(self._update_dose_label)
         self.transverse_decay.currentIndexChanged.connect(self._schedule_live_preview)
+        self.renal_ph_model.currentIndexChanged.connect(self._schedule_live_preview)
         self.injection_concentration.valueChanged.connect(self._update_dose_label)
         self.injection_volume.valueChanged.connect(self._update_dose_label)
         self.injection_polarization.valueChanged.connect(self._update_dose_label)
@@ -1223,6 +1638,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.tissue_clearance,
             self.renal_excretion,
             self.renal_tubular_transit,
+            self.renal_pelvis_transit,
             self.ureter_transit,
             self.background_perfusion,
             self.cortex_perfusion,
@@ -1238,6 +1654,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             self.brain_kpl,
             self.brain_kpa,
             *self.ph_spins.values(),
+            *self.nephron_ph_spins.values(),
             self.breathing_rate,
             self.breathing_amplitude,
             self.breathing_phase,
@@ -1246,6 +1663,14 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         for control in controls:
             control.valueChanged.connect(self._schedule_live_preview)
         self.breathing_enabled.toggled.connect(self._schedule_live_preview)
+        self.renal_pelvis_enabled.toggled.connect(self._schedule_live_preview)
+
+    def _update_renal_ph_model_controls(self, *_):
+        nephron = self.renal_ph_model.currentData() == "nephron"
+        for spin in self.nephron_ph_spins.values():
+            spin.setEnabled(nephron)
+        for key in ("left_medulla", "right_medulla"):
+            self.ph_spins[key].setEnabled(not nephron)
 
     def _schedule_live_preview(self, *_):
         self._update_injection_summary()
@@ -1316,6 +1741,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.tissue_clearance.setValue(config.tissue_clearance_s_inv)
         self.renal_excretion.setValue(config.renal_excretion_s_inv)
         self.renal_tubular_transit.setValue(config.renal_tubular_transit_s)
+        self.renal_pelvis_enabled.setChecked(config.renal_pelvis_enabled)
+        self.renal_pelvis_transit.setValue(config.renal_pelvis_transit_s)
+        self.renal_pelvis_transit.setEnabled(config.renal_pelvis_enabled)
         self.ureter_transit.setValue(config.ureter_transit_s)
         self.background_perfusion.setValue(config.background_perfusion_weight)
         self.cortex_perfusion.setValue(config.renal_cortex_perfusion_weight)
@@ -1340,6 +1768,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         self.ph_spins["right_medulla"].setValue(config.right_medulla_ph)
         self.ph_spins["blood"].setValue(config.blood_ph)
         self.ph_spins["urine"].setValue(config.urine_ph)
+        self.renal_ph_model.setCurrentIndex(
+            max(0, self.renal_ph_model.findData(config.renal_ph_model))
+        )
+        for key, spin in self.nephron_ph_spins.items():
+            spin.setValue(getattr(config, f"{key}_ph"))
+        self._update_renal_ph_model_controls()
         self.breathing_enabled.setChecked(config.breathing_enabled)
         self.breathing_rate.setValue(config.breathing_rate_hz)
         self.breathing_amplitude.setValue(config.breathing_amplitude_mm)
@@ -1420,6 +1854,8 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             tissue_clearance_s_inv=self.tissue_clearance.value(),
             renal_excretion_s_inv=self.renal_excretion.value(),
             renal_tubular_transit_s=self.renal_tubular_transit.value(),
+            renal_pelvis_enabled=self.renal_pelvis_enabled.isChecked(),
+            renal_pelvis_transit_s=self.renal_pelvis_transit.value(),
             ureter_transit_s=self.ureter_transit.value(),
             background_perfusion_weight=self.background_perfusion.value(),
             renal_cortex_perfusion_weight=self.cortex_perfusion.value(),
@@ -1444,6 +1880,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             right_medulla_ph=self.ph_spins["right_medulla"].value(),
             blood_ph=self.ph_spins["blood"].value(),
             urine_ph=self.ph_spins["urine"].value(),
+            renal_ph_model=str(self.renal_ph_model.currentData()),
+            proximal_tubule_ph=self.nephron_ph_spins["proximal_tubule"].value(),
+            distal_tubule_ph=self.nephron_ph_spins["distal_tubule"].value(),
+            papilla_interstitial_ph=self.nephron_ph_spins[
+                "papilla_interstitial"
+            ].value(),
             breathing_enabled=self.breathing_enabled.isChecked(),
             breathing_rate_hz=self.breathing_rate.value(),
             breathing_amplitude_mm=self.breathing_amplitude.value(),
@@ -1509,6 +1951,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             return
         self.phantom = phantom
         self._voxel_pool_curves = None
+        self._hover_curve_cache = {}
         self.voxel_spectrum_plot.setXRange(
             phantom.spectral_window_center_ppm - 0.5 * phantom.spectral_bandwidth_ppm,
             phantom.spectral_window_center_ppm + 0.5 * phantom.spectral_bandwidth_ppm,
@@ -1723,76 +2166,199 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         mouse_offset = np.asarray(self.phantom.config.mouse_offset_m, dtype=float)
         display_lower = np.minimum(-0.5 * fov, mouse_offset - 0.5 * mouse_size)
         display_upper = np.maximum(0.5 * fov, mouse_offset + 0.5 * mouse_size)
-        display_extent = tuple(display_upper - display_lower)
-        display_center = tuple(0.5 * (display_lower + display_upper))
-        self.anatomy_preview.set_display_geometry(
-            self.phantom.fov, display_extent, display_center
-        )
-        self.combined_preview.set_display_geometry(
-            self.phantom.fov, display_extent, display_center
-        )
-        slices_by_scale = {}
-        for widget, resolution in (
-            (self.anatomy_preview, self.anatomy_resolution.currentData()),
-            (self.combined_preview, self.combined_anatomy_resolution.currentData()),
-        ):
-            scale = 8 if resolution == "hd" else 1
-            if scale not in slices_by_scale:
-                slices_by_scale[scale] = self._build_anatomy_slices(
-                    scale, display_extent, display_center
-                )
-            widget.set_anatomy_slices(*slices_by_scale[scale])
+        self._display_extent_m = tuple(display_upper - display_lower)
+        self._display_center_m = tuple(0.5 * (display_lower + display_upper))
+        for widget in (self.anatomy_preview, self.combined_preview):
+            widget.set_display_geometry(
+                self.phantom.fov, self._display_extent_m, self._display_center_m
+            )
+            widget.refresh_anatomy_slices()
 
-    def _build_anatomy_slices(self, scale, display_extent, display_center):
+    def _anatomy_slice(self, resolution_combo, orientation, position_m, fast=False):
+        """Return one displayed label slice at a physical slice position."""
+
+        if self.phantom is None or self._display_extent_m is None:
+            raise RuntimeError("anatomy slices need a previewed phantom")
+        scale = 8 if resolution_combo.currentData() == "hd" and not fast else 1
         # Rasterising the HD outline slices dominates the live preview, but
         # they only depend on the geometry, not on the injection parameters.
         key = (
+            int(orientation),
             int(scale),
+            round(float(position_m), 9),
             tuple(int(n) for n in self.phantom.shape),
-            tuple(float(v) for v in display_extent),
-            tuple(float(v) for v in display_center),
+            tuple(float(v) for v in self._display_extent_m),
+            tuple(float(v) for v in self._display_center_m),
             tuple(float(v) for v in self.phantom.config.mouse_size_m),
             tuple(float(v) for v in self.phantom.config.mouse_offset_m),
+            bool(self.phantom.config.renal_pelvis_enabled),
         )
         cache = self._anatomy_slice_cache
         if key not in cache:
-            if len(cache) >= 4:
+            if len(cache) >= 48:
                 cache.pop(next(iter(cache)))
-            cache[key] = self._rasterise_anatomy_slices(
-                scale, display_extent, display_center
-            )
+            cache[key] = self._rasterise_anatomy_slice(orientation, scale, position_m)
         return cache[key]
 
-    def _rasterise_anatomy_slices(self, scale, display_extent, display_center):
-        nx, ny, nz = self.phantom.shape
-        kwargs = {
-            "graph": self.phantom.vascular_graph,
-            "mouse_size_m": self.phantom.config.mouse_size_m,
-            "mouse_offset_m": self.phantom.config.mouse_offset_m,
+    def _rasterise_anatomy_slice(self, orientation, scale, position_m):
+        normal = MouseSlicePreviewWidget._NORMAL_AXES[orientation]
+        shape = [int(n) * int(scale) for n in self.phantom.shape]
+        shape[normal] = 1
+        center = list(self._display_center_m)
+        center[normal] = float(position_m)
+        labels, _, _ = build_reference_mouse_anatomy(
+            tuple(shape),
+            self._display_extent_m,
+            grid_center_m=tuple(center),
+            graph=self.phantom.vascular_graph,
+            mouse_size_m=self.phantom.config.mouse_size_m,
+            mouse_offset_m=self.phantom.config.mouse_offset_m,
+            renal_pelvis=self.phantom.config.renal_pelvis_enabled,
+        )
+        return np.take(labels, 0, axis=normal).T
+
+    def _absolute_shift_ppm(self, pool_name, voxel):
+        """Return a pool's absolute chemical shift in one voxel."""
+
+        phantom = self.phantom
+        shift = phantom.spectral_reference_ppm + phantom.get_frequency_offset_ppm(
+            pool_name
+        )
+        shift_map = (phantom.chemical_shift_maps_ppm or {}).get(pool_name)
+        if shift_map is not None and voxel is not None:
+            shift += float(shift_map[voxel])
+        return shift
+
+    def _perfusion_weight_at(self, voxel):
+        """Return the configured perfusion weight of one voxel."""
+
+        phantom = self.phantom
+        config = phantom.config
+        label = int(phantom.anatomy_labels[voxel])
+        if label == 0 or label in URINARY_LUMEN_LABELS:
+            return 0.0
+        if phantom.arterial_mask[voxel] or phantom.venous_mask[voxel]:
+            return config.vessel_perfusion_weight
+        return {
+            2: config.renal_cortex_perfusion_weight,
+            3: config.renal_medulla_perfusion_weight,
+            4: config.renal_cortex_perfusion_weight,
+            5: config.renal_medulla_perfusion_weight,
+            6: config.liver_perfusion_weight,
+            8: config.heart_perfusion_weight,
+            11: config.brain_perfusion_weight,
+        }.get(label, config.background_perfusion_weight)
+
+    def _hover_curves(self, voxel):
+        phantom = self.phantom
+        if voxel is None or phantom.pyruvate_inflow is None:
+            return ()
+        curves = self._hover_curve_cache.get(voxel)
+        if curves is None:
+            start, end = self._animation_bounds_s
+            times = np.linspace(start, end, 240)
+            values = phantom.preview_pool_curves_at(voxel, times)
+            curves = tuple(
+                (pool.name, times, np.asarray(values[pool.name], dtype=float), color)
+                for pool, color in zip(phantom.pools, POOL_COLORS)
+                if np.any(np.asarray(values[pool.name]) > 0)
+            )
+            if len(self._hover_curve_cache) >= 64:
+                self._hover_curve_cache.pop(next(iter(self._hover_curve_cache)))
+            self._hover_curve_cache[voxel] = curves
+        return curves
+
+    def _anatomy_hover_info(self, label, voxel):
+        """Describe the tissue under the cursor for the anatomy hover pop-up."""
+
+        phantom = self.phantom
+        if phantom is None:
+            return None
+        names = phantom.tissue_label_names
+        config = phantom.config
+        lines = [f"<b>{html.escape(names.get(label, str(label)))}</b>"]
+        if voxel is None:
+            lines.append("<i>Outside the simulated FOV</i>")
+            return {"text": "<br>".join(lines)}
+        voxel_label = int(phantom.anatomy_labels[voxel])
+        lines.append(
+            f"Voxel {voxel}"
+            + (
+                f" · simulated as {html.escape(names.get(voxel_label, '?'))}"
+                if voxel_label != label
+                else ""
+            )
+        )
+        if voxel_label == 0:
+            return {"text": "<br>".join(lines)}
+        details = []
+        tissue_water = phantom.pyruvate_inflow is None
+        if not tissue_water:
+            details.append(f"pH {float(phantom.ph_map[voxel]):.2f}")
+            if config.nephron_ph_active and voxel_label in (2, 3, 4, 5):
+                for side, regions in phantom.nephron_regions().items():
+                    for region, mask in regions.items():
+                        if mask[voxel]:
+                            details.append(
+                                f"Nephron region: {region.replace('_', ' ')}"
+                            )
+                details.append(
+                    f"Tubular fluid pH: proximal {config.proximal_tubule_ph:.2f}, "
+                    f"distal/collecting {config.distal_tubule_ph:.2f}"
+                )
+            if phantom.chemical_shift_maps_ppm:
+                shifts = ", ".join(
+                    f"{pool.name.replace('Z-OMPD ', '')} "
+                    f"{self._absolute_shift_ppm(pool.name, voxel):.2f}"
+                    for pool in phantom.pools
+                    if pool.name in phantom.chemical_shift_maps_ppm
+                    and "C5" in pool.name
+                )
+                if shifts:
+                    details.append(f"Shift (ppm): {shifts}")
+        lumen = voxel_label in URINARY_LUMEN_LABELS
+        if not lumen:
+            details.append(f"Perfusion weight {self._perfusion_weight_at(voxel):.2f}")
+            arrival = float(phantom.perfusion_arrival_time_s[voxel])
+            if np.isfinite(arrival):
+                details.append(f"Bolus arrival {arrival:.2f} s")
+        if not tissue_water and phantom.kpl_map_s_inv is not None:
+            kpl = float(np.asarray(phantom.kpl_map_s_inv)[voxel])
+            kpa = float(np.asarray(phantom.kpa_map_s_inv)[voxel])
+            if kpl > 0 or kpa > 0:
+                details.append(f"kPL {kpl:.3g} s⁻¹ · kPA {kpa:.3g} s⁻¹")
+        if voxel_label in (2, 3, 4, 5):
+            details.append(
+                f"Renal excretion (filtration) {config.renal_excretion_s_inv:.3g} s⁻¹"
+                f" · tubular transit {config.renal_tubular_transit_s:.3g} s"
+            )
+        if voxel_label in (15, 16):
+            details.append(f"Pelvis transit {config.renal_pelvis_transit_s:.3g} s")
+        if voxel_label in (13, 14):
+            details.append(f"Ureter transit {config.ureter_transit_s:.3g} s")
+        if not lumen and not tissue_water:
+            details.append(f"Tissue clearance {config.tissue_clearance_s_inv:.3g} s⁻¹")
+        washout = getattr(phantom, "voxel_washout", None)
+        if washout is not None:
+            loss = float(np.asarray(washout.loss_map_s_inv)[voxel])
+            if loss > 0:
+                details.append(f"Local washout {loss:.3g} s⁻¹")
+        curves = self._hover_curves(voxel)
+        time_s = float(self.animation_time.value())
+        unit = "PD" if tissue_water else "mM"
+        if curves:
+            now = sum(
+                float(np.interp(time_s, times, values, left=0.0, right=0.0))
+                for _, times, values, _ in curves
+            )
+            details.append(f"Total at {time_s:.1f} s: {now:.3g} {unit}")
+        lines.extend(html.escape(line) for line in details)
+        return {
+            "text": "<br>".join(lines),
+            "curves": curves,
+            "time_s": time_s,
+            "unit": unit,
         }
-        axial, _, _ = build_reference_mouse_anatomy(
-            (nx * scale, ny * scale, 1),
-            display_extent,
-            grid_center_m=(display_center[0], display_center[1], 0.0),
-            **kwargs,
-        )
-        coronal, _, _ = build_reference_mouse_anatomy(
-            (nx * scale, 1, nz * scale),
-            display_extent,
-            grid_center_m=(display_center[0], 0.0, display_center[2]),
-            **kwargs,
-        )
-        sagittal, _, _ = build_reference_mouse_anatomy(
-            (1, ny * scale, nz * scale),
-            display_extent,
-            grid_center_m=(0.0, display_center[1], display_center[2]),
-            **kwargs,
-        )
-        return (
-            axial[:, :, 0].T,
-            coronal[:, 0, :].T,
-            sagittal[0, :, :].T,
-        )
 
     def _update_curve_plots(self):
         if self.phantom is None:
@@ -1900,25 +2466,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             max(1025, self.phantom.spectral_points),
         )
         total = np.zeros(axis.shape, dtype=float)
-        colors = (
-            "#f4a261",
-            "#2a9d8f",
-            "#e76f51",
-            "#8ecae6",
-            "#e9c46a",
-            "#d62828",
-            "#b5838d",
-            "#90be6d",
-        )
         components = []
-        for pool, color in zip(self.phantom.pools, colors):
+        for pool, color in zip(self.phantom.pools, POOL_COLORS):
             amplitude = float(
                 np.interp(float(time_s), times, curves[pool.name], left=0.0, right=0.0)
             )
-            center = (
-                self.phantom.spectral_reference_ppm
-                + self.phantom.get_frequency_offset_ppm(pool.name)
-            )
+            center = self._absolute_shift_ppm(pool.name, self._selected_voxel)
             larmor_hz = max(
                 self.phantom.field_strength
                 * abs(NUCLEUS_GAMMA_HZ_PER_T[self.phantom.nucleus]),

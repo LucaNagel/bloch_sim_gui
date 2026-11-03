@@ -117,7 +117,7 @@ def test_dce_kinetics_conserve_dose_and_follow_tofts():
     assert bladder[0] == 0.0 and bladder[-1] > arterial[-1]
 
     relaxation = phantom.contrast_relaxation
-    assert relaxation.n_compartments == 14
+    assert relaxation.n_compartments == 16
     np.testing.assert_allclose(
         relaxation.delta_r1_s_inv, phantom.config.contrast_r1_mm_s_inv * concentration
     )

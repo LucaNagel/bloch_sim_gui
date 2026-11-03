@@ -67,8 +67,8 @@ KINETICS_STEP_S = 0.1
 
 ARTERIAL_COMPARTMENT = 8
 VENOUS_COMPARTMENT = 9
-# Compartment k holds anatomy label k + 1 (labels 1..14).
-N_COMPARTMENTS = 14
+# Compartment k holds anatomy label k + 1 (labels 1..16).
+N_COMPARTMENTS = 16
 
 
 def tofts_parameters(values) -> Dict[str, Tuple[float, float, float]]:
@@ -213,6 +213,7 @@ def build_mouse_dce_kinetics(
         MOUSE_TISSUE_LABELS,
         RENAL_LABELS,
         URETER_LABELS,
+        PELVIS_LABELS,
         BLADDER_LABEL,
         _urinary_transport,
     )
@@ -231,7 +232,7 @@ def build_mouse_dce_kinetics(
     body = labels > 0
     compartment_map[venous & body] = VENOUS_COMPARTMENT
     compartment_map[arterial & body] = ARTERIAL_COMPARTMENT
-    names = tuple(MOUSE_TISSUE_LABELS[label] for label in range(1, 15))
+    names = tuple(MOUSE_TISSUE_LABELS[label] for label in range(1, N_COMPARTMENTS + 1))
 
     def delay_of(mask):
         values = arrival_time_s[mask & np.isfinite(arrival_time_s)]
@@ -271,14 +272,21 @@ def build_mouse_dce_kinetics(
     urinary = {"bladder": np.zeros(count)}
     for side, (cortex, medulla) in RENAL_LABELS.items():
         transport = _urinary_transport(
-            times, filtered, config.renal_tubular_transit_s, config.ureter_transit_s
+            times,
+            filtered,
+            config.renal_tubular_transit_s,
+            config.ureter_transit_s,
+            pelvis_transit_s=(
+                config.renal_pelvis_transit_s if config.renal_pelvis_enabled else 0.0
+            ),
         )
-        urinary[f"{side}_tubular"] = transport["tubular"]
-        urinary[f"{side}_ureter"] = transport["ureter"]
+        for stage in ("tubular", "pelvis", "ureter"):
+            urinary[f"{side}_{stage}"] = transport[stage]
         urinary["bladder"] += transport["bladder"]
         tubules = medulla if np.any(labels == medulla) else cortex
         for name, label in (
             (f"{side}_tubular", tubules),
+            (f"{side}_pelvis", PELVIS_LABELS[side]),
             (f"{side}_ureter", URETER_LABELS[side]),
         ):
             voxels = int(np.count_nonzero(compartment_map == label - 1))
