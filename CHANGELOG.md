@@ -6,6 +6,22 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The mouse kidney can collect urine in a renal pelvis compartment at the
+  hilum, inside the kidney slab, before it enters the ureter. Projects saved
+  before load with the pelvis off.
+- Metabolism & pH > Renal pH model offers nephron segments after Layton &
+  Layton (2019) and Bokacheva et al. (2009) as an alternative to the regional
+  cortex/medulla/urine pH, with proximal and distal/collecting tubular pH.
+- The Anatomy viewer of the mouse renal perfusion phantom scrolls through
+  axial, coronal and sagittal slices, and a click moves the crosshair to that
+  voxel. Hovering shows the tissue, its pH and Z-OMPD shifts, perfusion,
+  filtration and transit parameters, and a preview of its time course.
+- The Reconstruction Explorer shows spectra in Hz or ppm. A click into the
+  spectrum marks that frequency, and the image shows its spatial distribution
+  ("Frequency map", on by default) for CSI spectra and EPSI echo spectra.
+
 ## [2.9.7] - 2026-11-01
 
 ### Added
