@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pyqtgraph as pg
 import pytest
 import xarray as xr
 from PyQt5.QtCore import QPointF, Qt
@@ -14,6 +15,7 @@ from blochsimulator.sequence.reconstruction import (
 )
 from blochsimulator.ui.reconstruction_explorer import SequenceReconstructionExplorer
 from blochsimulator.ui.simulation_explorer import SessionSimulationRun
+from blochsimulator.units import NUCLEUS_GAMMA_HZ_PER_T
 
 
 def _session_run(dataset, run_id, name):
@@ -861,6 +863,146 @@ def test_csi_voxel_plot_has_spectrum_and_fid_buttons(qt_application):
     buttons[1].click()
     assert explorer.voxel_plot_combo.currentData() == "fid"
     assert explorer.spectrum_plot.plotItem.titleLabel.text.startswith("FID")
+
+
+def _click_plot_at(plot, x):
+    view_box = plot.getViewBox()
+    y = float(np.mean(view_box.viewRange()[1]))
+    return SimpleNamespace(
+        button=lambda: Qt.LeftButton,
+        scenePos=lambda: view_box.mapViewToScene(QPointF(x, y)),
+        accept=lambda: None,
+    )
+
+
+def _csi_frequency_dataset(**attrs):
+    frequency = np.array([-200.0, -100.0, 0.0, 100.0])
+    spectrum = np.zeros((2, 3, 4), dtype=complex)
+    spectrum[1, 2, 1] = 8.0
+    spectrum[0, 0, 3] = 5.0
+    spectrum[0, 1, 1] = 2.0
+    fid = np.fft.ifft(np.fft.ifftshift(spectrum, axes=-1), axis=-1)
+    dims = ("phase_y", "phase_x", "spectral_point")
+    dataset = xr.Dataset(
+        {
+            "csi_kspace": (dims, fid),
+            "csi_spatial_fid": (dims, fid),
+            "csi_spectrum": (dims, spectrum),
+        },
+        coords={
+            "phase_y": np.arange(2),
+            "phase_x": np.arange(3),
+            "spectral_point": np.arange(4),
+            "spectral_frequency_hz": ("spectral_point", frequency),
+        },
+        attrs=attrs,
+    )
+    return dataset, frequency, spectrum, fid
+
+
+def test_csi_spectrum_switches_to_ppm_and_maps_the_clicked_frequency(
+    qt_application,
+):
+    dataset, frequency, spectrum, fid = _csi_frequency_dataset(
+        field_strength_t=7.0, nucleus="C13", sequence_reference_ppm=171.0
+    )
+    explorer = SequenceReconstructionExplorer()
+    explorer.resize(1200, 800)
+    explorer.show()
+    explorer.set_dataset(dataset)
+    explorer._voxel_selected(2, 1)
+    qt_application.processEvents()
+
+    unit = explorer.frequency_unit_combo
+    assert unit.isEnabled() and unit.isVisibleTo(explorer)
+    assert explorer.frequency_map_check.isChecked()
+    unit.setCurrentIndex(unit.findData("ppm"))
+    # The simulator's positive pool offsets appear at negative frequencies.
+    hz_per_ppm = 7.0 * NUCLEUS_GAMMA_HZ_PER_T["C13"] * 1e-6
+    ppm = 171.0 - frequency / hz_per_ppm
+    line = explorer.spectrum_plot.listDataItems()[0]
+    np.testing.assert_allclose(line.xData, ppm, rtol=1e-9)
+    assert explorer.spectrum_plot.getViewBox().state["xInverted"]
+    assert explorer.spectrum_plot.getAxis("bottom").labelUnits == "ppm"
+    assert explorer.signal_frequency_unit_combo.currentData() == "ppm"
+
+    qt_application.processEvents()
+    explorer._voxel_plot_clicked(
+        explorer.spectrum_plot, _click_plot_at(explorer.spectrum_plot, ppm[1])
+    )
+    assert explorer._selected_frequency_hz == pytest.approx(-100.0)
+    np.testing.assert_allclose(explorer._current_display, np.abs(spectrum[..., 1]))
+    assert "at 172.33 ppm (-100.0 Hz)" in explorer.image_panel.info.text()
+    markers = [
+        item
+        for item in explorer.spectrum_plot.getPlotItem().items
+        if isinstance(item, pg.InfiniteLine)
+    ]
+    assert len(markers) == 1
+    assert markers[0].value() == pytest.approx(ppm[1], rel=1e-6)
+
+    state = explorer.get_state()
+    assert state["frequency_unit"] == "ppm"
+    assert state["selected_frequency_hz"] == pytest.approx(-100.0)
+
+    # Without the map the image returns to the selected FID point.
+    explorer.frequency_map_check.setChecked(False)
+    np.testing.assert_allclose(
+        explorer._current_display,
+        np.abs(fid[..., explorer.spectral_point.value()]),
+    )
+    explorer.frequency_map_check.setChecked(True)
+    explorer.voxel_plot_combo.setCurrentIndex(explorer.voxel_plot_combo.findData("fid"))
+    assert not explorer.frequency_unit_combo.isVisibleTo(explorer)
+    assert not explorer.spectrum_plot.getViewBox().state["xInverted"]
+    np.testing.assert_allclose(
+        explorer._current_display,
+        np.abs(fid[..., explorer.spectral_point.value()]),
+    )
+
+    restored = SequenceReconstructionExplorer()
+    restored.set_dataset(dataset)
+    restored.restore_state(state)
+    assert restored.frequency_unit_combo.currentData() == "ppm"
+    np.testing.assert_allclose(restored._current_display, np.abs(spectrum[..., 1]))
+    explorer.close()
+
+
+def test_frequency_axis_stays_in_hz_without_field_and_nucleus(qt_application):
+    dataset, frequency, spectrum, _ = _csi_frequency_dataset()
+    explorer = SequenceReconstructionExplorer()
+    explorer._frequency_unit_preference = "ppm"
+    explorer.set_dataset(dataset)
+    assert not explorer.frequency_unit_combo.isEnabled()
+    assert explorer.frequency_unit_combo.currentData() == "hz"
+    line = explorer.spectrum_plot.listDataItems()[0]
+    np.testing.assert_allclose(line.xData, frequency)
+    explorer._selected_frequency_hz = 100.0
+    explorer._refresh()
+    np.testing.assert_allclose(explorer._current_display, np.abs(spectrum[..., 3]))
+    assert "at 100.0 Hz;" in explorer.image_panel.info.text()
+
+
+def test_epsi_echo_spectrum_click_maps_frequency_of_every_voxel(qt_application):
+    dataset, times, _ = _epsi_dataset()
+    weights = np.arange(1, 13, dtype=float).reshape(3, 4)
+    dataset["cartesian_image"] = dataset["cartesian_image"] * weights[None]
+    explorer = SequenceReconstructionExplorer()
+    explorer.resize(1200, 800)
+    explorer.show()
+    explorer.set_dataset(dataset)
+    qt_application.processEvents()
+    assert explorer.voxel_plot_combo.currentData() == "echo_spectrum"
+
+    explorer._voxel_plot_clicked(
+        explorer.spectrum_plot, _click_plot_at(explorer.spectrum_plot, 120.0)
+    )
+    assert explorer._selected_frequency_hz == pytest.approx(125.0)
+    np.testing.assert_allclose(
+        explorer._current_display, weights * len(times), rtol=1e-9
+    )
+    assert "at 125.0 Hz" in explorer.image_panel.info.text()
+    explorer.close()
 
 
 def test_single_frame_explorer_hides_voxel_plot(qt_application):

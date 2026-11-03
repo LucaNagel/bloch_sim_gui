@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from PyQt5.QtCore import QPointF
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QGridLayout
 from unittest.mock import MagicMock, patch
@@ -9,8 +10,10 @@ from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 from blochsimulator.dynamic_phantom import PyruvateInflow, TimeCurve, VoxelWashout
 from blochsimulator.mouse_phantom import (
     BLADDER_LABEL,
+    PELVIS_LABELS,
     TISSUE_WATER_BY_LABEL,
     TISSUE_WATER_POOLS,
+    URINARY_LUMEN_LABELS,
     Z_OMPD_C1_POOL,
     Z_OMPD_C5_POOL,
     MousePerfusionConfig,
@@ -324,9 +327,10 @@ def test_renal_excretion_moves_injected_dose_from_kidneys_to_bladder():
     labels = phantom.anatomy_labels
     bladder = labels == 12
     ureters = np.isin(labels, (13, 14))
+    pelvis = np.isin(labels, (15, 16))
     kidneys = np.isin(labels, (2, 3, 4, 5))
-    assert np.any(bladder) and np.any(ureters)
-    assert not np.any(phantom.pyruvate_inflow.delivery_map[bladder | ureters])
+    assert np.any(bladder) and np.any(ureters) and np.any(pelvis)
+    assert not np.any(phantom.pyruvate_inflow.delivery_map[bladder | ureters | pelvis])
 
     volume = phantom.voxel_volume_m3
     _, end = phantom.preview_time_bounds_s()
@@ -341,7 +345,7 @@ def test_renal_excretion_moves_injected_dose_from_kidneys_to_bladder():
         np.sum(phantom.injected_concentration_map(time)) * volume
         for time in (end - 40.0, end - 20.0, end)
     ]
-    renal_and_urinary = bladder | ureters | kidneys
+    renal_and_urinary = bladder | ureters | pelvis | kidneys
     excreted = [
         np.sum(phantom.injected_concentration_map(time)[renal_and_urinary])
         for time in (end - 20.0, end)
@@ -361,7 +365,7 @@ def test_renal_excretion_can_be_disabled_and_legacy_configs_keep_it_off():
     phantom = config.build()
     _, end = phantom.preview_time_bounds_s()
     frame = phantom.injected_concentration_map(end)
-    assert not np.any(frame[np.isin(phantom.anatomy_labels, (12, 13, 14))])
+    assert not np.any(frame[np.isin(phantom.anatomy_labels, URINARY_LUMEN_LABELS)])
 
     legacy = MousePerfusionConfig().to_dict()
     del legacy["renal_excretion_s_inv"]
@@ -370,11 +374,81 @@ def test_renal_excretion_can_be_disabled_and_legacy_configs_keep_it_off():
         MousePerfusionConfig(ureter_transit_s=-1.0).validate()
 
 
+def test_renal_pelvis_sits_in_the_kidney_and_legacy_configs_omit_it():
+    phantom = MousePerfusionConfig(shape=(24, 16, 48)).build()
+    labels = phantom.anatomy_labels
+    for side, (cortex, medulla) in (("left", (2, 3)), ("right", (4, 5))):
+        pelvis = np.argwhere(labels == PELVIS_LABELS[side])
+        assert pelvis.size
+        kidney = np.argwhere(np.isin(labels, (cortex, medulla, PELVIS_LABELS[side])))
+        # The pelvis lies on the medial (hilum) side of its kidney.
+        assert abs(pelvis[:, 0].mean() - labels.shape[0] / 2) < abs(
+            kidney[:, 0].mean() - labels.shape[0] / 2
+        )
+    assert np.all(phantom.ph_map[np.isin(labels, (15, 16))] == phantom.config.urine_ph)
+
+    without = MousePerfusionConfig(
+        shape=(24, 16, 48), renal_pelvis_enabled=False
+    ).build()
+    assert not np.any(np.isin(without.anatomy_labels, (15, 16)))
+    assert "left_pelvis" not in without.voxel_washout.compartment_names or not np.any(
+        without.voxel_washout.compartment_map
+        == without.voxel_washout.compartment_names.index("left_pelvis")
+    )
+    legacy = MousePerfusionConfig().to_dict()
+    del legacy["renal_pelvis_enabled"]
+    assert MousePerfusionConfig.from_dict(legacy).renal_pelvis_enabled is False
+    with pytest.raises(ValueError, match="renal excretion"):
+        MousePerfusionConfig(renal_pelvis_transit_s=-1.0).validate()
+
+
+def test_urinary_transport_through_pelvis_conserves_the_excreted_amount():
+    from blochsimulator.mouse_phantom import _urinary_transport, _well_mixed_stage
+
+    times = np.linspace(0.0, 200.0, 4001)
+    excreted = np.exp(-0.5 * ((times - 10.0) / 3.0) ** 2)
+    transport = _urinary_transport(times, excreted, 8.0, 5.0, pelvis_transit_s=4.0)
+    total = sum(transport[name] for name in ("tubular", "pelvis", "ureter", "bladder"))
+    cumulative = np.concatenate(
+        ([0.0], np.cumsum(0.5 * (excreted[1:] + excreted[:-1]) * np.diff(times)))
+    )
+    np.testing.assert_allclose(total, cumulative, atol=1e-12)
+    assert np.all(transport["pelvis"] >= -1e-12) and transport["pelvis"].max() > 0
+    # The pelvis delays urine on its way into the ureter.
+    assert np.argmax(transport["ureter_inflow"]) > np.argmax(transport["pelvis_inflow"])
+    assert transport["bladder"][-1] == pytest.approx(cumulative[-1], rel=1e-3)
+
+    # Uniform grids use a recursive filter; it matches the stepwise update of
+    # the same piecewise-linear inflow on an uneven grid.
+    uneven = np.sort(np.concatenate((times, [3.31, 7.12, 150.23])))
+    inflow = np.interp(uneven, times, excreted)
+    amount, outflow = _well_mixed_stage(uneven, inflow, 4.0, 0.05)
+    fast, _ = _well_mixed_stage(times, excreted, 4.0, 0.05)
+    np.testing.assert_allclose(amount[np.isin(uneven, times)], fast, atol=1e-12)
+    np.testing.assert_allclose(outflow, amount / 4.0)
+    passed, through = _well_mixed_stage(times, excreted, 0.0)
+    assert not np.any(passed) and np.array_equal(through, excreted)
+
+
+def test_zero_transit_urinary_stage_holds_no_solver_source():
+    phantom = _fast_renal_config(renal_pelvis_transit_s=0.0).build()
+    washout = phantom.voxel_washout
+    labels = phantom.anatomy_labels
+    index = washout.compartment_names.index("left_pelvis")
+    assert np.all(washout.concentration_rates[index] == 0.0)
+    assert np.all(washout.magnetization_rates[index] == 0.0)
+    assert np.all(washout.loss_map_s_inv[labels == 15] == 0.0)
+    assert np.any(
+        washout.concentration_rates[washout.compartment_names.index("bladder")]
+    )
+
+
 def _fast_renal_config(**overrides):
     values = dict(
         shape=(24, 16, 48),
         renal_tubular_transit_s=4.0,
         ureter_transit_s=3.0,
+        renal_pelvis_transit_s=2.0,
         renal_excretion_s_inv=0.3,
     )
     values.update(overrides)
@@ -384,7 +458,9 @@ def _fast_renal_config(**overrides):
 def _urinary_masks(phantom):
     labels = phantom.anatomy_labels
     return {
+        "left_pelvis": labels == 15,
         "left_ureter": labels == 13,
+        "right_pelvis": labels == 16,
         "right_ureter": labels == 14,
         "bladder": labels == 12,
     }
@@ -396,13 +472,14 @@ def test_mouse_phantom_builds_solver_washout_with_urinary_sources():
     labels = phantom.anatomy_labels
 
     assert washout is not None and washout.has_sources
-    assert washout.compartment_names == ("left_ureter", "right_ureter", "bladder")
+    assert washout.compartment_names == tuple(_urinary_masks(phantom))
     assert np.all(washout.loss_map_s_inv[labels == 0] == 0.0)
     assert np.allclose(
         washout.loss_map_s_inv[np.isin(labels, (2, 3, 4, 5))],
         phantom._renal_loss_s_inv,
     )
     assert np.allclose(washout.loss_map_s_inv[np.isin(labels, (13, 14))], 1 / 3.0)
+    assert np.allclose(washout.loss_map_s_inv[np.isin(labels, (15, 16))], 1 / 2.0)
     assert np.all(washout.loss_map_s_inv[labels == 12] == 0.0)
     for index, mask in enumerate(_urinary_masks(phantom).values()):
         assert np.all(washout.compartment_map[mask] == index)
@@ -467,12 +544,14 @@ def test_urinary_hyperpolarization_relaxes_with_t1_during_transit():
     loss = phantom._renal_loss_s_inv
     tubular = config.renal_tubular_transit_s
     # Kidney residence, uniform tubular transit in [0.5, 1.5] x mean, and the
-    # well-mixed ureter each attenuate the excess magnetization.
+    # well-mixed renal pelvis and ureter each attenuate the excess
+    # magnetization.
     expected = (
         loss
         / (loss + r1)
         * (np.exp(-0.5 * r1 * tubular) - np.exp(-1.5 * r1 * tubular))
         / (r1 * tubular)
+        / (1.0 + r1 * config.renal_pelvis_transit_s)
         / (1.0 + r1 * config.ureter_transit_s)
     )
     assert ratio == pytest.approx(expected, rel=1e-3)
@@ -844,6 +923,101 @@ def test_mouse_slice_preview_preserves_voxel_marker_when_perfusion_is_rendered()
     preview.close()
 
 
+def test_mouse_slice_preview_scrolls_slices_and_follows_clicked_voxel():
+    app = QApplication.instance() or QApplication([])
+    preview = MouseSlicePreviewWidget(show_anatomy=True)
+    shape = (6, 5, 8)
+    labels = np.zeros(shape, dtype=np.uint8)
+    labels[:] = (np.arange(shape[2]) % 12 + 1)[None, None, :]
+    preview.set_anatomy(labels)
+    assert preview.slice_indices == [4, 2, 3]
+    assert [slider.maximum() for slider in preview.slice_sliders] == [7, 4, 5]
+
+    preview.set_slice_index(0, 6)
+    assert np.all(preview.items[0][0].image == labels[:, :, 6].T)
+    assert preview._voxel_for_image_position(0, 1.5, 2.5) == (2, 1, 6)
+    preview._image_clicked(0, 1.5, 2.5)
+    assert preview.slice_indices == [6, 1, 2]
+    assert np.all(preview.items[2][0].image == labels[2, :, :].T)
+
+    # A full-mouse display extent larger than the FOV scrolls past the
+    # simulated slices; those slices map to no voxel.
+    preview.set_display_geometry((6e-3, 5e-3, 8e-3), (6e-3, 5e-3, 12e-3))
+    assert preview.slice_sliders[0].minimum() == -2
+    assert preview.slice_sliders[0].maximum() == 9
+    preview.set_slice_index(0, -1)
+    assert "outside FOV" in preview.slice_labels[0].text()
+    assert preview.slice_position_m(0) == pytest.approx(-4.5e-3)
+    assert preview._voxel_for_image_position(0, 1.5, 2.5) is None
+    assert not np.any(preview.items[0][1].image)
+
+    preview.set_slice_index(0, 3)
+    preview.resize(900, 360)
+    preview.show()
+    app.processEvents()
+    axial = preview.items[0][0]
+    scene = axial.mapToScene(QPointF(1.5, 2.5))
+    assert preview.hover_target(scene) == (4, (2, 1, 3))
+    preview._mouse_moved(scene)
+    assert preview._hover_timer.isActive()
+    preview._show_hover()
+    assert preview.hover_popup.isVisible()
+    assert "Right kidney cortex" in preview.hover_popup.label.text()
+    preview.hide()
+    assert not preview.hover_popup.isVisible()
+    preview.close()
+
+
+def test_mouse_designer_hover_shows_tissue_properties_and_nephron_controls():
+    app = QApplication.instance() or QApplication([])
+    dialog = MousePhantomDesignerDialog(
+        config=MousePerfusionConfig(
+            shape=(24, 16, 48), injection_compound="z_ompd", renal_ph_model="nephron"
+        )
+    )
+    assert dialog.renal_ph_model.currentData() == "nephron"
+    assert not dialog.ph_spins["left_medulla"].isEnabled()
+    assert dialog.nephron_ph_spins["distal_tubule"].isEnabled()
+    dialog.nephron_ph_spins["distal_tubule"].setValue(6.1)
+    config = dialog._read_config()
+    assert config.renal_ph_model == "nephron"
+    assert config.distal_tubule_ph == pytest.approx(6.1)
+
+    phantom = dialog.phantom
+    medulla = tuple(int(v) for v in np.argwhere(phantom.anatomy_labels == 3)[0])
+    info = dialog._anatomy_hover_info(3, medulla)
+    assert "Left kidney medulla" in info["text"]
+    assert f"pH {phantom.ph_map[medulla]:.2f}" in info["text"]
+    assert "Nephron region" in info["text"]
+    assert "distal tubule and urine" in info["text"]
+    assert "Renal excretion" in info["text"]
+    names = {name for name, *_ in info["curves"]}
+    assert "Z-OMPD C5 distal tubule and urine" in names
+    assert info["unit"] == "mM"
+    assert "Outside the simulated FOV" in dialog._anatomy_hover_info(1, None)["text"]
+    ureter = tuple(int(v) for v in np.argwhere(phantom.anatomy_labels == 13)[0])
+    ureter_text = dialog._anatomy_hover_info(13, ureter)["text"]
+    assert "Ureter transit" in ureter_text
+    assert "Perfusion weight" not in ureter_text
+
+    # The HD anatomy slice follows the slider of the Anatomy tab.
+    preview = dialog.anatomy_preview
+    preview.set_slice_index(1, 2)
+    assert preview.items[1][0].image.shape == (48, 24)
+    preview._refine_slices()
+    assert preview.items[1][0].image.shape == (48 * 8, 24 * 8)
+
+    # Voxel spectra centre each pool on its pH-dependent shift.
+    from blochsimulator.mouse_phantom import z_ompd_shift_ppm
+
+    distal = dialog._absolute_shift_ppm("Z-OMPD C5 distal tubule and urine", medulla)
+    assert distal == pytest.approx(
+        z_ompd_shift_ppm("C5", phantom.config.distal_tubule_ph)
+    )
+    dialog.close()
+    app.processEvents()
+
+
 def _small_z_ompd_config(**overrides):
     values = dict(injection_compound="z_ompd", shape=(16, 12, 32))
     values.update(overrides)
@@ -954,6 +1128,158 @@ def test_legacy_z_ompd_phantom_gains_titration_model_on_reload():
         "Z-OMPD C5",
         "Z-OMPD C1 reference",
     }
+
+
+def test_nephron_ph_model_adds_tubular_pools_with_their_own_ph():
+    from blochsimulator.mouse_phantom import (
+        RENAL_LABELS,
+        URINARY_LUMEN_LABELS,
+        Z_OMPD_TUBULAR_POOLS,
+        z_ompd_shift_ppm,
+    )
+
+    config = _small_z_ompd_config(shape=(24, 16, 48), renal_ph_model="nephron")
+    phantom = config.build()
+    names = [pool.name for pool in phantom.pools]
+    assert names[:2] == [Z_OMPD_C5_POOL, Z_OMPD_C1_POOL]
+    assert len(names) == 6
+    assert phantom.metadata["ph_model"] == "z_ompd_nephron_segment_pools"
+    reference = config.spectral_reference_ppm
+    labels = phantom.anatomy_labels
+    lumen = np.isin(labels, URINARY_LUMEN_LABELS)
+    for group, ph in (
+        ("proximal", config.proximal_tubule_ph),
+        ("distal", config.distal_tubule_ph),
+    ):
+        for carbon, name in Z_OMPD_TUBULAR_POOLS[group].items():
+            pool = phantom.pools[names.index(name)]
+            absolute = (
+                pool.chemical_shift_ppm
+                + reference
+                + phantom.chemical_shift_maps_ppm[name]
+            )
+            expected = np.where(lumen & (group == "distal"), config.urine_ph, ph)
+            np.testing.assert_allclose(absolute, z_ompd_shift_ppm(carbon, expected))
+
+    # The extracellular medulla pH falls from the cortex value towards the
+    # papillary interstitium instead of jumping to one medulla pH.
+    for side, (cortex, medulla) in RENAL_LABELS.items():
+        cortex_ph = getattr(config, f"{side}_cortex_ph")
+        assert np.allclose(phantom.ph_map[labels == cortex], cortex_ph)
+        values = phantom.ph_map[labels == medulla]
+        assert values.min() >= config.papilla_interstitial_ph - 1e-12
+        assert values.max() <= cortex_ph + 1e-12
+        assert values.max() - values.min() > 0.03
+        regions = phantom.nephron_regions()[side]
+        assert all(np.any(mask) for mask in regions.values())
+        assert np.array_equal(
+            regions["outer_medulla"] | regions["inner_medulla"], labels == medulla
+        )
+
+    # The regional model and other compounds keep their pools.
+    assert len(_small_z_ompd_config().build().pools) == 2
+    lactate = MousePerfusionConfig(
+        shape=(16, 12, 32), injection_compound="lactate", renal_ph_model="nephron"
+    )
+    assert not lactate.nephron_ph_active and len(lactate.build().pools) == 2
+    with pytest.raises(ValueError, match="renal pH model"):
+        _small_z_ompd_config(renal_ph_model="bogus").validate()
+
+
+def test_nephron_segments_split_the_tubular_amount():
+    from blochsimulator.mouse_phantom import (
+        NEPHRON_SEGMENTS,
+        _decaying_amount,
+        _nephron_region_weights,
+        _nephron_segment_amounts,
+        _urinary_transport,
+    )
+
+    times = np.linspace(0.0, 60.0, 1201)
+    excreted = np.exp(-0.5 * ((times - 8.0) / 2.5) ** 2)
+    for relaxation in (0.0, 0.05):
+        segments = _nephron_segment_amounts(times, excreted, 6.0, relaxation)
+        transport = _urinary_transport(times, excreted, 6.0, 3.0, relaxation)
+        assert segments.shape == (len(NEPHRON_SEGMENTS), times.size)
+        assert np.all(segments >= -1e-12)
+        # The nephron holds what was excreted and has not yet reached the
+        # pelvis, decayed during its transit.
+        balance = _decaying_amount(
+            times, excreted - transport["pelvis_inflow"], relaxation
+        )
+        np.testing.assert_allclose(segments.sum(axis=0), balance, atol=2e-5)
+        if relaxation == 0.0:
+            np.testing.assert_allclose(
+                segments.sum(axis=0), transport["tubular"], atol=2e-5
+            )
+    # Fluid reaches the collecting ducts only after passing the proximal tubule.
+    assert np.argmax(segments[-1]) > np.argmax(segments[0])
+
+    def segment_totals(weights):
+        return sum(weights.values())
+
+    full = _nephron_region_weights(
+        {"cortex": 10, "outer_medulla": 4, "inner_medulla": 2}
+    )
+    np.testing.assert_allclose(segment_totals(full), 1.0)
+    assert ("inner_medulla", "distal") in full
+    # Coarse grids without inner medulla show its tubular fluid in the outer
+    # medulla, and kidneys without medulla show everything in the cortex.
+    coarse = _nephron_region_weights({"cortex": 10, "outer_medulla": 4})
+    np.testing.assert_allclose(segment_totals(coarse), 1.0)
+    assert {region for region, _ in coarse} == {"cortex", "outer_medulla"}
+    cortex_only = _nephron_region_weights({"cortex": 10})
+    np.testing.assert_allclose(segment_totals(cortex_only), 1.0)
+    assert {region for region, _ in cortex_only} == {"cortex"}
+    assert _nephron_region_weights({}) == {}
+
+
+def test_nephron_solver_tubular_pools_match_preview_amounts():
+    phantom = _small_z_ompd_config(
+        renal_ph_model="nephron",
+        renal_tubular_transit_s=4.0,
+        ureter_transit_s=3.0,
+        renal_pelvis_transit_s=2.0,
+        renal_excretion_s_inv=0.3,
+        injection_polarization=1.0,
+    ).build()
+    washout = phantom.voxel_washout
+    washout.validate(phantom.shape, len(phantom.pools))
+    assert washout.compartment_names[:3] == (
+        "left_cortex",
+        "left_outer_medulla",
+        "left_inner_medulla",
+    )
+    regions = phantom.nephron_regions()
+    checkpoints = (6.0, 12.0)
+    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        SequenceProgram((), duration_s=12.0),
+        phantom,
+        checkpoints_s=checkpoints,
+    )
+    mz = result.checkpoint_pool_magnetization[..., 2]
+    lookup = phantom._urinary_pool_lookup()
+    names = [pool.name for pool in phantom.pools]
+    labels = phantom.anatomy_labels
+    compartments = {f"left_{region}": mask for region, mask in regions["left"].items()}
+    compartments.update(left_pelvis=labels == 15, left_ureter=labels == 13)
+    compartments["bladder"] = labels == BLADDER_LABEL
+    for index, time_s in enumerate(checkpoints):
+        for name, mask in compartments.items():
+            for pool_index, pool in enumerate(names[2:], start=2):
+                expected = np.interp(time_s, lookup["times_s"], lookup[name][pool])
+                solved = np.sum(mz[index, pool_index][mask]) * phantom.voxel_volume_m3
+                assert solved == pytest.approx(expected, rel=3e-3, abs=1e-14)
+    # Urine leaves the kidney in the distal pools only.
+    lumen = np.isin(labels, (12, 13, 15))
+    assert np.all(mz[:, :4][:, :, lumen] == 0.0)
+    assert np.max(mz[-1, 4][labels == BLADDER_LABEL]) > 0
+    np.testing.assert_allclose(mz[:, 3], mz[:, 2], rtol=1e-10, atol=1e-15)
+    np.testing.assert_allclose(mz[:, 5], mz[:, 4], rtol=1e-10, atol=1e-15)
+
+    voxel = tuple(np.argwhere(regions["left"]["cortex"])[0])
+    curves = phantom.preview_pool_curves_at(voxel, np.linspace(0.0, 12.0, 7))
+    assert np.max(curves[names[2]]) > 0 and np.max(curves[names[4]]) > 0
 
 
 def test_mouse_config_dose_and_transverse_decay():

@@ -13,6 +13,7 @@ from functools import lru_cache
 from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
+from scipy.signal import lfilter
 
 from .dynamic_phantom import (
     DynamicSpectralPhantom,
@@ -46,6 +47,8 @@ MOUSE_TISSUE_LABELS = {
     12: "Urinary bladder",
     13: "Left ureter",
     14: "Right ureter",
+    15: "Left renal pelvis",
+    16: "Right renal pelvis",
 }
 # RGB display colours of the tissue labels, shared by the anatomy previews.
 MOUSE_TISSUE_COLORS = (
@@ -64,12 +67,19 @@ MOUSE_TISSUE_COLORS = (
     (236, 214, 92),
     (214, 186, 64),
     (214, 186, 64),
+    (246, 206, 70),
+    (246, 206, 70),
 )
 
 RENAL_LABELS = {"left": (2, 3), "right": (4, 5)}
 URETER_LABELS = {"left": 13, "right": 14}
+PELVIS_LABELS = {"left": 15, "right": 16}
 BLADDER_LABEL = 12
-URINARY_LUMEN_LABELS = (BLADDER_LABEL, *URETER_LABELS.values())
+URINARY_LUMEN_LABELS = (
+    BLADDER_LABEL,
+    *URETER_LABELS.values(),
+    *PELVIS_LABELS.values(),
+)
 
 
 INJECTION_COMPOUNDS = {
@@ -84,6 +94,12 @@ INJECTION_COMPOUNDS = {
 TISSUE_WATER_COMPOUND_LABELS = {
     "contrast_agent": "Gadolinium contrast agent (DCE)",
     "none": INJECTION_COMPOUNDS["none"],
+}
+
+# How the pH, and with it the Z-OMPD chemical shift, varies inside a kidney.
+RENAL_PH_MODELS = {
+    "regional": "Regional (cortex / medulla / urine)",
+    "nephron": "Nephron segments (Layton & Layton 2019)",
 }
 
 # Which relaxation time sets the transverse decay in the Bloch solver. The
@@ -128,6 +144,8 @@ TISSUE_WATER_BY_LABEL = {
     12: ("Urine", 0.98),
     13: ("Urine", 0.98),
     14: ("Urine", 0.98),
+    15: ("Urine", 0.98),
+    16: ("Urine", 0.98),
 }
 BLOOD_WATER_DENSITY = TISSUE_WATER_BY_LABEL[9][1]
 
@@ -284,6 +302,9 @@ class MousePerfusionConfig:
     tissue_clearance_s_inv: float = 0.18
     renal_excretion_s_inv: float = 0.12
     renal_tubular_transit_s: float = 45.0
+    # Urine collects in the renal pelvis before it drains into the ureter.
+    renal_pelvis_enabled: bool = True
+    renal_pelvis_transit_s: float = 10.0
     ureter_transit_s: float = 15.0
     left_cortex_kpl_s_inv: float = 0.08
     left_medulla_kpl_s_inv: float = 0.04
@@ -306,6 +327,16 @@ class MousePerfusionConfig:
     background_ph: float = 7.39
     blood_ph: float = 7.39
     urine_ph: float = 6.42
+    # "regional" gives every renal region one pH. "nephron" mixes three fluid
+    # spaces per kidney voxel following Layton & Layton (2019, Fig. 3F):
+    # extracellular space (cortex pH, falling to the papillary interstitium),
+    # proximal tubule + descending limb fluid (pH 7.4 -> ~7.0) and distal
+    # nephron + collecting duct fluid (acidified towards urine pH ~6.2), each
+    # weighted by the time the excreted compound spends in those segments.
+    renal_ph_model: str = "regional"
+    proximal_tubule_ph: float = 7.2
+    distal_tubule_ph: float = 6.3
+    papilla_interstitial_ph: float = 7.3
     breathing_enabled: bool = False
     breathing_rate_hz: float = 1.2
     breathing_amplitude_mm: float = 1.0
@@ -343,6 +374,15 @@ class MousePerfusionConfig:
     dce_tofts_parameters: Dict = field(
         default_factory=lambda: dict(DEFAULT_TOFTS_PARAMETERS)
     )
+
+    @property
+    def nephron_ph_active(self) -> bool:
+        """Whether excreted Z-OMPD fills nephron-segment pools in the kidneys."""
+        return (
+            self.renal_ph_model == "nephron"
+            and self.injection_compound == "z_ompd"
+            and not uses_tissue_water(self.nucleus)
+        )
 
     @property
     def dce_enabled(self) -> bool:
@@ -443,9 +483,11 @@ class MousePerfusionConfig:
         )
         if not np.all(np.isfinite(finite)) or self.circulation_delay_s < 0:
             raise ValueError("mouse timing and spectral values must be finite")
+        self.renal_pelvis_enabled = bool(self.renal_pelvis_enabled)
         excretion = (
             self.renal_excretion_s_inv,
             self.renal_tubular_transit_s,
+            self.renal_pelvis_transit_s,
             self.ureter_transit_s,
         )
         if not np.all(np.isfinite(excretion)) or np.any(np.asarray(excretion) < 0):
@@ -487,11 +529,19 @@ class MousePerfusionConfig:
             self.background_ph,
             self.blood_ph,
             self.urine_ph,
+            self.proximal_tubule_ph,
+            self.distal_tubule_ph,
+            self.papilla_interstitial_ph,
         )
         if not np.all(np.isfinite(ph_values)) or np.any(
             (np.asarray(ph_values) < 0) | (np.asarray(ph_values) > 14)
         ):
             raise ValueError("pH values must lie between 0 and 14")
+        self.renal_ph_model = str(self.renal_ph_model).strip().lower()
+        if self.renal_ph_model not in RENAL_PH_MODELS:
+            raise ValueError(
+                "renal pH model must be one of " + ", ".join(sorted(RENAL_PH_MODELS))
+            )
         if (
             int(self.spectral_points) != self.spectral_points
             or self.spectral_points < 2
@@ -587,6 +637,9 @@ class MousePerfusionConfig:
         # used by the current, independently editable mouse size.
         # Phantoms saved before renal excretion existed keep their kinetics.
         restored.setdefault("renal_excretion_s_inv", 0.0)
+        # Phantoms saved before the renal pelvis existed drained the tubules
+        # straight into the ureter.
+        restored.setdefault("renal_pelvis_enabled", False)
         # Before heart and brain kinetics existed, the heart was perfused like
         # background tissue and only kidneys and liver converted pyruvate.
         restored.setdefault(
@@ -819,6 +872,18 @@ _URETER_CENTERLINES = {
     "left": ((-0.22, -0.03, -0.14), (-0.16, -0.01, -0.40), (-0.07, 0.04, -0.60)),
     "right": ((0.22, -0.03, -0.14), (0.16, -0.01, -0.40), (0.07, 0.04, -0.60)),
 }
+# The renal pelvis fills the medial renal sinus between medulla and hilum,
+# where the ureter leaves the kidney.
+_RENAL_PELVIS_CENTERS = {
+    "left": (-0.235, -0.03, -0.11),
+    "right": (0.235, -0.03, -0.11),
+}
+_RENAL_PELVIS_RADII = (0.055, 0.05, 0.10)
+_RENAL_MEDULLA_CENTERS = {
+    "left": (-0.36, -0.03, -0.10),
+    "right": (0.36, -0.03, -0.10),
+}
+_RENAL_MEDULLA_RADII = (0.105, 0.09, 0.14)
 
 
 def _tube(x, y, z, centerline, radius_m, atlas_to_m):
@@ -930,6 +995,7 @@ def build_reference_mouse_anatomy(
     mouse_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     grid_center_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     return_vascular_transit: bool = False,
+    renal_pelvis: bool = False,
 ):
     """Create a deterministic labelled mouse template and large-vessel masks."""
 
@@ -967,10 +1033,12 @@ def build_reference_mouse_anatomy(
     left_kidney = _ellipsoid(x, y, z, (-0.36, -0.03, -0.10), (0.19, 0.16, 0.22)) & body
     right_kidney = _ellipsoid(x, y, z, (0.36, -0.03, -0.10), (0.19, 0.16, 0.22)) & body
     left_medulla = (
-        _ellipsoid(x, y, z, (-0.36, -0.03, -0.10), (0.105, 0.09, 0.14)) & left_kidney
+        _ellipsoid(x, y, z, _RENAL_MEDULLA_CENTERS["left"], _RENAL_MEDULLA_RADII)
+        & left_kidney
     )
     right_medulla = (
-        _ellipsoid(x, y, z, (0.36, -0.03, -0.10), (0.105, 0.09, 0.14)) & right_kidney
+        _ellipsoid(x, y, z, _RENAL_MEDULLA_CENTERS["right"], _RENAL_MEDULLA_RADII)
+        & right_kidney
     )
     labels[left_kidney] = 2
     labels[left_medulla] = 3
@@ -985,6 +1053,20 @@ def build_reference_mouse_anatomy(
     )
     voxel_spacing_m = np.asarray(fov_m, dtype=float) / np.asarray(shape, dtype=float)
     resolved = np.asarray(shape, dtype=int) > 1
+    if renal_pelvis:
+        # Keep the pelvis at least about one voxel wide on coarse grids.
+        pelvis_radii_m = np.asarray(_RENAL_PELVIS_RADII) * atlas_to_m
+        pelvis_radii_m[resolved] = np.maximum(
+            pelvis_radii_m[resolved], 0.6 * voxel_spacing_m[resolved]
+        )
+        for side, kidney in (("left", left_kidney), ("right", right_kidney)):
+            pelvis = (
+                _ellipsoid(
+                    x, y, z, _RENAL_PELVIS_CENTERS[side], pelvis_radii_m / atlas_to_m
+                )
+                & kidney
+            )
+            labels[pelvis] = PELVIS_LABELS[side]
     ureter_radius_m = max(
         _URETER_RADIUS_M,
         0.6
@@ -1019,7 +1101,9 @@ def build_reference_mouse_anatomy(
 
 
 @lru_cache(maxsize=4)
-def _cached_reference_anatomy(shape, fov_m, mouse_size_m, mouse_offset_m):
+def _cached_reference_anatomy(
+    shape, fov_m, mouse_size_m, mouse_offset_m, renal_pelvis=False
+):
     """Rasterize the reference anatomy once per geometry.
 
     Editing injection or kinetic parameters rebuilds the phantom many times
@@ -1033,6 +1117,7 @@ def _cached_reference_anatomy(shape, fov_m, mouse_size_m, mouse_offset_m):
         mouse_size_m=mouse_size_m,
         mouse_offset_m=mouse_offset_m,
         return_vascular_transit=True,
+        renal_pelvis=renal_pelvis,
     )
     for values in result:
         values.setflags(write=False)
@@ -1076,6 +1161,50 @@ Z_OMPD_TITRATION_PPM = {
 Z_OMPD_REFERENCE_PH = 7.4
 Z_OMPD_C5_POOL = "Z-OMPD C5"
 Z_OMPD_C1_POOL = "Z-OMPD C1 reference"
+# Nephron pH model: excreted Z-OMPD moves into tubular fluid pools of its
+# own pH. Proximal tubule and descending limb fluid stays near plasma pH; the
+# distal nephron and collecting duct acidify it towards urine, and the distal
+# pools carry on as urine through renal pelvis, ureters and bladder.
+Z_OMPD_TUBULAR_POOLS = {
+    "proximal": {"C5": "Z-OMPD C5 proximal tubule", "C1": "Z-OMPD C1 proximal tubule"},
+    "distal": {
+        "C5": "Z-OMPD C5 distal tubule and urine",
+        "C1": "Z-OMPD C1 distal tubule and urine",
+    },
+}
+Z_OMPD_CARBON_POOLS = {"C5": Z_OMPD_C5_POOL, "C1": Z_OMPD_C1_POOL}
+_TUBULAR_POOL_NAMES = frozenset(
+    name for carbons in Z_OMPD_TUBULAR_POOLS.values() for name in carbons.values()
+)
+
+# Nephron segments of the Layton & Layton (2019) epithelial transport model:
+# (segment, share of the tubular transit time, tubular fluid group, share of
+# the segment in cortex, outer medulla and inner medulla). Transit shares
+# follow segment length over mean luminal flow velocity, which falls along
+# the nephron as water is reabsorbed, so the collecting duct holds the
+# longest residence. Loops of Henle of short (cortical) nephrons turn in the
+# outer medulla, those of long (juxtamedullary) nephrons in the papilla.
+NEPHRON_SEGMENTS = (
+    ("proximal tubule", 0.167, "proximal", (0.85, 0.15, 0.0)),
+    ("descending limb", 0.031, "proximal", (0.0, 0.6, 0.4)),
+    ("thick ascending limb", 0.116, "distal", (0.5, 0.5, 0.0)),
+    ("distal convoluted tubule", 0.017, "distal", (1.0, 0.0, 0.0)),
+    ("connecting tubule", 0.082, "distal", (1.0, 0.0, 0.0)),
+    ("cortical collecting duct", 0.083, "distal", (1.0, 0.0, 0.0)),
+    ("outer medullary collecting duct", 0.182, "distal", (0.0, 1.0, 0.0)),
+    ("inner medullary collecting duct", 0.322, "distal", (0.0, 0.0, 1.0)),
+)
+RENAL_REGIONS = ("cortex", "outer_medulla", "inner_medulla")
+# Tubular fluid of a region without voxels (coarse grids, cropped FOVs) is
+# shown in the nearest region that has voxels.
+_RENAL_REGION_FALLBACK = {
+    "cortex": ("outer_medulla", "inner_medulla"),
+    "outer_medulla": ("inner_medulla", "cortex"),
+    "inner_medulla": ("outer_medulla", "cortex"),
+}
+# Normalized medulla radius below which the medulla counts as inner medulla
+# (papilla); the extracellular pH falls from cortex to papilla towards it.
+_INNER_MEDULLA_RADIUS = 0.6
 
 
 def z_ompd_shift_ppm(carbon: str, ph):
@@ -1085,13 +1214,80 @@ def z_ompd_shift_ppm(carbon: str, ph):
     return UREA_C13_PPM + minimum + delta * deprotonated
 
 
-def _z_ompd_shift_maps(ph_map: np.ndarray) -> Dict[str, np.ndarray]:
-    """Return pool shift maps relative to the reference-pH pool shifts."""
+def _z_ompd_shift_maps(
+    ph_map: np.ndarray, tubular_ph_maps: Optional[Dict[str, np.ndarray]] = None
+) -> Dict[str, np.ndarray]:
+    """Return pool shift maps relative to the reference-pH pool shifts.
+
+    ``tubular_ph_maps`` (keyed by tubular group) adds the nephron pools.
+    """
+    pool_ph = {name: (carbon, ph_map) for carbon, name in Z_OMPD_CARBON_POOLS.items()}
+    for group, values in (tubular_ph_maps or {}).items():
+        for carbon, name in Z_OMPD_TUBULAR_POOLS[group].items():
+            pool_ph[name] = (carbon, values)
     return {
-        name: z_ompd_shift_ppm(carbon, ph_map)
+        name: z_ompd_shift_ppm(carbon, values)
         - z_ompd_shift_ppm(carbon, Z_OMPD_REFERENCE_PH)
-        for carbon, name in (("C5", Z_OMPD_C5_POOL), ("C1", Z_OMPD_C1_POOL))
+        for name, (carbon, values) in pool_ph.items()
     }
+
+
+def _renal_medulla_radius(config: MousePerfusionConfig, labels: np.ndarray):
+    """Return each kidney voxel's normalized radius around its medulla centre.
+
+    Zero is the papilla, one the corticomedullary border; voxels outside the
+    kidneys are NaN.
+    """
+    axes = _anatomy_axes(
+        config.shape, config.fov_m, config.mouse_size_m, config.mouse_offset_m
+    )
+    x, y, z = np.meshgrid(*axes, indexing="ij")
+    radius = np.full(labels.shape, np.nan, dtype=np.float64)
+    radii = np.asarray(_RENAL_MEDULLA_RADII)
+    for side, kidney_labels in RENAL_LABELS.items():
+        mask = np.isin(labels, kidney_labels)
+        center = np.asarray(_RENAL_MEDULLA_CENTERS[side])
+        radius[mask] = np.sqrt(
+            ((x[mask] - center[0]) / radii[0]) ** 2
+            + ((y[mask] - center[1]) / radii[1]) ** 2
+            + ((z[mask] - center[2]) / radii[2]) ** 2
+        )
+    return radius
+
+
+def _renal_region_masks(labels: np.ndarray, medulla_radius: np.ndarray):
+    """Return ``{side: {region: mask}}`` for cortex, outer and inner medulla."""
+    regions = {}
+    for side, (cortex, medulla) in RENAL_LABELS.items():
+        inner = (labels == medulla) & (medulla_radius < _INNER_MEDULLA_RADIUS)
+        regions[side] = {
+            "cortex": labels == cortex,
+            "outer_medulla": (labels == medulla) & ~inner,
+            "inner_medulla": inner,
+        }
+    return regions
+
+
+def _nephron_region_weights(region_counts: Dict[str, int]):
+    """Return ``{(region, group): segment weights}`` for one kidney.
+
+    Segment shares in empty regions move along the fallback chain, so the
+    weights of every segment still sum to one when the kidney has voxels.
+    """
+    target = {}
+    for region in RENAL_REGIONS:
+        candidates = (region, *_RENAL_REGION_FALLBACK[region])
+        target[region] = next(
+            (name for name in candidates if region_counts.get(name, 0) > 0), None
+        )
+    weights = {}
+    for index, (_, _, group, shares) in enumerate(NEPHRON_SEGMENTS):
+        for region, share in zip(RENAL_REGIONS, shares):
+            if share <= 0.0 or target[region] is None:
+                continue
+            key = (target[region], group)
+            weights.setdefault(key, np.zeros(len(NEPHRON_SEGMENTS)))[index] += share
+    return weights
 
 
 def _compound_pools(config: MousePerfusionConfig) -> Tuple[ChemicalSpecies, ...]:
@@ -1130,17 +1326,20 @@ def _compound_pools(config: MousePerfusionConfig) -> Tuple[ChemicalSpecies, ...]
             species("Spectral reference", -12.274),
         )
     if config.injection_compound == "z_ompd":
-        return (
+        pools = [(carbon, name) for carbon, name in Z_OMPD_CARBON_POOLS.items()]
+        if config.nephron_ph_active:
+            pools += [
+                (carbon, name)
+                for carbons in Z_OMPD_TUBULAR_POOLS.values()
+                for carbon, name in carbons.items()
+            ]
+        return tuple(
             species(
-                Z_OMPD_C5_POOL,
-                z_ompd_shift_ppm("C5", Z_OMPD_REFERENCE_PH)
+                name,
+                z_ompd_shift_ppm(carbon, Z_OMPD_REFERENCE_PH)
                 - config.spectral_reference_ppm,
-            ),
-            species(
-                Z_OMPD_C1_POOL,
-                z_ompd_shift_ppm("C1", Z_OMPD_REFERENCE_PH)
-                - config.spectral_reference_ppm,
-            ),
+            )
+            for carbon, name in pools
         )
     return (
         species("Contrast agent", 0.0),
@@ -1176,45 +1375,82 @@ def _cumulative_trapezoid(values: np.ndarray, times: np.ndarray) -> np.ndarray:
     return result
 
 
-def _urinary_transport(
+def _well_mixed_stage(
     times: np.ndarray,
-    cumulative_excreted: np.ndarray,
-    tubular_transit_s: float,
-    ureter_transit_s: float,
-    quadrature_points: int = 32,
+    inflow: np.ndarray,
+    transit_s: float,
+    relaxation_s_inv: float = 0.0,
 ):
-    """Split cumulatively excreted amounts into tubules, ureter and bladder.
+    """Return the amount in, and the outflow of, a well-mixed compartment.
 
-    Tubular transit times are uniformly distributed between 0.5 and 1.5 times
-    the configured mean; ureteral transport is a plug-flow delay.  The three
-    returned amounts always sum to ``cumulative_excreted``.
+    The compartment empties at ``1 / transit_s`` and its content decays at
+    ``relaxation_s_inv``; ``inflow`` is piecewise linear on ``times``. A zero
+    transit time passes the inflow straight through.
     """
 
-    def delayed(values, delay_s):
-        return np.interp(
-            times - delay_s, times, values, left=0.0, right=float(values[-1])
-        )
+    if transit_s <= 0.0:
+        return np.zeros_like(inflow), inflow.copy()
+    amount = _decaying_amount(times, inflow, 1.0 / transit_s + relaxation_s_inv)
+    return amount, amount / transit_s
 
+
+def _decaying_amount(times: np.ndarray, inflow: np.ndarray, rate: float):
+    """Return the amount fed by piecewise-linear ``inflow`` decaying at ``rate``."""
+
+    if rate <= 0.0:
+        return _cumulative_trapezoid(inflow, times)
+    steps = np.diff(times)
+    x = rate * steps
+    decay = np.exp(-x)
+    forcing = inflow[:-1] * (-np.expm1(-x) / rate) + np.diff(inflow) / steps * (
+        (x + np.expm1(-x)) / rate**2
+    )
+    amount = np.zeros_like(inflow)
+    if steps.size and np.allclose(steps, steps[0], rtol=1e-9, atol=0.0):
+        amount[1:] = lfilter([1.0], [1.0, -decay[0]], forcing)
+    else:
+        for index in range(1, amount.size):
+            amount[index] = amount[index - 1] * decay[index - 1] + forcing[index - 1]
+    return amount
+
+
+def _nephron_segment_amounts(
+    times: np.ndarray,
+    excreted_rate: np.ndarray,
+    tubular_transit_s: float,
+    relaxation_s_inv: float = 0.0,
+    quadrature_points: int = 32,
+) -> np.ndarray:
+    """Return the excreted amount inside each of ``NEPHRON_SEGMENTS``.
+
+    Uses the transit model of :func:`_urinary_transport`: a nephron's transit
+    time is uniform between 0.5 and 1.5 times the mean, and the fluid spends
+    each segment's share of it in that segment. The segment amounts sum to
+    the ``"tubular"`` amount of :func:`_urinary_transport`; ``relaxation_s_inv``
+    decays them during transit. Returns an array of shape (segments, times).
+    """
+
+    times = np.asarray(times, dtype=float)
+    excreted_rate = np.asarray(excreted_rate, dtype=float)
+    # Amount excreted since the start and decayed since excretion; the part
+    # excreted more than d seconds ago is exp(-R d) * cumulative(t - d).
+    cumulative = _decaying_amount(times, excreted_rate, relaxation_s_inv)
     fractions = 0.5 + (np.arange(quadrature_points) + 0.5) / quadrature_points
-    left_tubules = np.mean(
-        [
-            delayed(cumulative_excreted, tubular_transit_s * fraction)
-            for fraction in fractions
-        ],
-        axis=0,
+    boundaries = np.concatenate(
+        ([0.0], np.cumsum([segment[1] for segment in NEPHRON_SEGMENTS]))
     )
-    bladder = delayed(left_tubules, ureter_transit_s)
-    return (
-        cumulative_excreted - left_tubules,
-        left_tubules - bladder,
-        bladder,
-    )
-
-
-def _cumulative_trapezoid(values: np.ndarray, times: np.ndarray) -> np.ndarray:
-    result = np.zeros_like(values, dtype=float)
-    result[1:] = np.cumsum(0.5 * (values[1:] + values[:-1]) * np.diff(times))
-    return result
+    boundaries /= boundaries[-1]
+    older = np.zeros((boundaries.size, times.size))
+    for fraction in fractions:
+        for index, boundary in enumerate(boundaries):
+            delay = tubular_transit_s * fraction * boundary
+            older[index] += np.exp(-relaxation_s_inv * delay) * np.interp(
+                times - delay, times, cumulative, left=0.0
+            )
+    older /= quadrature_points
+    # Linear interpolation of the decaying cumulative amount can leave
+    # round-off-sized negative amounts in late segments.
+    return np.maximum(older[:-1] - older[1:], 0.0)
 
 
 def _urinary_transport(
@@ -1224,48 +1460,45 @@ def _urinary_transport(
     ureter_transit_s: float,
     relaxation_s_inv: float = 0.0,
     quadrature_points: int = 32,
+    *,
+    pelvis_transit_s: float = 0.0,
 ):
-    """Move an excreted rate through the tubules and ureter into the bladder.
+    """Move an excreted rate through tubules, pelvis and ureter to the bladder.
 
     Tubular transit times are uniformly distributed between 0.5 and 1.5 times
-    the configured mean, and the ureter is a well-mixed compartment emptying
-    at ``1 / ureter_transit_s``. ``relaxation_s_inv`` additionally decays the
+    the configured mean; renal pelvis and ureter are well-mixed compartments
+    emptying at ``1 / pelvis_transit_s`` and ``1 / ureter_transit_s`` (a zero
+    transit skips the stage). ``relaxation_s_inv`` additionally decays the
     transported quantity (T1 decay of hyperpolarized excess magnetization).
-    Rates are piecewise linear on ``times``. Returns the tubular, ureter and
-    bladder amounts plus the ureter and bladder inflow rates; without
-    relaxation the three amounts sum to the cumulative excreted amount.
+    Rates are piecewise linear on ``times``. Returns the tubular, pelvis,
+    ureter and bladder amounts plus the pelvis, ureter and bladder inflow
+    rates; without relaxation the four amounts sum to the cumulative excreted
+    amount.
     """
 
     times = np.asarray(times, dtype=float)
     excreted_rate = np.asarray(excreted_rate, dtype=float)
     fractions = 0.5 + (np.arange(quadrature_points) + 0.5) / quadrature_points
-    ureter_inflow = np.zeros_like(excreted_rate)
+    pelvis_inflow = np.zeros_like(excreted_rate)
     for fraction in fractions:
         delay = tubular_transit_s * fraction
-        ureter_inflow += np.exp(-relaxation_s_inv * delay) * np.interp(
+        pelvis_inflow += np.exp(-relaxation_s_inv * delay) * np.interp(
             times - delay, times, excreted_rate, left=0.0
         )
-    ureter_inflow /= quadrature_points
-    left_tubules = _cumulative_trapezoid(ureter_inflow, times)
-    ureter = np.zeros_like(times)
-    if ureter_transit_s > 0.0:
-        rate = 1.0 / ureter_transit_s + relaxation_s_inv
-        for index, step in enumerate(np.diff(times), start=1):
-            x = rate * step
-            decay = np.exp(-x)
-            f0 = -np.expm1(-x) / rate
-            f1 = (x + np.expm1(-x)) / rate**2
-            slope = (ureter_inflow[index] - ureter_inflow[index - 1]) / step
-            ureter[index] = (
-                ureter[index - 1] * decay + ureter_inflow[index - 1] * f0 + slope * f1
-            )
-        bladder_inflow = ureter / ureter_transit_s
-    else:
-        bladder_inflow = ureter_inflow.copy()
+    pelvis_inflow /= quadrature_points
+    left_tubules = _cumulative_trapezoid(pelvis_inflow, times)
+    pelvis, ureter_inflow = _well_mixed_stage(
+        times, pelvis_inflow, pelvis_transit_s, relaxation_s_inv
+    )
+    ureter, bladder_inflow = _well_mixed_stage(
+        times, ureter_inflow, ureter_transit_s, relaxation_s_inv
+    )
     return {
         "tubular": _cumulative_trapezoid(excreted_rate, times) - left_tubules,
+        "pelvis": pelvis,
         "ureter": ureter,
-        "bladder": left_tubules - ureter,
+        "bladder": left_tubules - pelvis - ureter,
+        "pelvis_inflow": pelvis_inflow,
         "ureter_inflow": ureter_inflow,
         "bladder_inflow": bladder_inflow,
     }
@@ -1290,6 +1523,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                 tuple(config.fov_m),
                 tuple(config.mouse_size_m),
                 tuple(config.mouse_offset_m),
+                config.renal_pelvis_enabled,
             )
         )
         if not np.any(labels > 0):
@@ -1319,6 +1553,24 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         ph_map[labels == 5] = config.right_medulla_ph
         ph_map[np.isin(labels, (9, 10)) | arterial | venous] = config.blood_ph
         ph_map[np.isin(labels, URINARY_LUMEN_LABELS)] = config.urine_ph
+        tubular_ph_maps = None
+        if config.nephron_ph_active:
+            # ``ph_map`` is the extracellular pH; it falls from the cortex
+            # value at the corticomedullary border to the papillary
+            # interstitium. Tubular fluid carries its own pH in its own pools.
+            medulla_radius = _renal_medulla_radius(config, labels)
+            for side, (_, medulla) in RENAL_LABELS.items():
+                cortex_ph = getattr(config, f"{side}_cortex_ph")
+                mask = labels == medulla
+                ph_map[mask] = config.papilla_interstitial_ph + (
+                    cortex_ph - config.papilla_interstitial_ph
+                ) * np.clip(medulla_radius[mask], 0.0, 1.0)
+            distal_ph = np.full(config.shape, config.distal_tubule_ph)
+            distal_ph[np.isin(labels, URINARY_LUMEN_LABELS)] = config.urine_ph
+            tubular_ph_maps = {
+                "proximal": np.full(config.shape, config.proximal_tubule_ph),
+                "distal": distal_ph,
+            }
 
         perfusion_weight = np.zeros(config.shape, dtype=np.float64)
         body = labels > 0
@@ -1396,15 +1648,22 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                 "transport_preview": "matches_sequence_source_timing",
                 "perfusion_preview_model": "delayed_inflow_with_exponential_clearance",
                 "renal_excretion_model": (
-                    "solver_first_order_washout_with_urinary_compartment_sources"
+                    "solver_first_order_washout_with_nephron_segment_and_"
+                    "urinary_compartment_sources"
+                    if config.nephron_ph_active
+                    else "solver_first_order_washout_with_urinary_compartment_sources"
                 ),
                 "breathing_model": (
                     "preview_only" if config.breathing_enabled else "disabled"
                 ),
                 "ph_model": (
-                    "z_ompd_grashei_titration_shift_maps"
-                    if config.injection_compound == "z_ompd"
-                    else "ground_truth_map_only"
+                    "z_ompd_nephron_segment_pools"
+                    if config.nephron_ph_active
+                    else (
+                        "z_ompd_grashei_titration_shift_maps"
+                        if config.injection_compound == "z_ompd"
+                        else "ground_truth_map_only"
+                    )
                 ),
                 "alanine_conversion_model": (
                     "liver_heart_brain_kpa_dynamic_third_pool"
@@ -1484,7 +1743,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             conversion_start_s=config.injection_start_s,
             metadata=metadata,
             chemical_shift_maps_ppm=(
-                _z_ompd_shift_maps(ph_map)
+                _z_ompd_shift_maps(ph_map, tubular_ph_maps)
                 if config.injection_compound == "z_ompd" and not tissue_water
                 else None
             ),
@@ -1623,6 +1882,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                 end,
                 latest
                 + 1.5 * self.config.renal_tubular_transit_s
+                + self._pelvis_transit_s
                 + self.config.ureter_transit_s
                 + 4.0 / self._renal_loss_s_inv,
             )
@@ -1635,8 +1895,49 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         )
 
     @property
+    def _pelvis_transit_s(self) -> float:
+        """Mean renal pelvis residence; zero drains tubules into the ureter."""
+        if not self.config.renal_pelvis_enabled:
+            return 0.0
+        return self.config.renal_pelvis_transit_s
+
+    @property
     def _renal_loss_s_inv(self) -> float:
         return self.config.tissue_clearance_s_inv + self.config.renal_excretion_s_inv
+
+    @property
+    def _nephron_ph_active(self) -> bool:
+        return self.config.nephron_ph_active and self.pyruvate_inflow is not None
+
+    def nephron_regions(self) -> Dict[str, Dict[str, np.ndarray]]:
+        """Return ``{side: {region: mask}}`` of cortex, outer and inner medulla."""
+
+        cached = self.__dict__.get("_nephron_region_cache")
+        if cached is None:
+            cached = _renal_region_masks(
+                self.anatomy_labels,
+                _renal_medulla_radius(self.config, self.anatomy_labels),
+            )
+            self._nephron_region_cache = cached
+        return cached
+
+    def _nephron_region_weights(self, side: str):
+        return _nephron_region_weights(
+            {
+                region: int(np.count_nonzero(mask))
+                for region, mask in self.nephron_regions()[side].items()
+            }
+        )
+
+    def _urine_pool(self, name: str) -> str:
+        """Return the pool that carries the urine excreted from pool ``name``."""
+
+        if not self._nephron_ph_active:
+            return name
+        carbon = next(
+            carbon for carbon, pool in Z_OMPD_CARBON_POOLS.items() if pool == name
+        )
+        return Z_OMPD_TUBULAR_POOLS["distal"][carbon]
 
     def _local_loss_map_s_inv(self) -> np.ndarray:
         loss = np.full(self.shape, self.config.tissue_clearance_s_inv, dtype=float)
@@ -1680,11 +1981,12 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
     def _urinary_grid_s(self) -> np.ndarray:
         curve = self.bolus_inflow.rate_curve_s_inv
         start = float(curve.times_s[0])
-        # Long enough for the well-mixed ureters to drain into the bladder.
+        # Long enough for the well-mixed pelvis and ureters to drain into the
+        # bladder.
         end = (
             self.preview_time_bounds_s()[1]
             + 2.0 / self._renal_loss_s_inv
-            + 8.0 * self.config.ureter_transit_s
+            + 8.0 * (self._pelvis_transit_s + self.config.ureter_transit_s)
         )
         step = min(0.1, self.config.injection_duration_s / 16.0)
         count = min(20001, max(2, int(np.ceil((end - start) / step)) + 1))
@@ -1714,14 +2016,15 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         return unique, weights
 
     def _urinary_lookup(self):
-        """Return excreted injected compound in tubules, ureters and bladder.
+        """Return excreted injected compound in tubules, pelvis, ureters, bladder.
 
         Kidney tissue loses tracer at ``renal_excretion_s_inv`` in addition to
         tissue clearance. The excreted amount spends a uniformly distributed
         tubular transit time (0.5–1.5 × the configured mean) in the medulla,
-        then drains through a well-mixed ureter (mean residence
-        ``ureter_transit_s``) and accumulates in the bladder. Amounts are in
-        mol and conserve the excreted dose.
+        then drains through a well-mixed renal pelvis and ureter (mean
+        residences ``renal_pelvis_transit_s`` and ``ureter_transit_s``) and
+        accumulates in the bladder. Amounts are in mol and conserve the
+        excreted dose.
         """
 
         cached = self.__dict__.get("_urinary_lookup_cache")
@@ -1744,10 +2047,19 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
                 flux,
                 self.config.renal_tubular_transit_s,
                 self.config.ureter_transit_s,
+                pelvis_transit_s=self._pelvis_transit_s,
             )
-            result[f"{side}_tubular"] = transport["tubular"]
-            result[f"{side}_ureter"] = transport["ureter"]
+            for stage in ("tubular", "pelvis", "ureter"):
+                result[f"{side}_{stage}"] = transport[stage]
             result["bladder"] += transport["bladder"]
+            if self._nephron_ph_active:
+                segments = _nephron_segment_amounts(
+                    times, flux, self.config.renal_tubular_transit_s
+                )
+                for region in RENAL_REGIONS:
+                    result[f"{side}_{region}"] = np.zeros_like(times)
+                for (region, _), weights in self._nephron_region_weights(side).items():
+                    result[f"{side}_{region}"] += weights @ segments
         self._urinary_lookup_cache = result
         return result
 
@@ -1757,10 +2069,17 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         labels = self.anatomy_labels
         compartments = []
         for side, (cortex, medulla) in RENAL_LABELS.items():
-            tubules = labels == medulla
-            if not np.any(tubules):
-                tubules = labels == cortex
-            compartments.append((f"{side}_tubular", tubules))
+            if self._nephron_ph_active:
+                compartments.extend(
+                    (f"{side}_{region}", mask)
+                    for region, mask in self.nephron_regions()[side].items()
+                )
+            else:
+                tubules = labels == medulla
+                if not np.any(tubules):
+                    tubules = labels == cortex
+                compartments.append((f"{side}_tubular", tubules))
+            compartments.append((f"{side}_pelvis", labels == PELVIS_LABELS[side]))
             compartments.append((f"{side}_ureter", labels == URETER_LABELS[side]))
         compartments.append(("bladder", labels == BLADDER_LABEL))
         return compartments
@@ -1828,7 +2147,9 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             "Brain": self.anatomy_labels == 11,
             "Heart": self.anatomy_labels == 8,
             "Liver": self.anatomy_labels == 6,
-            "Kidneys": np.isin(self.anatomy_labels, (2, 3, 4, 5)),
+            "Kidneys": np.isin(
+                self.anatomy_labels, (2, 3, 4, 5, *PELVIS_LABELS.values())
+            ),
         }
         if np.any(self.anatomy_labels == BLADDER_LABEL):
             regions["Bladder"] = self.anatomy_labels == BLADDER_LABEL
@@ -2005,6 +2326,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             for index, rate in ((1, kpl), (2, kpa))
             if index < len(names)
             and names[index] not in self.pyruvate_inflow.colabelled_pools
+            and names[index] not in _TUBULAR_POOL_NAMES
         ]
         for sample in range(1, times.size):
             dt = float(times[sample] - times[sample - 1])
@@ -2036,11 +2358,19 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         """Return excreted amounts and inflow rates per pool and compartment.
 
         Amounts (mol) are keyed by compartment and pool. ``"rates"`` holds the
-        ureter and bladder inflow rates in mol/s (``"concentration"``) and the
-        matching no-RF longitudinal magnetization rates (``"magnetization"``):
-        kidney tissue is polarized by the injection and relaxes with T1, and
-        its excess magnetization keeps relaxing during tubular and ureteral
-        transit, so urine reaches the bladder T1-attenuated.
+        pelvis, ureter and bladder inflow rates in mol/s (``"concentration"``)
+        and the matching no-RF longitudinal magnetization rates
+        (``"magnetization"``): kidney tissue is polarized by the injection and
+        relaxes with T1, and its excess magnetization keeps relaxing during
+        tubular, pelvic and ureteral transit, so urine reaches the bladder
+        T1-attenuated.
+
+        With the nephron pH model the excreted compound fills the proximal and
+        distal tubular pools of its carbon in each kidney's cortex, outer and
+        inner medulla (``"{side}_{region}"``) and stays in the distal pools as
+        urine. The region rates also replace what the kidney's voxel loss
+        removes from the tubular pools, so the solver follows the segment
+        transport.
         """
 
         cached = self.__dict__.get("_urinary_pool_lookup_cache")
@@ -2048,86 +2378,114 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             return cached
         times = self._urinary_grid_s()
         names = [pool.name for pool in self.pools]
-        zeros = np.zeros_like(times)
-        result = {
-            "times_s": times,
-            "bladder": {name: zeros.copy() for name in names},
-            "rates": {
-                "bladder": {
-                    "concentration": {name: zeros.copy() for name in names},
-                    "magnetization": {name: zeros.copy() for name in names},
-                }
-            },
-        }
+        nephron = self._nephron_ph_active
+
+        def pool_curves():
+            return {name: np.zeros_like(times) for name in names}
+
+        result = {"times_s": times, "rates": {}}
+        for compartment, _ in self._urinary_compartments():
+            result[compartment] = pool_curves()
+            if compartment.endswith("_tubular"):
+                continue
+            result["rates"][compartment] = {
+                "concentration": pool_curves(),
+                "magnetization": pool_curves(),
+            }
         equilibrium = self.equilibrium_polarization
         polarization = self.config.injection_polarization
         relaxation = np.asarray([1.0 / pool.t1 for pool in self.pools])
         scale = self.config.renal_excretion_s_inv * self.voxel_volume_m3
+        transit = self.config.renal_tubular_transit_s
+        loss = self._renal_loss_s_inv
         for side in RENAL_LABELS:
             groups, weights = self._renal_groups(side)
-            ureter_name = f"{side}_ureter"
-            result[f"{side}_tubular"] = {}
-            result[ureter_name] = {}
-            rates = {
-                "concentration": {},
-                "magnetization": {},
-            }
-            result["rates"][ureter_name] = rates
-            kinetics = excess = None
-            if weights.size:
-                arguments = (
-                    times,
-                    groups[:, 0],
-                    weights,
-                    groups[:, 1],
-                    groups[:, 2],
-                    self._renal_loss_s_inv,
-                )
-                kinetics = self._pool_kinetics(*arguments)
-                excess = self._pool_kinetics(
-                    *arguments,
-                    relaxation_s_inv=relaxation,
-                    source_scale=polarization - equilibrium,
-                )
+            if not weights.size:
+                continue
+            arguments = (
+                times,
+                groups[:, 0],
+                weights,
+                groups[:, 1],
+                groups[:, 2],
+                loss,
+            )
+            kinetics = self._pool_kinetics(*arguments)
+            excess = self._pool_kinetics(
+                *arguments,
+                relaxation_s_inv=relaxation,
+                source_scale=polarization - equilibrium,
+            )
+            region_weights = self._nephron_region_weights(side) if nephron else {}
             for index, name in enumerate(names):
-                flux = (
-                    zeros
-                    if kinetics is None
-                    else scale * np.sum(kinetics[name], axis=0)
-                )
-                excess_flux = (
-                    zeros if excess is None else scale * np.sum(excess[name], axis=0)
-                )
+                if name in _TUBULAR_POOL_NAMES:
+                    continue
+                flux = scale * np.sum(kinetics[name], axis=0)
+                excess_flux = scale * np.sum(excess[name], axis=0)
                 transport = _urinary_transport(
                     times,
                     flux,
-                    self.config.renal_tubular_transit_s,
+                    transit,
                     self.config.ureter_transit_s,
+                    pelvis_transit_s=self._pelvis_transit_s,
                 )
                 excess_transport = _urinary_transport(
                     times,
                     excess_flux,
-                    self.config.renal_tubular_transit_s,
+                    transit,
                     self.config.ureter_transit_s,
                     relaxation_s_inv=float(relaxation[index]),
+                    pelvis_transit_s=self._pelvis_transit_s,
                 )
-                result[f"{side}_tubular"][name] = transport["tubular"]
-                result[ureter_name][name] = transport["ureter"]
-                result["bladder"][name] += transport["bladder"]
+                urine = self._urine_pool(name)
+                if not nephron:
+                    result[f"{side}_tubular"][name] += transport["tubular"]
+                for stage in ("pelvis", "ureter"):
+                    result[f"{side}_{stage}"][urine] += transport[stage]
+                result["bladder"][urine] += transport["bladder"]
                 for compartment, key in (
-                    (rates, "ureter_inflow"),
-                    (result["rates"]["bladder"], "bladder_inflow"),
+                    (f"{side}_pelvis", "pelvis_inflow"),
+                    (f"{side}_ureter", "ureter_inflow"),
+                    ("bladder", "bladder_inflow"),
                 ):
                     concentration = transport[key]
-                    magnetization = np.maximum(
+                    rates = result["rates"][compartment]
+                    rates["concentration"][urine] += concentration
+                    rates["magnetization"][urine] += np.maximum(
                         equilibrium * concentration + excess_transport[key], 0.0
                     )
-                    if compartment is rates:
-                        compartment["concentration"][name] = concentration
-                        compartment["magnetization"][name] = magnetization
-                    else:
-                        compartment["concentration"][name] += concentration
-                        compartment["magnetization"][name] += magnetization
+                if not region_weights:
+                    continue
+                carbon = next(
+                    carbon
+                    for carbon, pool in Z_OMPD_CARBON_POOLS.items()
+                    if pool == name
+                )
+                segments = _nephron_segment_amounts(times, flux, transit)
+                excess_segments = _nephron_segment_amounts(
+                    times, excess_flux, transit, float(relaxation[index])
+                )
+                for (region, group), segment_weights in region_weights.items():
+                    pool = Z_OMPD_TUBULAR_POOLS[group][carbon]
+                    compartment = f"{side}_{region}"
+                    amount = segment_weights @ segments
+                    excess_amount = segment_weights @ excess_segments
+                    result[compartment][pool] += amount
+                    # Sources that hold the region's amount and excess
+                    # magnetization on the transport against the voxel loss
+                    # and T1 relaxation of the solver.
+                    concentration = np.maximum(
+                        np.gradient(amount, times) + loss * amount, 0.0
+                    )
+                    excess_rate = (
+                        np.gradient(excess_amount, times)
+                        + (loss + relaxation[names.index(pool)]) * excess_amount
+                    )
+                    rates = result["rates"][compartment]
+                    rates["concentration"][pool] += concentration
+                    rates["magnetization"][pool] += np.maximum(
+                        equilibrium * concentration + excess_rate, 0.0
+                    )
         self._urinary_pool_lookup_cache = result
         return result
 
@@ -2135,10 +2493,13 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         """Return the solver's clearance, excretion and urinary-source model.
 
         Every perfused voxel loses compound at its preview clearance rate
-        (plus renal excretion in the kidneys), ureter voxels drain into the
-        bladder at ``1 / ureter_transit_s``, and the ureters and bladder
-        receive the excreted urine as compartment sources. Tubular transit
-        is a delay that the solver does not image inside the medulla.
+        (plus renal excretion in the kidneys), renal pelvis and ureter voxels
+        drain at ``1 / renal_pelvis_transit_s`` and ``1 / ureter_transit_s``,
+        and pelvis, ureters and bladder receive the excreted urine as
+        compartment sources. Tubular transit is a delay that the solver does
+        not image inside the medulla, unless the nephron pH model places the
+        tubular fluid in cortex, outer and inner medulla. A stage with zero
+        transit holds no urine and passes its inflow straight on.
         """
 
         labels = self.anatomy_labels
@@ -2146,27 +2507,39 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
         loss[np.isin(labels, URINARY_LUMEN_LABELS)] = 0.0
         if not self._renal_excretion_active:
             return VoxelWashout(loss_map_s_inv=loss)
-        if self.config.ureter_transit_s > 0.0:
-            for label in URETER_LABELS.values():
-                loss[labels == label] = 1.0 / self.config.ureter_transit_s
         lookup = self._urinary_pool_lookup()
         names = [pool.name for pool in self.pools]
-        compartments = [
-            (f"{side}_ureter", labels == URETER_LABELS[side]) for side in URETER_LABELS
-        ]
-        compartments.append(("bladder", labels == BLADDER_LABEL))
+        compartments = []
+        for side in RENAL_LABELS:
+            if self._nephron_ph_active:
+                # Kidney voxels keep their renal loss; the region sources
+                # carry the tubular fluid.
+                compartments.extend(
+                    (f"{side}_{region}", mask, True)
+                    for region, mask in self.nephron_regions()[side].items()
+                )
+            for stage, stage_labels, transit in (
+                ("pelvis", PELVIS_LABELS, self._pelvis_transit_s),
+                ("ureter", URETER_LABELS, self.config.ureter_transit_s),
+            ):
+                mask = labels == stage_labels[side]
+                if transit > 0.0:
+                    loss[mask] = 1.0 / transit
+                compartments.append((f"{side}_{stage}", mask, transit > 0.0))
+        compartments.append(("bladder", labels == BLADDER_LABEL, True))
         compartment_map = np.full(self.shape, -1, dtype=np.int32)
         concentration = []
         magnetization = []
-        for index, (name, mask) in enumerate(compartments):
+        for index, (name, mask, holds_urine) in enumerate(compartments):
             volume = max(1, int(np.count_nonzero(mask))) * self.voxel_volume_m3
             compartment_map[mask] = index
             rates = lookup["rates"][name]
+            scale = 1.0 / volume if holds_urine else 0.0
             concentration.append(
-                [rates["concentration"][pool] / volume for pool in names]
+                [rates["concentration"][pool] * scale for pool in names]
             )
             magnetization.append(
-                [rates["magnetization"][pool] / volume for pool in names]
+                [rates["magnetization"][pool] * scale for pool in names]
             )
         return VoxelWashout(
             loss_map_s_inv=loss,
@@ -2174,7 +2547,7 @@ class MousePerfusionPhantom(DynamicSpectralPhantom):
             times_s=lookup["times_s"],
             concentration_rates=np.asarray(concentration),
             magnetization_rates=np.asarray(magnetization),
-            compartment_names=tuple(name for name, _ in compartments),
+            compartment_names=tuple(name for name, _, _ in compartments),
         )
 
     def displacement_map_m(self, time_s: float) -> np.ndarray:

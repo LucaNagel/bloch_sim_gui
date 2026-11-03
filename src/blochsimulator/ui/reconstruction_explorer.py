@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from itertools import product
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..sequence.reconstruction import SequenceReconstructionModel
+from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .colormaps import COLORMAP_NAMES, colormap
 from .reconstruction_phantom import (
     VOLUME_PLANES,
@@ -78,6 +80,8 @@ _VOXEL_PLOT_MIN_HEIGHT = 160
 _EPSI_MIN_ECHOES = 8
 # Interval between repetitions while the frame bar plays them.
 _PLAY_INTERVAL_MS = 500
+# Voxel plot modes whose x axis is a frequency.
+_SPECTRUM_PLOT_MODES = frozenset({"spectrum", "echo_spectrum"})
 # Metabolite colours by name prefix, so one metabolite keeps its colour in
 # every sequence; further names take the fallback colours in order.
 _METABOLITE_COLORS = (
@@ -119,6 +123,42 @@ def metabolite_colors(labels) -> dict:
 def _colormap(name: str):
     """Return a pyqtgraph colormap, including a dependency-free gray map."""
     return colormap(name)
+
+
+def _frequency_reference(dataset):
+    """Return ``(Hz per ppm, receiver reference ppm)`` of a result, or ``None``.
+
+    Spectra are offsets from the receiver frequency, which sits at the
+    sequence reference shift; field strength and nucleus scale Hz to ppm.
+    """
+    attrs = dict(getattr(dataset, "attrs", {}) or {})
+    try:
+        metadata = json.loads(str(attrs.get("metadata_json") or "{}"))
+    except ValueError:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    def value(*names):
+        for source in (attrs, metadata):
+            for name in names:
+                if source.get(name) is not None:
+                    return source[name]
+        return None
+
+    gamma = NUCLEUS_GAMMA_HZ_PER_T.get(str(value("nucleus")))
+    try:
+        field = float(value("field_strength_t", "field_strength"))
+        reference = float(
+            value("sequence_reference_ppm", "spectral_reference_ppm") or 0.0
+        )
+    except (TypeError, ValueError):
+        return None
+    if gamma is None or not (np.isfinite(field) and field > 0.0):
+        return None
+    if not np.isfinite(reference):
+        return None
+    return float(gamma) * field * 1e-6, reference
 
 
 def _display_lut(name: str, strength: float, size: int = 256):
@@ -557,6 +597,13 @@ class SequenceReconstructionExplorer(QWidget):
         self._time_course_cache = {}
         # Time course plots on screen: plot -> (dimension, x values, positions).
         self._time_course_clicks = {}
+        # Spectra on screen: plot -> frequency of every point in Hz.
+        self._frequency_clicks = {}
+        # Frequency clicked in a spectrum (Hz), its image and the axis unit.
+        self._selected_frequency_hz = None
+        self._frequency_reference = None
+        self._frequency_unit_preference = "hz"
+        self._echo_planes_cache = None
         self._repetition_labels = {}
         self._metabolite_colors = {}
         # Manual contrast window of each metabolite and the one last shown.
@@ -673,7 +720,7 @@ class SequenceReconstructionExplorer(QWidget):
         result_splitter.addWidget(images)
         self.spectrum_plot = pg.PlotWidget(title="Selected voxel")
         self.spectrum_plot.scene().sigMouseClicked.connect(
-            lambda event: self._time_course_clicked(self.spectrum_plot, event)
+            lambda event: self._voxel_plot_clicked(self.spectrum_plot, event)
         )
         self.spectrum_plot.setLabel("left", "Signal", "a.u.")
         self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
@@ -695,6 +742,18 @@ class SequenceReconstructionExplorer(QWidget):
         self.voxel_plot_mode_buttons.buttonClicked.connect(
             self._voxel_plot_mode_clicked
         )
+        self.frequency_map_check = QCheckBox("Frequency map")
+        self.frequency_map_check.setObjectName("frequency_map")
+        self.frequency_map_check.setChecked(True)
+        self.frequency_map_check.setToolTip(
+            "Click into the spectrum to select a frequency. When checked, the "
+            "reconstruction shows the spatial distribution of that frequency "
+            "instead of the selected FID point or echo."
+        )
+        self.frequency_map_check.toggled.connect(self._refresh)
+        self.frequency_unit_combo = self._frequency_unit_selector()
+        self.voxel_plot_mode_layout.addWidget(self.frequency_map_check)
+        self.voxel_plot_mode_layout.addWidget(self.frequency_unit_combo)
         voxel_plot_layout.addWidget(self.voxel_plot_mode_bar)
         voxel_plot_layout.addWidget(self.spectrum_plot, 1)
         result_splitter.addWidget(self.voxel_plot_panel)
@@ -720,6 +779,8 @@ class SequenceReconstructionExplorer(QWidget):
         signal_event_row.addWidget(self.signal_event_label)
         signal_event_row.addWidget(self.signal_event_spin)
         signal_event_row.addStretch(1)
+        self.signal_frequency_unit_combo = self._frequency_unit_selector()
+        signal_event_row.addWidget(self.signal_frequency_unit_combo)
         signal_layout.addLayout(signal_event_row)
         self.signal_fid_plot = pg.PlotWidget(title="FID")
         self.signal_spectrum_plot = pg.PlotWidget(title="Spectrum")
@@ -732,6 +793,9 @@ class SequenceReconstructionExplorer(QWidget):
             plot.addLegend()
             plot.setMinimumHeight(_VOXEL_PLOT_MIN_HEIGHT)
             signal_layout.addWidget(plot, 1)
+        self.signal_spectrum_plot.scene().sigMouseClicked.connect(
+            lambda event: self._frequency_clicked(self.signal_spectrum_plot, event)
+        )
         self.pages.addWidget(self.signal_page)
 
         self.three_d_page = QWidget()
@@ -1042,6 +1106,9 @@ class SequenceReconstructionExplorer(QWidget):
         self._contrast_domain_cache.clear()
         self._time_course_cache.clear()
         self._time_course_clicks.clear()
+        self._frequency_clicks.clear()
+        self._selected_frequency_hz = None
+        self._echo_planes_cache = None
         self.play_button.setChecked(False)
         self.frame_bar.hide()
         self.kspace_panel.clear()
@@ -1205,6 +1272,10 @@ class SequenceReconstructionExplorer(QWidget):
         self._time_course_cache.clear()
         self._metabolite_windows.clear()
         self._window_metabolite = None
+        self._selected_frequency_hz = None
+        self._echo_planes_cache = None
+        self._frequency_reference = _frequency_reference(model.dataset)
+        self._update_frequency_unit_controls()
         self._set_phantom(phantom)
         self._populate_controls()
         self._refresh()
@@ -1534,7 +1605,11 @@ class SequenceReconstructionExplorer(QWidget):
             button.setChecked(index == self.voxel_plot_combo.currentIndex())
             self.voxel_plot_mode_buttons.addButton(button, index)
             self.voxel_plot_mode_layout.insertWidget(index, button)
-        self.voxel_plot_mode_bar.setVisible(count > 1)
+        spectral = any(
+            self.voxel_plot_combo.itemData(index) in _SPECTRUM_PLOT_MODES
+            for index in range(count)
+        )
+        self.voxel_plot_mode_bar.setVisible(count > 1 or spectral)
 
     def _voxel_plot_mode_clicked(self, button):
         self.voxel_plot_combo.setCurrentIndex(self.voxel_plot_mode_buttons.id(button))
@@ -1588,6 +1663,13 @@ class SequenceReconstructionExplorer(QWidget):
     def _voxel_plot_changed(self, *_):
         self._sync_voxel_plot_mode_buttons()
         if self._updating or self.model is None:
+            return
+        if (
+            self._selected_frequency_hz is not None
+            and self.frequency_map_check.isChecked()
+        ):
+            # The image follows the plot mode in and out of the frequency map.
+            self._refresh()
             return
         mode, pool_index = self._selected_data_mode()
         self._refresh_voxel_plot(mode, pool_index, self._effective_coil_mode(mode))
@@ -1877,16 +1959,17 @@ class SequenceReconstructionExplorer(QWidget):
 
         self.signal_fid_plot.clear()
         self.signal_spectrum_plot.clear()
+        self._frequency_clicks.pop(self.signal_spectrum_plot, None)
         self.signal_fid_plot.setLimits(xMin=None, xMax=None)
         measurement_ms = 1e3 * float(model.dataset.attrs.get("duration_s") or 0.0)
         time_ms = times * 1e3
-        for plot, x, values in (
-            (self.signal_fid_plot, time_ms, signal),
-            *self._signal_spectrum(times[rows], signal[rows]),
+        self.signal_fid_plot.plot(time_ms, np.abs(signal), pen="w", name="Magnitude")
+        self.signal_fid_plot.plot(time_ms, signal.real, pen="g", name="Real")
+        self.signal_fid_plot.plot(time_ms, signal.imag, pen="r", name="Imaginary")
+        for plot, frequency, spectrum in self._signal_spectrum(
+            times[rows], signal[rows]
         ):
-            plot.plot(x, np.abs(values), pen="w", name="Magnitude")
-            plot.plot(x, values.real, pen="g", name="Real")
-            plot.plot(x, values.imag, pen="r", name="Imaginary")
+            self._plot_spectrum(plot, frequency, spectrum)
         if time_ms.size:
             # Zooming out of the FID stops at the measurement.
             self.signal_fid_plot.setLimits(
@@ -1931,7 +2014,6 @@ class SequenceReconstructionExplorer(QWidget):
             display = model.display_values(
                 image_data, self.component_combo.currentData()
             )
-        display_levels = self._display_levels(display, domain=contrast_domain)
         image_dims = [
             dimension
             for dimension in image_data.dims
@@ -1945,6 +2027,25 @@ class SequenceReconstructionExplorer(QWidget):
             raise ValueError(f"expected two image dimensions, found {image_data.dims}")
         image_values = np.asarray(image_data.copy(data=display).transpose(*image_dims))
         self._image_dims = tuple(image_dims)
+        image_title = f"{self.component_combo.currentText()} reconstruction"
+        frequency_map = self._frequency_map(
+            mode,
+            pool_index,
+            effective_coil_mode,
+            str(self.component_combo.currentData() or "magnitude"),
+        )
+        if frequency_map is None:
+            display_levels = self._display_levels(display, domain=contrast_domain)
+        else:
+            image_values, frequency_domain, frequency_hz = frequency_map
+            # Spectra are far stronger than FID samples: own window and range.
+            display_levels = self._display_levels(
+                image_values, domain=frequency_domain, window_key="frequency"
+            )
+            image_title = (
+                f"{self.component_combo.currentText()} at "
+                f"{self._frequency_text(frequency_hz)}"
+            )
 
         kspace_name = model.kspace_name(pool=mode == "pool")
         kspace = model.select(
@@ -1963,8 +2064,7 @@ class SequenceReconstructionExplorer(QWidget):
         metabolite = self._current_metabolite()
         self.image_panel.set_data(
             image_values,
-            f"{self.component_combo.currentText()} reconstruction"
-            + ("" if metabolite is None else f" · {metabolite}"),
+            image_title + ("" if metabolite is None else f" · {metabolite}"),
             levels=display_levels,
             lut=self._image_lut(),
             interpolation=self._image_interpolation(),
@@ -2072,7 +2172,7 @@ class SequenceReconstructionExplorer(QWidget):
         self._contrast_domain_cache[cache_key] = domain
         return domain
 
-    def _display_levels(self, values, *, domain=None):
+    def _display_levels(self, values, *, domain=None, window_key=None):
         if self.auto_contrast.isChecked():
             finite_range = self._finite_range(values)
             display_low, display_high = (
@@ -2090,6 +2190,8 @@ class SequenceReconstructionExplorer(QWidget):
         if display_high <= 0.0:
             display_high = 1e-6
         metabolite = self._current_metabolite()
+        if window_key is not None:
+            metabolite = (metabolite, window_key)
         if metabolite != self._window_metabolite:
             # Each metabolite keeps its own window; a new one starts at full range.
             if self._window_metabolite is not None:
@@ -2116,8 +2218,13 @@ class SequenceReconstructionExplorer(QWidget):
         plot_mode = self.voxel_plot_combo.currentData()
         self.spectrum_plot.clear()
         self.spectrum_plot.setLimits(xMin=None)
+        self.spectrum_plot.getViewBox().invertX(False)
         self._time_course_clicks.pop(self.spectrum_plot, None)
+        self._frequency_clicks.pop(self.spectrum_plot, None)
         self.spectrum_plot.setToolTip("")
+        spectral = plot_mode in _SPECTRUM_PLOT_MODES
+        self.frequency_unit_combo.setVisible(spectral)
+        self.frequency_map_check.setVisible(spectral)
         if plot_mode is None or self.pages.currentWidget() is not self.two_d_page:
             return
         if plot_mode == "time_course":
@@ -2146,38 +2253,253 @@ class SequenceReconstructionExplorer(QWidget):
         x, y = self._voxel
         values = np.asarray(data.isel(phase_x=x, phase_y=y))
         axis = np.asarray(model.dataset.coords.get(axis_name, np.arange(values.size)))
+        self.spectrum_plot.setLabel("left", "Signal", "a.u.")
         if plot_mode == "fid":
             axis = axis * 1e3
             self.spectrum_plot.setLabel("bottom", "Time", "ms")
             self.spectrum_plot.setLimits(xMin=0.0)
+            self.spectrum_plot.plot(axis, np.abs(values), pen="w", name="Magnitude")
+            self.spectrum_plot.plot(axis, values.real, pen="g", name="Real")
+            self.spectrum_plot.plot(axis, values.imag, pen="r", name="Imaginary")
         else:
-            self.spectrum_plot.setLabel("bottom", "Frequency", "Hz")
-        self.spectrum_plot.setLabel("left", "Signal", "a.u.")
-        self.spectrum_plot.plot(axis, np.abs(values), pen="w", name="Magnitude")
-        self.spectrum_plot.plot(axis, values.real, pen="g", name="Real")
-        self.spectrum_plot.plot(axis, values.imag, pen="r", name="Imaginary")
+            self._plot_spectrum(self.spectrum_plot, axis, values)
         title = "FID" if plot_mode == "fid" else "Spectrum"
         self.spectrum_plot.setTitle(f"{title} · voxel x={x}, y={y}")
 
-    def _echo_series(self, dimension, mode, pool_index, coil_mode):
-        """Return the complex value of the selected voxel at every echo."""
+    def _echo_coil_mode(self):
+        # A root-sum-of-squares drops the phase the echo spectrum needs.
+        coil_mode = str(self.coil_combo.currentData() or "rss")
+        return "sum" if coil_mode == "rss" else coil_mode
+
+    def _frequency_unit_selector(self):
+        combo = QComboBox()
+        combo.setObjectName("frequency_unit")
+        combo.addItem("Hz", "hz")
+        combo.addItem("ppm", "ppm")
+        combo.setToolTip(
+            "Frequency axis of the spectrum: offset from the receiver frequency "
+            "in Hz, or chemical shift in ppm from the field strength, nucleus "
+            "and receiver reference of the simulation"
+        )
+        combo.currentIndexChanged.connect(
+            lambda _index, source=combo: self._frequency_unit_changed(source)
+        )
+        return combo
+
+    def _frequency_unit_changed(self, source):
+        self._frequency_unit_preference = str(source.currentData() or "hz")
+        self._update_frequency_unit_controls()
+        self._refresh()
+
+    def _update_frequency_unit_controls(self):
+        """Show the preferred unit wherever the result defines ppm."""
+        available = self._frequency_reference is not None
+        unit = self._frequency_unit_preference if available else "hz"
+        for combo in (self.frequency_unit_combo, self.signal_frequency_unit_combo):
+            blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findData(unit)))
+            combo.setEnabled(available)
+            combo.blockSignals(blocked)
+
+    def _frequency_unit(self):
+        if self._frequency_reference is None:
+            return "hz"
+        return self._frequency_unit_preference
+
+    def _hz_to_ppm(self, frequency_hz):
+        """Return the chemical shift of a spectrum frequency, or ``None``."""
+        if self._frequency_reference is None:
+            return None
+        hz_per_ppm, reference_ppm = self._frequency_reference
+        # A pool above the receiver reference precesses at a negative offset.
+        return reference_ppm - np.asarray(frequency_hz, dtype=float) / hz_per_ppm
+
+    def _frequency_text(self, frequency_hz):
+        hz = f"{float(frequency_hz):.1f} Hz"
+        ppm = self._hz_to_ppm(frequency_hz)
+        if ppm is None:
+            return hz
+        ppm = f"{float(ppm):.2f} ppm"
+        return f"{ppm} ({hz})" if self._frequency_unit() == "ppm" else f"{hz} ({ppm})"
+
+    def _frequency_bin(self, frequency_hz):
+        """Return the spectrum point of the selected frequency, or ``None``."""
+        frequency_hz = np.asarray(frequency_hz, dtype=float)
+        if self._selected_frequency_hz is None or not frequency_hz.size:
+            return None
+        distance = np.abs(frequency_hz - self._selected_frequency_hz)
+        index = int(np.argmin(distance))
+        spacing = (
+            float(np.median(np.abs(np.diff(frequency_hz))))
+            if frequency_hz.size > 1
+            else 0.0
+        )
+        if distance[index] > 0.5 * spacing + 1e-9 * max(1.0, abs(spacing)):
+            return None
+        return index
+
+    def _plot_spectrum(self, plot, frequency_hz, spectrum):
+        """Plot a spectrum on the chosen axis and mark the selected frequency."""
+        frequency_hz = np.asarray(frequency_hz, dtype=float)
+        unit = self._frequency_unit()
+        if unit == "ppm":
+            axis = self._hz_to_ppm(frequency_hz)
+            plot.setLabel("bottom", "Chemical shift", "ppm")
+        else:
+            axis = frequency_hz
+            plot.setLabel("bottom", "Frequency", "Hz")
+        # Spectroscopy draws the chemical shift decreasing to the right.
+        plot.getViewBox().invertX(unit == "ppm")
+        plot.plot(axis, np.abs(spectrum), pen="w", name="Magnitude")
+        plot.plot(axis, spectrum.real, pen="g", name="Real")
+        plot.plot(axis, spectrum.imag, pen="r", name="Imaginary")
+        self._frequency_clicks[plot] = frequency_hz
+        index = self._frequency_bin(frequency_hz)
+        if index is not None:
+            plot.addItem(
+                pg.InfiniteLine(
+                    axis[index],
+                    angle=90,
+                    pen=pg.mkPen(*_VOXEL_COLOR, width=1),
+                    label=self._frequency_text(frequency_hz[index]),
+                    labelOpts={
+                        "position": 0.9,
+                        "color": _VOXEL_COLOR,
+                        "fill": (0, 0, 0, 160),
+                    },
+                )
+            )
+        tip = "Click into the spectrum to select a frequency"
+        if plot is self.spectrum_plot:
+            tip += "; with Frequency map the image shows where it is"
+        plot.setToolTip(tip + ".")
+
+    def _voxel_plot_clicked(self, plot, event):
+        if not self._frequency_clicked(plot, event):
+            self._time_course_clicked(plot, event)
+
+    def _frequency_clicked(self, plot, event):
+        """Select the spectrum point nearest to a click; ``True`` if handled."""
+        frequency_hz = self._frequency_clicks.get(plot)
+        if frequency_hz is None or not frequency_hz.size:
+            return False
+        if event.button() != Qt.LeftButton:
+            return False
+        view_box = plot.getViewBox()
+        if not view_box.sceneBoundingRect().contains(event.scenePos()):
+            return False
+        x = view_box.mapSceneToView(event.scenePos()).x()
+        axis = (
+            self._hz_to_ppm(frequency_hz)
+            if self._frequency_unit() == "ppm"
+            else frequency_hz
+        )
+        event.accept()
+        self._selected_frequency_hz = float(frequency_hz[np.argmin(np.abs(axis - x))])
+        self._refresh()
+        return True
+
+    def _frequency_map(self, mode, pool_index, coil_mode, component):
+        """Return ``(image, contrast domain, Hz)`` at the selected frequency.
+
+        CSI reads its reconstructed spectra; a multi-echo (EPSI) result
+        transforms the echo stack of every voxel. ``None`` keeps the image of
+        the selected FID point or echo.
+        """
+        model = self.model
+        plot_mode = self.voxel_plot_combo.currentData()
+        if (
+            self._selected_frequency_hz is None
+            or not self.frequency_map_check.isChecked()
+            or plot_mode not in _SPECTRUM_PLOT_MODES
+            or mode == "ideal"
+        ):
+            return None
+        if model.kind == "csi" and plot_mode == "spectrum":
+            name = model.spectrum_name(pool=mode == "pool")
+            frequency_hz = model.dataset.coords.get("spectral_frequency_hz")
+            if not name or frequency_hz is None:
+                return None
+            frequency_hz = np.asarray(frequency_hz, dtype=float)
+            index = self._frequency_bin(frequency_hz)
+            if index is None:
+                return None
+            data = model.select(
+                name,
+                self._selections(),
+                pool_index=pool_index if mode == "pool" else None,
+                coil_mode=coil_mode,
+                **self._average_kwargs(),
+            )
+            spectra = np.asarray(data.transpose(*self._image_dims, "spectral_point"))
+        elif plot_mode == "echo_spectrum":
+            dimension = self._echo_dimension()
+            times = None if dimension is None else self._echo_times_s(dimension)
+            if times is None or len(times) < 2:
+                return None
+            spacing = float(np.median(np.diff(times)))
+            if not spacing > 0.0:
+                return None
+            planes = self._echo_planes(
+                dimension, mode, pool_index, self._echo_coil_mode()
+            )
+            frequency_hz = np.fft.fftshift(np.fft.fftfreq(len(planes), spacing))
+            index = self._frequency_bin(frequency_hz)
+            if index is None:
+                return None
+            spectra = np.moveaxis(
+                np.fft.fftshift(np.fft.fft(planes, axis=0), axes=0), 0, -1
+            )
+        else:
+            return None
+        display = model.display_values(spectra, component)
+        return (
+            display[..., index],
+            self._finite_range(display),
+            float(frequency_hz[index]),
+        )
+
+    def _echo_planes(self, dimension, mode, pool_index, coil_mode):
+        """Return the complex image of every echo as ``(echo, y, x)``."""
         model = self.model
         pool = mode == "pool"
-        x, y = self._voxel
-        values = []
+        selections = self._selections()
+        selections.pop(dimension.name, None)
+        averaging = self._average_kwargs()
+        # The voxel plot and the frequency map need the same echo stack.
+        key = repr(
+            (
+                id(model),
+                dimension.name,
+                sorted(selections.items()),
+                mode,
+                pool_index,
+                coil_mode,
+                averaging,
+                self._image_dims,
+            )
+        )
+        if self._echo_planes_cache is not None and self._echo_planes_cache[0] == key:
+            return self._echo_planes_cache[1]
+        planes = []
         for value in dimension.values:
-            selections = self._selections()
             selections[dimension.name] = value
             data = model.select(
                 model.image_name(pool=pool),
                 selections,
                 pool_index=pool_index if pool else None,
                 coil_mode=coil_mode,
-                **self._average_kwargs(),
+                **averaging,
             )
-            plane = np.asarray(data.transpose(*self._image_dims))
-            values.append(plane[y, x])
-        return np.asarray(values, dtype=complex)
+            planes.append(np.asarray(data.transpose(*self._image_dims)))
+        planes = np.asarray(planes, dtype=complex)
+        self._echo_planes_cache = (key, planes)
+        return planes
+
+    def _echo_series(self, dimension, mode, pool_index, coil_mode):
+        """Return the complex value of the selected voxel at every echo."""
+        x, y = self._voxel
+        return self._echo_planes(dimension, mode, pool_index, coil_mode)[:, y, x]
 
     def _plot_echo_voxel(self, plot_mode, mode, pool_index):
         """Plot the echo train of the selected voxel or its spectrum."""
@@ -2187,11 +2509,7 @@ class SequenceReconstructionExplorer(QWidget):
         if dimension is None or mode == "ideal":
             plot.setTitle("Echo signal is not defined for IDEAL species estimates")
             return
-        # A root-sum-of-squares drops the phase the echo spectrum needs.
-        coil_mode = str(self.coil_combo.currentData() or "rss")
-        if coil_mode == "rss":
-            coil_mode = "sum"
-        values = self._echo_series(dimension, mode, pool_index, coil_mode)
+        values = self._echo_series(dimension, mode, pool_index, self._echo_coil_mode())
         times = self._echo_times_s(dimension)
         plot.setLabel("left", "Signal", "a.u.")
         if plot_mode == "echoes":
@@ -2243,13 +2561,13 @@ class SequenceReconstructionExplorer(QWidget):
         spectrum = np.fft.fftshift(np.fft.fft(values))
         if spacing > 0.0:
             frequency = np.fft.fftshift(np.fft.fftfreq(values.size, spacing))
-            plot.setLabel("bottom", "Frequency", "Hz")
+            self._plot_spectrum(plot, frequency, spectrum)
         else:
             frequency = np.arange(values.size, dtype=float) - values.size // 2
             plot.setLabel("bottom", "Spectral point")
-        plot.plot(frequency, np.abs(spectrum), pen="w", name="Magnitude")
-        plot.plot(frequency, spectrum.real, pen="g", name="Real")
-        plot.plot(frequency, spectrum.imag, pen="r", name="Imaginary")
+            plot.plot(frequency, np.abs(spectrum), pen="w", name="Magnitude")
+            plot.plot(frequency, spectrum.real, pen="g", name="Real")
+            plot.plot(frequency, spectrum.imag, pen="r", name="Imaginary")
         resolution = (
             f" · {1.0 / (values.size * spacing):.3g} Hz resolution"
             if spacing > 0.0
@@ -2757,6 +3075,9 @@ class SequenceReconstructionExplorer(QWidget):
             "interpolation": self._image_interpolation(),
             "spectral_point": self.spectral_point.value(),
             "voxel_plot": self.voxel_plot_combo.currentData(),
+            "frequency_unit": self._frequency_unit_preference,
+            "frequency_map": self.frequency_map_check.isChecked(),
+            "selected_frequency_hz": self._selected_frequency_hz,
             "voxel": list(self._voxel),
             "image_volume_indices": list(self.image_volume.indices),
             "kspace_volume_indices": list(self.kspace_volume.indices),
@@ -2813,6 +3134,17 @@ class SequenceReconstructionExplorer(QWidget):
             )
             self.spectral_point.setValue(int(state.get("spectral_point", 0)))
             self._set_combo_data(self.voxel_plot_combo, state.get("voxel_plot"))
+            self._frequency_unit_preference = (
+                "ppm" if state.get("frequency_unit") == "ppm" else "hz"
+            )
+            self._update_frequency_unit_controls()
+            self.frequency_map_check.setChecked(bool(state.get("frequency_map", True)))
+            selected = state.get("selected_frequency_hz")
+            self._selected_frequency_hz = (
+                float(selected)
+                if isinstance(selected, (int, float)) and np.isfinite(selected)
+                else None
+            )
             voxel = state.get("voxel", (0, 0))
             if isinstance(voxel, (list, tuple)) and len(voxel) == 2:
                 self._voxel = (int(voxel[0]), int(voxel[1]))
