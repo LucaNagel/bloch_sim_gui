@@ -226,7 +226,7 @@ For a pyruvate injection, give lactate spin density 1 but polarization 0
 *Common metabolite* adds peaks with typical shift, T1 and T2\*; see
 [metabolite presets](METABOLITE_PRESETS.md) for the sources.
 
-### 5.2 Kinetics (kPL, inflow, dynamic B0)
+### 5.2 Kinetics (kPL, inflow)
 
 Enable *pyruvate → lactate conversion model* in the **Kinetics / kPL** tab.
 
@@ -265,9 +265,19 @@ Enable *pyruvate → lactate conversion model* in the **Kinetics / kPL** tab.
 
 ### 5.4 B0 and B1
 
-Spatial B0 maps and time-dependent B0 offsets (Hz, separate from RF/receiver
-carriers) are set in the phantom. Transmit and receive fields (uniform,
-birdcage, surface coil) come from the B1 workspace.
+The **B0 Field** tab (between *B1 Fields* and *Receiver / Noise*) edits the
+B0 field of the current phantom, the mouse perfusion phantom included:
+
+- a spatial pattern (linear X/Y/Z or radial XY/XYZ, in ppm, with a movable
+  centre),
+- a constant offset per region: per shape for designer phantoms, per tissue
+  for the mouse phantom,
+- an optional uniform drift over time (Hz, separate from RF/receiver
+  carriers); it needs a time-resolved phantom.
+
+Changes are applied to the phantom automatically and are saved with it. The
+field adds to any B0 map the phantom already has. Transmit and receive fields
+(uniform, birdcage, surface coil) come from the B1 workspace.
 
 ---
 

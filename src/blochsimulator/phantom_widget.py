@@ -43,7 +43,7 @@ from PyQt5.QtWidgets import (
     QRadioButton,
     QButtonGroup,
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSignalBlocker
 
 import pyqtgraph as pg
 
@@ -59,7 +59,7 @@ from .ui.phantom_designer import (
     load_any_phantom,
 )
 from .ui.mouse_phantom_designer import MousePhantomDesignerDialog
-from .ui.volume_viewer import PhantomInspectorWidget
+from .ui.volume_viewer import PhantomInspectorWidget, anatomy_label_lookup_table
 from .ui.widgets import compact_image_histogram
 from .ui.default_settings import WorkspaceDefaults
 from .units import NUCLEUS_GAMMA_HZ_PER_T
@@ -705,9 +705,7 @@ class PhantomViewerWidget(QWidget):
         prop_select_layout = QHBoxLayout()
         prop_select_layout.addWidget(QLabel("Display:"))
         self.prop_combo = QComboBox()
-        self.prop_combo.addItems(
-            ["T1 Map", "T2 Map", "Proton Density", "Off-resonance (dF)", "Mask"]
-        )
+        self.prop_combo.addItems(self.PROPERTY_VIEWS)
         self.prop_combo.currentTextChanged.connect(self._update_property_view)
         prop_select_layout.addWidget(self.prop_combo)
         prop_select_layout.addStretch()
@@ -833,9 +831,33 @@ class PhantomViewerWidget(QWidget):
         view.getView().setAspectLocked(True)
         compact_image_histogram(view)
 
+    PROPERTY_VIEWS = (
+        "T1 Map",
+        "T2 Map",
+        "Proton Density",
+        "Off-resonance (dF)",
+        "Mask",
+    )
+
+    def _update_property_choices(self, phantom) -> None:
+        """Offer the anatomy labels of anatomical phantoms and open on them."""
+        has_labels = getattr(phantom, "anatomy_labels", None) is not None
+        views = list(self.PROPERTY_VIEWS)
+        if has_labels:
+            views.insert(0, "Anatomy labels")
+        current = self.prop_combo.currentText()
+        with QSignalBlocker(self.prop_combo):
+            self.prop_combo.clear()
+            self.prop_combo.addItems(views)
+            if has_labels:
+                self.prop_combo.setCurrentIndex(0)
+            elif current in views:
+                self.prop_combo.setCurrentText(current)
+
     def set_phantom(self, phantom: Optional[Phantom]):
         """Set phantom to display."""
         self.phantom = phantom
+        self._update_property_choices(phantom)
         self._update_property_overview()
         self._update_property_view()
         if phantom is not None:
@@ -886,6 +908,11 @@ class PhantomViewerWidget(QWidget):
             return
 
         view = self.prop_combo.currentText()
+        if view == "Anatomy labels":
+            self.prop_info.setText(self._display_anatomy_labels(self.prop_image))
+            return
+        # Restore the default grey scale after the tissue colour table.
+        self.prop_image.ui.histogram.gradient.loadPreset("grey")
         try:
             data, unit = self._property_map_data(view)
         except AttributeError:
@@ -895,6 +922,46 @@ class PhantomViewerWidget(QWidget):
 
         text = self._display_property_map(self.prop_image, data, unit)
         self.prop_info.setText(text)
+
+    def _display_anatomy_labels(self, image_view) -> str:
+        """Show the central axial slice of the tissue labels in their colours."""
+        labels = np.asarray(self.phantom.anatomy_labels)
+        mask = np.asarray(self.phantom.mask, dtype=bool)
+        if labels.ndim == 3:
+            slice_idx = labels.shape[2] // 2
+            labels = labels[:, :, slice_idx]
+            mask = mask[:, :, slice_idx]
+        lookup = anatomy_label_lookup_table(self.phantom)
+        if lookup is None:
+            image_view.ui.histogram.gradient.loadPreset("grey")
+            maximum = float(max(1, np.max(labels)))
+        else:
+            maximum = float(len(lookup) - 1)
+            image_view.setColorMap(
+                pg.ColorMap(np.linspace(0.0, 1.0, len(lookup)), lookup)
+            )
+        display = np.where(mask, labels, 0).astype(float)
+        fov_x, fov_y = (float(value) for value in self.phantom.fov[:2])
+        image_view.setImage(
+            display,
+            autoLevels=False,
+            levels=(0.0, maximum),
+            autoHistogramRange=False,
+            pos=(-fov_x * 500.0, -fov_y * 500.0),
+            scale=(
+                fov_x * 1000.0 / display.shape[0],
+                fov_y * 1000.0 / display.shape[1],
+            ),
+        )
+        image_view.ui.histogram.setHistogramRange(0.0, maximum)
+        image_view.getView().autoRange()
+        names = getattr(self.phantom, "tissue_label_names", {})
+        present = [
+            names.get(int(label), str(int(label)))
+            for label in np.unique(display)
+            if int(label) != 0
+        ]
+        return "Tissues in the central slice: " + (", ".join(present) or "none")
 
     def _update_property_overview(self):
         if not hasattr(self, "property_overview_views"):
@@ -1273,6 +1340,15 @@ class PhantomWidget(QWidget):
         if self.viewer.phantom is not phantom:
             self.viewer.set_phantom(phantom)
         self.phantom_creator.show_default_preview(phantom.name, phantom)
+
+    def refresh_current_phantom_view(self) -> None:
+        """Redraw the viewer after the current phantom changed in place."""
+        viewer = self.viewer
+        if viewer.phantom is None or viewer.phantom is not self.current_phantom:
+            return
+        viewer._update_property_overview()
+        viewer._update_property_view()
+        viewer.volume_inspector.refresh()
 
     def _on_phantom_created(self, phantom: Phantom):
         """Handle new phantom creation."""

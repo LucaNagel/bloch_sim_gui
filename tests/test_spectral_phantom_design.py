@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,6 +29,7 @@ from blochsimulator.spectral_phantom import SpectralPhantom
 from blochsimulator.ui.phantom_designer import (
     SpectralPhantomDesignerDialog,
     _shape_xy_projection,
+    shape_preview_color,
     load_any_phantom,
     sequence_axis_grids,
 )
@@ -35,7 +37,10 @@ from blochsimulator.ui.sequence_geometry_viewer import SequenceGeometry
 from blochsimulator.ui.default_settings import WorkspaceDefaults
 from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
 from blochsimulator.ui.main_window import BlochSimulatorGUI
+from blochsimulator.ui.b0_widgets import B0WorkspaceWidget
 from blochsimulator.ui.volume_viewer import VolumeViewerWidget
+from blochsimulator.mouse_phantom import MousePerfusionConfig
+from blochsimulator.b0_field import PhantomB0Field
 from blochsimulator.ui.widgets import IMAGE_HISTOGRAM_WIDTH
 from blochsimulator.phantom_widget import (
     PhantomCreatorWidget,
@@ -714,7 +719,14 @@ def test_b0_inhomogeneity_centre_translates_the_pattern():
     ).b0_inhomogeneity_center == (0.5, 0.5, 0.5)
 
 
-def test_designer_b0_tab_edits_pattern_centre_and_shape_offsets():
+def _b0_offset_row(widget, name):
+    for row in range(widget.offset_table.rowCount()):
+        if widget.offset_table.item(row, 0).text() == name:
+            return row
+    raise AssertionError(f"no B0 offset row for {name!r}")
+
+
+def test_designer_has_no_b0_tab_and_keeps_b0_design_fields():
     app = QApplication.instance() or QApplication([])
     design = _spectral_design()
     design.b0_inhomogeneity_mode = "radial_xy"
@@ -722,57 +734,145 @@ def test_designer_b0_tab_edits_pattern_centre_and_shape_offsets():
     design.b0_inhomogeneity_center = (0.25, 0.5, 0.5)
     dialog = SpectralPhantomDesignerDialog(design=design)
 
-    assert dialog.b0_mode_combo.currentData() == "radial_xy"
-    assert [spin.value() for spin in dialog.b0_center_spins] == pytest.approx(
-        [25.0, 50.0, 50.0]
-    )
-    assert dialog.tabs.tabText(dialog.tabs.indexOf(dialog.b0_page)) == "B0"
-    dialog.tabs.setCurrentWidget(dialog.b0_page)
-    app.processEvents()
-    assert "-1 ppm at the centre" in dialog.b0_pattern_info.text()
-    assert dialog.b0_offset_table.rowCount() == 1
-    _, spectrum = dialog.b0_spectrum_curve.getData()
-    _, reference = dialog.b0_spectrum_reference_curve.getData()
-    assert spectrum is not None and reference is not None
-    # The inhomogeneity broadens the lines, which lowers their peak height.
-    assert np.max(spectrum) < np.max(reference)
-    xy_map = dialog.b0_map_images[0].image
-    assert np.unravel_index(np.argmin(xy_map), xy_map.shape)[0] < xy_map.shape[0] / 2
-
-    fov_x_mm = design.fov_m[0] * 1000.0
-    dialog.b0_center_targets[0].setPos(0.25 * fov_x_mm, 0.0)
-    app.processEvents()
-    assert dialog.b0_center_spins[0].value() == pytest.approx(75.0)
-    assert design.b0_inhomogeneity_center[0] == pytest.approx(0.75)
-
-    dialog.b0_offset_table.item(0, 1).setText("0.75")
-    assert design.shapes[0].b0_ppm == pytest.approx(0.75)
-
+    labels = [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())]
+    assert "B0" not in labels
     dialog._sync_global()
-    assert design.b0_inhomogeneity_center == pytest.approx((0.75, 0.5, 0.5))
     assert design.b0_inhomogeneity_mode == "radial_xy"
+    assert design.b0_inhomogeneity_center == pytest.approx((0.25, 0.5, 0.5))
+    phantom = dialog._build_phantom()
+    field = PhantomB0Field(phantom)
+    expected = field.generated_map(field.stored_settings())
+    assert np.ptp(expected) > 0.5
+    assert phantom.b0_map_ppm.reshape(expected.shape) == pytest.approx(expected)
     dialog.close()
     app.processEvents()
 
 
-def test_choosing_a_b0_pattern_starts_from_one_ppm_strength():
+def test_b0_workspace_edits_designer_phantom_pattern_and_shape_offsets():
     app = QApplication.instance() or QApplication([])
     design = _spectral_design()
+    design.shapes[0].b0_ppm = 0.0
+    phantom = design.build()
+    widget = B0WorkspaceWidget()
+    widget.auto_apply.setChecked(False)
+    widget.set_phantom(phantom)
+
+    assert widget.offset_table.rowCount() == 1
+    assert widget.offset_table.item(0, 0).text() == "Object"
+    widget.mode_combo.setCurrentIndex(widget.mode_combo.findData("radial_xy"))
+    # Choosing a pattern starts from 1 ppm instead of a no-op 0 ppm.
+    assert widget.strength_spin.value() == pytest.approx(1.0)
+    assert "-0.5 ppm at the centre" in widget.pattern_info.text()
+    widget.strength_spin.setValue(2.0)
+    widget.center_spins[0].setValue(75.0)
+    widget.offset_table.item(0, 2).setText("0.75")
+    assert widget.apply_field()
+
+    stored = PhantomDesign.from_phantom(phantom)
+    assert stored.b0_inhomogeneity_mode == "radial_xy"
+    assert stored.b0_inhomogeneity_ppm == pytest.approx(2.0)
+    assert stored.b0_inhomogeneity_center == pytest.approx((0.75, 0.5, 0.5))
+    assert stored.shapes[0].b0_ppm == pytest.approx(0.75)
+    weight = np.asarray(stored.rasterize_mask(stored.shapes[0]), dtype=float)
+    expected = stored.rasterize_b0_inhomogeneity().reshape(weight.shape)
+    # Edge voxels carry the offset weighted by their shape fraction.
+    expected = expected + 0.75 * weight
+    assert phantom.b0_map_ppm.reshape(expected.shape) == pytest.approx(expected)
+
+    # Removing the field again restores the phantom's own (zero) map.
+    widget.mode_combo.setCurrentIndex(widget.mode_combo.findData("none"))
+    widget._reset_offsets()
+    assert widget.apply_field()
+    assert np.allclose(phantom.b0_map_ppm, 0.0)
+    widget.close()
+    app.processEvents()
+
+
+def test_b0_workspace_applies_tissue_offsets_to_the_mouse_phantom():
+    app = QApplication.instance() or QApplication([])
+    phantom = MousePerfusionConfig(shape=(12, 8, 24)).build()
+    base = np.array(phantom.b0_map_ppm, dtype=float, copy=True)
+    widget = B0WorkspaceWidget()
+    widget.auto_apply.setChecked(False)
+    widget.set_phantom(phantom)
+
+    names = [
+        widget.offset_table.item(row, 0).text()
+        for row in range(widget.offset_table.rowCount())
+    ]
+    assert "Liver" in names and "Background" not in names
+    widget.offset_table.item(_b0_offset_row(widget, "Liver"), 2).setText("1.5")
+    widget.drift_enabled.setChecked(True)
+    assert widget.apply_field()
+
+    liver_label = next(
+        label for label, name in phantom.tissue_label_names.items() if name == "Liver"
+    )
+    liver = np.asarray(phantom.anatomy_labels) == liver_label
+    difference = np.asarray(phantom.b0_map_ppm).reshape(liver.shape) - base.reshape(
+        liver.shape
+    )
+    assert difference[liver] == pytest.approx(1.5)
+    assert np.allclose(difference[~liver], 0.0)
+    assert phantom.dynamic_b0 is not None
+
+    # A fresh workspace loads the stored field instead of re-adding it.
+    reloaded = B0WorkspaceWidget()
+    reloaded.auto_apply.setChecked(False)
+    reloaded.set_phantom(phantom)
+    row = _b0_offset_row(reloaded, "Liver")
+    assert float(reloaded.offset_table.item(row, 2).text()) == pytest.approx(1.5)
+    assert reloaded.drift_enabled.isChecked()
+    widget.drift_enabled.setChecked(False)
+    widget.offset_table.item(_b0_offset_row(widget, "Liver"), 2).setText("0")
+    assert widget.apply_field()
+    assert np.asarray(phantom.b0_map_ppm) == pytest.approx(base)
+    assert phantom.dynamic_b0 is None
+    widget.close()
+    reloaded.close()
+    app.processEvents()
+
+
+def test_mouse_phantom_opens_on_anatomy_labels():
+    app = QApplication.instance() or QApplication([])
+    phantom = MousePerfusionConfig(shape=(12, 8, 24)).build()
+    viewer = PhantomViewerWidget()
+    viewer.set_phantom(phantom)
+
+    assert viewer.prop_combo.currentText() == "Anatomy labels"
+    assert viewer.volume_inspector.map_combo.currentText() == "Anatomy labels"
+    assert "Liver" in viewer.prop_info.text()
+    viewer.prop_combo.setCurrentText("T1 Map")
+    assert "Tissues" not in viewer.prop_info.text()
+
+    viewer.set_phantom(_spectral_design().build())
+    assert "Anatomy labels" not in [
+        viewer.prop_combo.itemText(index) for index in range(viewer.prop_combo.count())
+    ]
+    viewer.close()
+    app.processEvents()
+
+
+def test_xy_editor_uses_3d_preview_colours_and_shades_the_selection():
+    app = QApplication.instance() or QApplication([])
+    design = _spectral_design()
+    second = replace(design.shapes[0], name="Second", center=(0.3, 0.3, 0.5))
+    design.shapes.append(second)
     dialog = SpectralPhantomDesignerDialog(design=design)
-    assert dialog.b0_mode_combo.currentData() == "none"
-    assert dialog.b0_inhomogeneity_ppm.value() == 0.0
+    dialog.shape_preview_3d.set_shapes = MagicMock()
+    dialog.shape_list.setCurrentRow(1)
+    app.processEvents()
 
-    dialog.b0_mode_combo.setCurrentIndex(dialog.b0_mode_combo.findData("linear_x"))
-    assert dialog.b0_inhomogeneity_ppm.value() == pytest.approx(1.0)
-    assert design.b0_inhomogeneity_ppm == pytest.approx(1.0)
-    assert "1 ppm per half FOV" in dialog.b0_pattern_info.text()
-
-    # A user-chosen strength survives switching between patterns and via None.
-    dialog.b0_inhomogeneity_ppm.setValue(3.0)
-    dialog.b0_mode_combo.setCurrentIndex(dialog.b0_mode_combo.findData("radial_xy"))
-    dialog.b0_mode_combo.setCurrentIndex(dialog.b0_mode_combo.findData("none"))
-    dialog.b0_mode_combo.setCurrentIndex(dialog.b0_mode_combo.findData("linear_z"))
-    assert design.b0_inhomogeneity_ppm == pytest.approx(3.0)
+    for index, projection in enumerate(dialog._projection_items):
+        expected = shape_preview_color(index, 2)
+        color = projection.opts["pen"].color()
+        assert color.rgb() == expected.rgb()
+        assert dialog._rois[index].pen.color().rgb() == expected.rgb()
+    assert dialog._projection_items[0].opts["fillBrush"] is None
+    brush = pg.mkBrush(dialog._projection_items[1].opts["fillBrush"])
+    assert brush.color().rgb() == shape_preview_color(1, 2).rgb()
+    assert 0 < brush.color().alpha() < 128
+    assert dialog._projection_items[1].opts["fillLevel"] == "enclosed"
     dialog.close()
     app.processEvents()
 

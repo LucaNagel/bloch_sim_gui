@@ -789,9 +789,14 @@ applied when volume inference verifies an explicitly sampled, regular Cartesian
 kz dimension. Individual xy-IFFTs at fixed kz remain hybrid-space planes
 `I(x, y, kz)`, not physical z slices.
 
-The designer can add an analytic B0 variation to the constant shape offsets:
-linear x/y/z and radial XY/XYZ modes are stored in ppm and converted using the
-selected simulation field and nucleus. Slice viewers use centred physical mm
+The B0 Field workspace tab (`ui/b0_widgets.py`, `b0_field.py`) adds an
+analytic B0 variation to constant per-region offsets for any phantom: linear
+x/y/z and radial XY/XYZ modes are stored in ppm and converted using the
+selected simulation field and nucleus. Regions are designer shapes or mouse
+tissue labels. For designer phantoms the settings stay in the stored design,
+so Edit Current keeps them; other phantoms store them in
+`metadata["b0_field"]`. Each application subtracts the previously applied
+field, so a phantom's own B0 map is preserved. Slice viewers use centred physical mm
 coordinates; the OpenGL point cloud and its FOV bounding box use the same
 coordinate system. New boxes and ellipsoids can be created by dragging their XY
 bounds directly on the designer canvas; the resulting ROI remains numerically

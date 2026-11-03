@@ -1690,7 +1690,8 @@ def test_phantom_designer_exposes_kinetic_regions_and_preview():
     assert spatial_call.kwargs["highlighted_region"].kind == "ellipsoid"
     assert "kPL region 1" in dialog.kinetics_spatial_preview_info.text()
     dialog.inflow_enabled.setChecked(True)
-    dialog.dynamic_b0_enabled.setChecked(True)
+    # The drift is edited in the B0 Field tab and passes through the design.
+    design.dynamic_b0_curve = TimeCurve((0.0, 10.0), (0.0, 5.0), "linear", "hold")
     dialog._preview()
 
     assert isinstance(dialog.phantom, DynamicSpectralPhantom)
@@ -1734,7 +1735,6 @@ def test_phantom_designer_uses_per_shape_kpl_and_interpolated_curve_display():
 
     assert dialog.time_curve_display.currentData() == "simulated"
     assert not dialog.inflow_curve_table.isEnabled()
-    assert not dialog.dynamic_b0_curve_table.isEnabled()
     labels = {label.text() for label in dialog.findChildren(QLabel)}
     assert "kPL of this shape" in labels
     assert "kPL source for this voxel" not in labels
@@ -1751,8 +1751,6 @@ def test_phantom_designer_uses_per_shape_kpl_and_interpolated_curve_display():
 
     dialog.inflow_enabled.setChecked(True)
     assert dialog.inflow_curve_table.isEnabled()
-    dialog.dynamic_b0_enabled.setChecked(True)
-    assert dialog.dynamic_b0_curve_table.isEnabled()
     rate_curve, polarization_curve = dialog._read_inflow_curves()
     assert rate_curve.interpolation == "linear"
     assert polarization_curve.interpolation == "linear"

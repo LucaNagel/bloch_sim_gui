@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import html
 import os
 from pathlib import Path
@@ -11,7 +10,7 @@ import weakref
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QLocale, QRectF, Qt, pyqtSignal
+from PyQt5.QtCore import QLocale, Qt, pyqtSignal
 from PyQt5.QtGui import QDoubleValidator
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -423,6 +422,11 @@ def _shape_projection(item, fov_mm, axes):
     return projected[hull, 0], projected[hull, 1]
 
 
+def shape_preview_color(index, count, alpha=255):
+    """Colour of shape ``index`` among ``count`` shapes in every designer view."""
+    return pg.intColor(index, hues=max(1, int(count)), alpha=alpha)
+
+
 class ShapePreview3DWidget(QWidget):
     """Small orbitable preview of all design primitives without rasterization."""
 
@@ -510,10 +514,8 @@ class ShapePreview3DWidget(QWidget):
             self.view.removeItem(mesh)
         self._shape_items.clear()
         self.bounds.setData(pos=self._bounds_vertices(fov_mm))
-        hue_count = max(1, len(shapes))
         for index, item in enumerate(shapes):
-            color = pg.intColor(index, hues=hue_count)
-            red, green, blue, _ = color.getRgbF()
+            red, green, blue, _ = shape_preview_color(index, len(shapes)).getRgbF()
             selected = index == selected_row
             self._add_mesh(
                 item,
@@ -601,7 +603,6 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self._inspector_preview_dirty = True
         self._building_inspector_preview = False
         self._suppress_default_kpl = False
-        self._b0_shape_cache = None
         self._rois = []
         self._projection_items = []
         self._sequence_geometry = None
@@ -1114,7 +1115,6 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             "isocentre and/or a ppm range of its peaks.",
         )
 
-        self.tabs.addTab(self._build_b0_page(), "B0")
         self.tabs.addTab(self._build_kinetics_page(), "Kinetics / kPL")
 
         self.inspector = PhantomInspectorWidget()
@@ -1298,234 +1298,6 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         for spin in (*self.matrix_spins, *self.fov_spins):
             spin.valueChanged.connect(self._update_simulation_region_summary)
         return page
-
-    def _build_b0_page(self):
-        b0_page = QWidget()
-        b0_page_layout = QHBoxLayout(b0_page)
-        b0_splitter = QSplitter(Qt.Horizontal)
-        b0_splitter.setChildrenCollapsible(False)
-        self.b0_splitter = b0_splitter
-        b0_controls = QWidget()
-        b0_controls.setMinimumWidth(430)
-        b0_layout = QVBoxLayout(b0_controls)
-        b0_intro = QLabel(
-            "The B0 offset of each voxel is the constant offset of the shape it "
-            "belongs to plus the spatial inhomogeneity pattern (plus an optional "
-            "uniform drift over time). All offsets shift every peak in that voxel."
-        )
-        b0_intro.setWordWrap(True)
-        b0_layout.addWidget(b0_intro)
-
-        inhomogeneity_group = QGroupBox("Spatial B0 inhomogeneity")
-        inhomogeneity_layout = QVBoxLayout(inhomogeneity_group)
-        inhomogeneity_form = QFormLayout()
-        inhomogeneity_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.b0_mode_combo = QComboBox()
-        self.b0_mode_combo.addItem("None", "none")
-        self.b0_mode_combo.addItem("Linear X (2D)", "linear_x")
-        self.b0_mode_combo.addItem("Linear Y (2D)", "linear_y")
-        self.b0_mode_combo.addItem("Linear Z (3D)", "linear_z")
-        self.b0_mode_combo.addItem("Radial XY (2D)", "radial_xy")
-        self.b0_mode_combo.addItem("Radial XYZ (3D)", "radial_xyz")
-        self.b0_mode_combo.setToolTip(
-            "Analytic spatial B0 variation added to each shape's constant offset"
-        )
-        inhomogeneity_form.addRow("Pattern", self.b0_mode_combo)
-        self.b0_inhomogeneity_ppm = self._number_spin(-1000.0, 1000.0, 0.0, " ppm")
-        self.b0_inhomogeneity_ppm.setToolTip(
-            "Strength of the pattern; the text below states the resulting range"
-        )
-        inhomogeneity_form.addRow("Strength", self.b0_inhomogeneity_ppm)
-        center_row = QHBoxLayout()
-        self.b0_center_spins = []
-        for axis in "XYZ":
-            spin = self._number_spin(-50.0, 150.0, 50.0, " %")
-            spin.setDecimals(1)
-            spin.setPrefix(f"{axis} ")
-            spin.setToolTip(
-                f"Pattern centre along {axis} in percent of the FOV (50 % = FOV "
-                "centre). Drag the crosshair in the maps to move it."
-            )
-            self.b0_center_spins.append(spin)
-            center_row.addWidget(spin)
-        self.b0_center_reset = QPushButton("Reset")
-        self.b0_center_reset.setToolTip("Move the pattern centre to the FOV centre")
-        self.b0_center_reset.clicked.connect(self._reset_b0_center)
-        center_row.addWidget(self.b0_center_reset)
-        inhomogeneity_form.addRow("Centre", center_row)
-        inhomogeneity_layout.addLayout(inhomogeneity_form)
-        self.b0_pattern_info = QLabel()
-        self.b0_pattern_info.setWordWrap(True)
-        inhomogeneity_layout.addWidget(self.b0_pattern_info)
-        self.b0_mode_combo.currentIndexChanged.connect(self._b0_settings_changed)
-        self.b0_inhomogeneity_ppm.valueChanged.connect(self._b0_settings_changed)
-        for spin in self.b0_center_spins:
-            spin.valueChanged.connect(self._b0_settings_changed)
-        b0_layout.addWidget(inhomogeneity_group)
-
-        offsets_group = QGroupBox("Constant B0 offset per shape")
-        offsets_layout = QVBoxLayout(offsets_group)
-        offsets_help = QLabel(
-            "Added to the inhomogeneity inside each shape, e.g. for susceptibility "
-            "differences between compartments. Later shapes overwrite earlier ones "
-            "where they overlap."
-        )
-        offsets_help.setWordWrap(True)
-        offsets_layout.addWidget(offsets_help)
-        self.b0_offset_table = QTableWidget(0, 2)
-        self.b0_offset_table.setHorizontalHeaderLabels(["Shape", "B0 offset (ppm)"])
-        self.b0_offset_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.Stretch
-        )
-        self.b0_offset_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.Stretch
-        )
-        self.b0_offset_table.setMinimumHeight(110)
-        self.b0_offset_table.setMaximumHeight(170)
-        self.b0_offset_table.cellChanged.connect(self._b0_offset_table_changed)
-        self.b0_offset_table.currentCellChanged.connect(self._b0_offset_row_selected)
-        offsets_layout.addWidget(self.b0_offset_table)
-        b0_layout.addWidget(offsets_group)
-
-        drift_group = QGroupBox("Uniform B0 drift over time (optional)")
-        drift_layout = QVBoxLayout(drift_group)
-        self.dynamic_b0_enabled = QCheckBox("Enable time-dependent B0 offset")
-        self.dynamic_b0_enabled.toggled.connect(self._update_curve_controls_enabled)
-        drift_layout.addWidget(self.dynamic_b0_enabled)
-        self.dynamic_b0_help = QLabel(
-            "Adds the same frequency offset in Hz to every voxel, linearly "
-            "interpolated over sequence time; endpoint values are held outside "
-            "the table. Requires the time-resolved phantom, so enabling it also "
-            "enables the conversion model on the Kinetics tab."
-        )
-        self.dynamic_b0_help.setWordWrap(True)
-        drift_layout.addWidget(self.dynamic_b0_help)
-        self.dynamic_b0_curve_table = QTableWidget(0, 2)
-        self.dynamic_b0_curve_table.setHorizontalHeaderLabels(
-            ["Time (s)", "Offset (Hz)"]
-        )
-        self.dynamic_b0_curve_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeToContents
-        )
-        self.dynamic_b0_curve_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.Stretch
-        )
-        self.dynamic_b0_curve_table.setMaximumHeight(130)
-        self.dynamic_b0_curve_table.setMinimumHeight(105)
-        self.dynamic_b0_curve_table.cellChanged.connect(
-            self._dynamic_b0_curve_table_changed
-        )
-        drift_layout.addWidget(self.dynamic_b0_curve_table)
-        b0_curve_buttons = QHBoxLayout()
-        self.add_b0_point = QPushButton("Add B0 point")
-        self.add_b0_point.clicked.connect(
-            lambda: self._add_curve_point(self.dynamic_b0_curve_table)
-        )
-        self.remove_b0_point = QPushButton("Remove B0 point")
-        self.remove_b0_point.clicked.connect(
-            lambda: self._remove_curve_point(self.dynamic_b0_curve_table)
-        )
-        b0_curve_buttons.addWidget(self.add_b0_point)
-        b0_curve_buttons.addWidget(self.remove_b0_point)
-        b0_curve_buttons.addStretch()
-        drift_layout.addLayout(b0_curve_buttons)
-        b0_layout.addWidget(drift_group)
-        b0_layout.addStretch(1)
-
-        b0_scroll = QScrollArea()
-        b0_scroll.setWidgetResizable(True)
-        b0_scroll.setFrameShape(QFrame.NoFrame)
-        b0_scroll.setMinimumWidth(450)
-        b0_scroll.setWidget(b0_controls)
-        b0_splitter.addWidget(b0_scroll)
-
-        preview_panel = QWidget()
-        preview_layout = QVBoxLayout(preview_panel)
-        preview_help = QLabel(
-            "B0 map through the pattern centre (drag the crosshair to move it). "
-            "Outlines show the shapes; the colour scale is symmetric about 0 ppm."
-        )
-        preview_help.setWordWrap(True)
-        preview_layout.addWidget(preview_help)
-        self.b0_map_graphics = pg.GraphicsLayoutWidget()
-        self.b0_map_graphics.setMinimumSize(420, 300)
-        self.b0_map_plots = []
-        self.b0_map_images = []
-        self.b0_center_targets = []
-        self.b0_outline_items = [[], []]
-        for column, (title, vertical_axis) in enumerate(
-            (("XY slice (axial)", "y"), ("XZ slice", "z"))
-        ):
-            plot = self.b0_map_graphics.addPlot(row=0, col=column)
-            plot.setTitle(title, size="9pt")
-            plot.setAspectLocked(True)
-            plot.setLabel("bottom", "x", units="mm")
-            plot.setLabel("left", vertical_axis, units="mm")
-            plot.setMenuEnabled(False)
-            image = pg.ImageItem(axisOrder="col-major")
-            plot.addItem(image)
-            target = pg.TargetItem(
-                pos=(0.0, 0.0),
-                size=14,
-                symbol="crosshair",
-                pen=pg.mkPen((255, 220, 80), width=2),
-                movable=True,
-            )
-            target.setZValue(2000)
-            target.sigPositionChanged.connect(
-                lambda item, column=column: self._b0_target_moved(column, item)
-            )
-            plot.addItem(target)
-            self.b0_map_plots.append(plot)
-            self.b0_map_images.append(image)
-            self.b0_center_targets.append(target)
-        self.b0_colorbar = pg.ColorBarItem(
-            values=(-1.0, 1.0),
-            colorMap=pg.colormap.get("CET-D1"),
-            label="B0 (ppm)",
-            interactive=False,
-        )
-        self.b0_colorbar.setImageItem(
-            self.b0_map_images, insert_in=self.b0_map_plots[-1]
-        )
-        preview_layout.addWidget(self.b0_map_graphics, 3)
-
-        spectrum_row = QHBoxLayout()
-        spectrum_row.addWidget(QLabel("Spectrum of shape"))
-        self.b0_preview_shape = QComboBox()
-        self.b0_preview_shape.currentIndexChanged.connect(
-            self._b0_preview_shape_changed
-        )
-        spectrum_row.addWidget(self.b0_preview_shape, 1)
-        preview_layout.addLayout(spectrum_row)
-        self.b0_spectrum_plot = pg.PlotWidget(
-            title="Spectrum summed over the shape's voxels"
-        )
-        self.b0_spectrum_plot.setMinimumHeight(180)
-        self.b0_spectrum_plot.setLabel("bottom", "Frequency", units="ppm")
-        self.b0_spectrum_plot.setLabel("left", "Amplitude", units="a.u.")
-        self.b0_spectrum_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.b0_spectrum_plot.addLegend(offset=(-8, 8))
-        self.b0_spectrum_reference_curve = self.b0_spectrum_plot.plot(
-            pen=pg.mkPen((170, 170, 170), width=1.5, style=Qt.DashLine),
-            name="shape offset only",
-        )
-        self.b0_spectrum_curve = self.b0_spectrum_plot.plot(
-            pen=pg.mkPen((0, 200, 200), width=2),
-            name="with inhomogeneity",
-        )
-        preview_layout.addWidget(self.b0_spectrum_plot, 2)
-        self.b0_preview_info = QLabel()
-        self.b0_preview_info.setWordWrap(True)
-        preview_layout.addWidget(self.b0_preview_info)
-        b0_splitter.addWidget(preview_panel)
-        b0_splitter.setStretchFactor(0, 0)
-        b0_splitter.setStretchFactor(1, 1)
-        b0_splitter.setSizes([480, 900])
-        b0_page_layout.addWidget(b0_splitter)
-        self.b0_page = b0_page
-        self._b0_shape_cache = None
-        return b0_page
 
     def _build_kinetics_page(self):
         kinetics_page = QWidget()
@@ -1919,316 +1691,6 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             self.shape_kpl.setValue(DEFAULT_ENABLED_KPL_S_INV)
         finally:
             self._updating = False
-
-    def _b0_center_fraction(self):
-        return tuple(spin.value() / 100.0 for spin in self.b0_center_spins)
-
-    def _reset_b0_center(self):
-        self._set_b0_center((0.5, 0.5, 0.5))
-
-    def _set_b0_center(self, center):
-        for spin, value in zip(self.b0_center_spins, center):
-            previous = spin.blockSignals(True)
-            spin.setValue(float(value) * 100.0)
-            spin.blockSignals(previous)
-        self._b0_settings_changed()
-
-    def _b0_target_moved(self, column, target):
-        if self._updating or getattr(self, "_moving_b0_targets", False):
-            return
-        fov_mm = [widget.value() for widget in self.fov_spins]
-        position = target.pos()
-        center = list(self._b0_center_fraction())
-        # Column 0 shows x/y, column 1 shows x/z.
-        vertical_axis = 1 if column == 0 else 2
-        center[0] = 0.5 + position.x() / max(fov_mm[0], 1e-12)
-        center[vertical_axis] = 0.5 + position.y() / max(fov_mm[vertical_axis], 1e-12)
-        center = [min(max(value, -0.5), 1.5) for value in center]
-        self._set_b0_center(center)
-
-    def _b0_settings_changed(self, *_):
-        if self._updating:
-            return
-        mode = str(self.b0_mode_combo.currentData())
-        if (
-            self.design.b0_inhomogeneity_mode == "none"
-            and mode != "none"
-            and self.b0_inhomogeneity_ppm.value() == 0.0
-        ):
-            # A pattern without strength has no effect; start from 1 ppm.
-            blocked = self.b0_inhomogeneity_ppm.blockSignals(True)
-            self.b0_inhomogeneity_ppm.setValue(1.0)
-            self.b0_inhomogeneity_ppm.blockSignals(blocked)
-        self.design.b0_inhomogeneity_mode = mode
-        self.design.b0_inhomogeneity_ppm = self.b0_inhomogeneity_ppm.value()
-        self.design.b0_inhomogeneity_center = self._b0_center_fraction()
-        self._inspector_preview_dirty = True
-        self._update_b0_pattern_info()
-        self._update_b0_preview()
-
-    def _update_b0_pattern_info(self):
-        mode = str(self.b0_mode_combo.currentData())
-        amplitude = self.b0_inhomogeneity_ppm.value()
-        centre_enabled = mode != "none"
-        for spin in self.b0_center_spins:
-            spin.setEnabled(centre_enabled)
-        self.b0_center_reset.setEnabled(centre_enabled)
-        self.b0_inhomogeneity_ppm.setEnabled(centre_enabled)
-        if mode == "none":
-            text = "No spatial variation: only the per-shape offsets below apply."
-        elif mode.startswith("linear"):
-            axis = mode[-1].upper()
-            text = (
-                f"Linear gradient along {axis}: 0 ppm at the centre, changing by "
-                f"{amplitude:g} ppm per half FOV ({2.0 * amplitude:g} ppm across "
-                "the FOV). Moving the centre shifts the zero crossing."
-            )
-        else:
-            plane = "XY plane" if mode == "radial_xy" else "3D"
-            text = (
-                f"Radial ({plane}): {-amplitude / 2.0:g} ppm at the centre, rising "
-                f"to {amplitude / 2.0:g} ppm at the distance of the FOV corner from "
-                "the FOV centre. Moving the centre moves the extremum."
-            )
-        self.b0_pattern_info.setText(text)
-
-    def _populate_b0_offset_table(self):
-        if not hasattr(self, "b0_offset_table"):
-            return
-        previous = self.b0_offset_table.blockSignals(True)
-        self.b0_offset_table.setRowCount(len(self.design.shapes))
-        for row, shape in enumerate(self.design.shapes):
-            name_item = QTableWidgetItem(shape.name)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-            self.b0_offset_table.setItem(row, 0, name_item)
-            if shape.b0_hz is not None:
-                value_item = QTableWidgetItem(f"{shape.b0_hz:g} Hz (legacy)")
-                value_item.setFlags(value_item.flags() & ~Qt.ItemIsEditable)
-                value_item.setToolTip(
-                    "Loaded from a design stored in Hz; re-create the shape to use "
-                    "a ppm offset"
-                )
-            else:
-                value_item = QTableWidgetItem(f"{shape.b0_ppm:g}")
-            self.b0_offset_table.setItem(row, 1, value_item)
-        self.b0_offset_table.blockSignals(previous)
-        previous = self.b0_preview_shape.blockSignals(True)
-        selected = self.b0_preview_shape.currentData()
-        if selected is None:
-            selected = self._current_row()
-        self.b0_preview_shape.clear()
-        for row, shape in enumerate(self.design.shapes):
-            self.b0_preview_shape.addItem(shape.name, row)
-        index = self.b0_preview_shape.findData(selected)
-        self.b0_preview_shape.setCurrentIndex(max(0, index))
-        self.b0_preview_shape.blockSignals(previous)
-
-    def _b0_offset_table_changed(self, row, column):
-        if self._updating or column != 1 or not (0 <= row < len(self.design.shapes)):
-            return
-        shape = self.design.shapes[row]
-        item = self.b0_offset_table.item(row, 1)
-        try:
-            value = float(item.text())
-            if not np.isfinite(value):
-                raise ValueError
-        except (AttributeError, TypeError, ValueError):
-            previous = self.b0_offset_table.blockSignals(True)
-            item.setText(f"{shape.b0_ppm:g}")
-            self.b0_offset_table.blockSignals(previous)
-            return
-        shape.b0_ppm = value
-        if self._b0_shape_cache is not None:
-            self._b0_shape_cache["offset_map"] = None
-        self._inspector_preview_dirty = True
-        if self._current_row() == row:
-            self._update_spectral_preview()
-        self._update_b0_preview()
-
-    def _b0_offset_row_selected(self, row, _column, _previous_row, _previous_column):
-        if row < 0:
-            return
-        index = self.b0_preview_shape.findData(row)
-        if index >= 0:
-            self.b0_preview_shape.setCurrentIndex(index)
-
-    def _b0_preview_shape_changed(self, _index):
-        self._update_b0_preview()
-
-    def _refresh_b0_preview(self):
-        """Rasterize shape masks once for the B0 tab on a coarse grid."""
-        try:
-            self._sync_global()
-            preview_design = replace(
-                self.design,
-                shape=tuple(min(int(count), 48) for count in self.design.shape),
-                # The B0 tab shows the whole phantom, not the simulated region.
-                simulation_fov_m=None,
-                supersampling_enabled=False,
-                shapes=list(self.design.shapes),
-                kinetic_regions=[],
-            )
-            masks = [
-                preview_design.rasterize_mask(shape) for shape in self.design.shapes
-            ]
-        except (TypeError, ValueError) as exc:
-            self._b0_shape_cache = None
-            self.b0_preview_info.setText(f"Preview unavailable: {exc}")
-            return
-        self._b0_shape_cache = {
-            "design": preview_design,
-            "masks": masks,
-            "offset_map": None,
-        }
-        self._update_b0_preview()
-
-    def _b0_preview_maps(self):
-        cache = self._b0_shape_cache
-        preview_design = cache["design"]
-        preview_design.b0_inhomogeneity_mode = self.design.b0_inhomogeneity_mode
-        preview_design.b0_inhomogeneity_ppm = self.design.b0_inhomogeneity_ppm
-        preview_design.b0_inhomogeneity_center = self.design.b0_inhomogeneity_center
-        if cache["offset_map"] is None:
-            offset_map = np.zeros(preview_design.shape, dtype=float)
-            for shape, mask in zip(self.design.shapes, cache["masks"]):
-                offset_map[mask] = shape.b0_ppm if shape.b0_hz is None else 0.0
-            cache["offset_map"] = offset_map
-        return (
-            preview_design,
-            cache["offset_map"],
-            cache["offset_map"] + preview_design.rasterize_b0_inhomogeneity(),
-        )
-
-    def _update_b0_preview(self):
-        if (
-            not hasattr(self, "b0_map_images")
-            or self.tabs.currentWidget() is not self.b0_page
-        ):
-            return
-        if self._b0_shape_cache is None or len(self._b0_shape_cache["masks"]) != len(
-            self.design.shapes
-        ):
-            self._refresh_b0_preview()
-            return
-        preview_design, offset_map, b0_map = self._b0_preview_maps()
-        fov_mm = np.asarray(self.design.fov_m, dtype=float) * 1000.0
-        grid = np.asarray(preview_design.shape)
-        center = np.asarray(self.design.b0_inhomogeneity_center, dtype=float)
-        center_index = np.clip(np.floor(center * grid).astype(int), 0, grid - 1)
-        slices = (
-            b0_map[:, :, center_index[2]],
-            b0_map[:, center_index[1], :],
-        )
-        limit = float(np.max(np.abs(b0_map))) if b0_map.size else 0.0
-        limit = limit if limit > 1e-12 else 1.0
-        self._moving_b0_targets = True
-        try:
-            for column, (image, data, axes) in enumerate(
-                zip(self.b0_map_images, slices, ((0, 1), (0, 2)))
-            ):
-                image.setImage(data, autoLevels=False)
-                image.setRect(
-                    QRectF(
-                        -fov_mm[axes[0]] / 2.0,
-                        -fov_mm[axes[1]] / 2.0,
-                        fov_mm[axes[0]],
-                        fov_mm[axes[1]],
-                    )
-                )
-                self.b0_center_targets[column].setPos(
-                    (center[axes[0]] - 0.5) * fov_mm[axes[0]],
-                    (center[axes[1]] - 0.5) * fov_mm[axes[1]],
-                )
-                self.b0_center_targets[column].setVisible(
-                    self.design.b0_inhomogeneity_mode != "none"
-                )
-                plot = self.b0_map_plots[column]
-                for outline in self.b0_outline_items[column]:
-                    plot.removeItem(outline)
-                self.b0_outline_items[column] = []
-                for index, shape in enumerate(self.design.shapes):
-                    x, y = _shape_projection(shape, fov_mm, axes)
-                    outline = pg.PlotDataItem(
-                        (np.asarray(x) - 0.5) * fov_mm[axes[0]],
-                        (np.asarray(y) - 0.5) * fov_mm[axes[1]],
-                        pen=pg.mkPen(
-                            pg.intColor(index, hues=max(1, len(self.design.shapes))),
-                            width=1.5,
-                        ),
-                    )
-                    outline.setZValue(1000)
-                    plot.addItem(outline)
-                    self.b0_outline_items[column].append(outline)
-                plot.setXRange(-fov_mm[axes[0]] / 2.0, fov_mm[axes[0]] / 2.0)
-                plot.setYRange(-fov_mm[axes[1]] / 2.0, fov_mm[axes[1]] / 2.0)
-        finally:
-            self._moving_b0_targets = False
-        self.b0_colorbar.setLevels((-limit, limit))
-        self._update_b0_spectrum(b0_map)
-
-    def _update_b0_spectrum(self, b0_map):
-        row = self.b0_preview_shape.currentData()
-        if row is None or not (0 <= int(row) < len(self.design.shapes)):
-            self.b0_spectrum_curve.setData([], [])
-            self.b0_spectrum_reference_curve.setData([], [])
-            self.b0_preview_info.setText("Add a shape to preview its spectrum.")
-            return
-        row = int(row)
-        shape = self.design.shapes[row]
-        values = b0_map[self._b0_shape_cache["masks"][row]]
-        if values.size == 0:
-            self.b0_spectrum_curve.setData([], [])
-            self.b0_spectrum_reference_curve.setData([], [])
-            self.b0_preview_info.setText(
-                f"{shape.name} covers no voxel of the preview grid."
-            )
-            return
-        if values.size > 4000:
-            values = values[:: int(np.ceil(values.size / 4000))]
-        reference_ppm = float(self.spectral_reference_ppm.value())
-        window_center_ppm = float(self.spectral_window_center_ppm.value())
-        bandwidth_ppm = float(self.spectral_bandwidth_ppm.value())
-        points = max(2, int(self.spectral_points.value()))
-        frequency_ppm = np.linspace(
-            window_center_ppm - bandwidth_ppm / 2.0,
-            window_center_ppm + bandwidth_ppm / 2.0,
-            points,
-        )
-        nucleus = self._effective_nucleus()
-        field_strength_t = float(self.field_strength_t.value())
-        spectrum = np.zeros(points, dtype=float)
-        reference = np.zeros(points, dtype=float)
-        shape_offset = shape.b0_ppm if shape.b0_hz is None else 0.0
-        for peak in shape.peaks:
-            fwhm_ppm = abs(
-                float(
-                    hz_to_ppm(1.0 / (np.pi * peak.t2_star_s), field_strength_t, nucleus)
-                )
-            )
-            half_width_ppm = max(fwhm_ppm / 2.0, np.finfo(float).eps)
-            amplitude = peak.amplitude * peak.effective_initial_polarization(
-                shape.initial_mz
-            )
-            peak_ppm = reference_ppm + peak.frequency_ppm
-            reference += amplitude / (
-                1.0 + ((frequency_ppm - peak_ppm - shape_offset) / half_width_ppm) ** 2
-            )
-            distance = (
-                frequency_ppm[:, None] - peak_ppm - values[None, :]
-            ) / half_width_ppm
-            spectrum += amplitude * np.mean(1.0 / (1.0 + distance**2), axis=1)
-        self.b0_spectrum_reference_curve.setData(frequency_ppm, reference)
-        self.b0_spectrum_curve.setData(frequency_ppm, spectrum)
-        self.b0_spectrum_plot.setXRange(
-            float(frequency_ppm[0]), float(frequency_ppm[-1]), padding=0.02
-        )
-        self.b0_spectrum_plot.enableAutoRange(axis=pg.ViewBox.YAxis)
-        self.b0_preview_info.setText(
-            f"B0 inside {shape.name}: mean {np.mean(values):.3g} ppm, range "
-            f"{np.min(values):.3g} … {np.max(values):.3g} ppm, standard deviation "
-            f"{np.std(values):.3g} ppm (preview grid "
-            f"{'×'.join(str(n) for n in self._b0_shape_cache['design'].shape)})."
-        )
 
     @staticmethod
     def _percent_spin(value):
@@ -2662,14 +2124,6 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.supersampling_factor.setValue(int(self.design.supersampling_factor))
         self._update_spectral_resolution_info()
         self._update_thermal_polarization_info()
-        mode_index = self.b0_mode_combo.findData(self.design.b0_inhomogeneity_mode)
-        self.b0_mode_combo.setCurrentIndex(max(0, mode_index))
-        self.b0_inhomogeneity_ppm.setValue(self.design.b0_inhomogeneity_ppm)
-        for spin, value in zip(
-            self.b0_center_spins, self.design.b0_inhomogeneity_center
-        ):
-            spin.setValue(float(value) * 100.0)
-        self._update_b0_pattern_info()
         self.dynamic_enabled.setChecked(self.design.dynamic_enabled)
         self.kinetics_model_controls.setEnabled(self.design.dynamic_enabled)
         self.pyruvate_peak_name.setText(self.design.pyruvate_peak_name)
@@ -2678,16 +2132,10 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.conversion_start_s.setValue(self.design.conversion_start_s)
         self.kinetics_time_offset_s.setValue(self.design.kinetics_time_offset_s)
         self.inflow_enabled.setChecked(self.design.pyruvate_inflow_curve is not None)
-        self.dynamic_b0_enabled.setChecked(self.design.dynamic_b0_curve is not None)
         self._populate_inflow_curve(
             self.design.pyruvate_inflow_curve,
             self.design.pyruvate_inflow_polarization_curve,
             default=((0.0, 0.0, 1.0), (5.0, 10.0, 10000.0), (6.0, 0.0, 1.0)),
-        )
-        self._populate_time_curve(
-            self.dynamic_b0_curve_table,
-            self.design.dynamic_b0_curve,
-            default=((0.0, 0.0), (10.0, 0.0)),
         )
         self._update_curve_controls_enabled()
         self._populate_kinetic_regions()
@@ -2703,13 +2151,9 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             self.shape_list.addItem(item.name)
             self._create_roi(item, index)
         self._refresh_kinetics_preview_shapes()
-        self._populate_b0_offset_table()
-        self._b0_shape_cache = None
         self._updating = False
         self._simulation_region_changed()
         self._refresh_metabolite_presets()
-        if self.tabs.currentWidget() is self.b0_page:
-            self._refresh_b0_preview()
         if self.design.shapes:
             self.shape_list.setCurrentRow(0)
         else:
@@ -2744,32 +2188,36 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         roi.mouseClickEvent = select_on_click
         self.canvas.addItem(roi)
         self._rois.append(roi)
-        projection = pg.PlotDataItem(pen=self._projection_pen(index, False))
+        # "enclosed" fills the closed outline itself (used for the selection).
+        projection = pg.PlotDataItem(
+            pen=self._projection_pen(index, False), fillLevel="enclosed"
+        )
         projection.setZValue(500)
         self.canvas.addItem(projection)
         self._projection_items.append(projection)
         self._update_shape_projection(index)
         self._update_roi_highlights()
 
+    def _shape_color(self, index, alpha=255):
+        """Colour of shape ``index``, shared by the XY editor and the 3D preview."""
+        return shape_preview_color(index, len(self.design.shapes), alpha)
+
     def _roi_pen(self, index, selected):
-        color = pg.intColor(index, hues=max(1, len(self.design.shapes)))
-        if selected:
-            color = pg.mkColor(255, 220, 80, 235)
-        else:
-            color.setAlpha(30)
         return pg.mkPen(
-            color,
+            self._shape_color(index, 235 if selected else 90),
             width=2.5 if selected else 1,
             style=Qt.DashLine,
         )
 
     def _projection_pen(self, index, selected):
-        color = (
-            pg.mkColor(255, 220, 80, 255)
-            if selected
-            else pg.intColor(index, hues=max(1, len(self.design.shapes)), alpha=130)
+        return pg.mkPen(
+            self._shape_color(index, 255 if selected else 170),
+            width=4 if selected else 2,
         )
-        return pg.mkPen(color, width=5 if selected else 2)
+
+    def _projection_brush(self, index, selected):
+        # The selected shape is lightly shaded; the others stay outlines.
+        return pg.mkBrush(self._shape_color(index, 60)) if selected else None
 
     def _update_shape_projection(self, row):
         if not (0 <= row < len(self.design.shapes)) or not (
@@ -2799,6 +2247,7 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         for index, projection in enumerate(self._projection_items):
             selected = index == selected_row
             projection.setPen(self._projection_pen(index, selected))
+            projection.setFillBrush(self._projection_brush(index, selected))
             projection.setZValue(900 if selected else 500)
 
     def _current_row(self):
@@ -3269,11 +2718,6 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             self._sort_time_curve_table(self.inflow_curve_table, row, column)
         self._update_kinetics_preview()
 
-    def _dynamic_b0_curve_table_changed(self, row, column):
-        if column == 0:
-            self._sort_time_curve_table(self.dynamic_b0_curve_table, row, column)
-        self._inspector_preview_dirty = True
-
     def _update_curve_controls_enabled(self, *_):
         inflow_enabled = self.inflow_enabled.isChecked()
         for widget in (
@@ -3282,13 +2726,6 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
             self.remove_inflow_point,
         ):
             widget.setEnabled(inflow_enabled)
-        b0_enabled = self.dynamic_b0_enabled.isChecked()
-        for widget in (
-            self.dynamic_b0_curve_table,
-            self.add_b0_point,
-            self.remove_b0_point,
-        ):
-            widget.setEnabled(b0_enabled)
         self._inspector_preview_dirty = True
 
     @staticmethod
@@ -3934,13 +3371,12 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.design.spectral_points = self.spectral_points.value()
         self.design.supersampling_enabled = self.supersampling_enabled.isChecked()
         self.design.supersampling_factor = self.supersampling_factor.value()
-        self.design.b0_inhomogeneity_mode = str(self.b0_mode_combo.currentData())
-        self.design.b0_inhomogeneity_ppm = self.b0_inhomogeneity_ppm.value()
-        self.design.b0_inhomogeneity_center = self._b0_center_fraction()
+        # The B0 pattern, per-shape B0 offsets and the B0 drift are edited in
+        # the main window's B0 Field tab and pass through the design unchanged.
         dynamic_requested = (
             self.dynamic_enabled.isChecked()
             or self.inflow_enabled.isChecked()
-            or self.dynamic_b0_enabled.isChecked()
+            or self.design.dynamic_b0_curve is not None
         )
         # Inflow or B0 drift need the time-resolved phantom; switching it on
         # for them must not invent a conversion rate the user never asked for.
@@ -3963,20 +3399,11 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         else:
             self.design.pyruvate_inflow_curve = None
             self.design.pyruvate_inflow_polarization_curve = None
-        self.design.dynamic_b0_curve = (
-            self._read_time_curve(self.dynamic_b0_curve_table, outside="hold")
-            if self.dynamic_b0_enabled.isChecked()
-            else None
-        )
 
     def _tab_changed(self, index):
         if self.tabs.widget(index) is self.region_page:
             self._sync_global()
             self._update_region_preview()
-        if self.tabs.widget(index) is self.b0_page:
-            self._populate_b0_offset_table()
-            self._b0_shape_cache = None
-            self._refresh_b0_preview()
         if self.tabs.widget(index) is self.inspector:
             if self.phantom is None or self._inspector_preview_dirty:
                 self._refresh_inspector_preview()

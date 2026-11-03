@@ -18,6 +18,68 @@ from .dynamic_phantom import (
 from .units import NUCLEUS_GAMMA_HZ_PER_T, hz_to_ppm
 
 
+def analytic_b0_pattern(
+    mode: str,
+    amplitude_ppm: float,
+    center: Tuple[float, float, float],
+    full_shape: Tuple[int, int, int],
+    sampled_axes: Optional[List[np.ndarray]] = None,
+) -> np.ndarray:
+    """Sample an analytic B0 inhomogeneity pattern in ppm.
+
+    ``full_shape`` is the matrix whose FOV sets the pattern scale and
+    ``sampled_axes`` the normalized (0..1) voxel centres to sample; it
+    defaults to the centres of ``full_shape``.  Linear patterns change by
+    ``amplitude_ppm`` per half FOV and cross zero at ``center``; radial
+    patterns run from ``-amplitude/2`` at the centre to ``+amplitude/2`` at
+    the distance of the FOV corner.
+    """
+    full_shape = tuple(int(count) for count in full_shape)
+    if sampled_axes is None:
+        sampled_axes = [
+            (np.arange(count, dtype=float) + 0.5) / count for count in full_shape
+        ]
+    sampled_shape = tuple(len(axis) for axis in sampled_axes)
+    amplitude = float(amplitude_ppm)
+    if mode == "none" or amplitude == 0.0:
+        return np.zeros(sampled_shape, dtype=float)
+    unshifted_axes = [
+        2.0 * (np.arange(count, dtype=float) + 0.5) / count - 1.0
+        for count in full_shape
+    ]
+    shift = 2.0 * np.asarray(center, dtype=float) - 1.0
+    x, y, z = np.meshgrid(
+        *(
+            2.0 * np.asarray(axis, dtype=float) - 1.0 - offset
+            for axis, offset in zip(sampled_axes, shift)
+        ),
+        indexing="ij",
+    )
+    if mode == "linear_x":
+        normalized = x
+    elif mode == "linear_y":
+        normalized = y
+    elif mode == "linear_z":
+        normalized = z
+    else:
+        radial_axes = 2 if mode == "radial_xy" else 3
+        radial_distance = np.sqrt(
+            sum(axis * axis for axis in (x, y, z)[:radial_axes]) / radial_axes
+        )
+        edge_distance = float(
+            np.sqrt(
+                sum(np.max(axis * axis) for axis in unshifted_axes[:radial_axes])
+                / radial_axes
+            )
+        )
+        normalized = (
+            radial_distance / edge_distance - 0.5
+            if edge_distance > 0.0
+            else np.zeros(sampled_shape, dtype=float)
+        )
+    return amplitude * normalized
+
+
 @dataclass
 class SpectralPeakDefinition:
     """One Lorentzian peak assigned to a spatial shape."""
@@ -566,45 +628,15 @@ class PhantomDesign:
         minimum there.  The scale is that of the unshifted pattern, so moving
         the centre never changes the gradient or curvature.
         """
-        mode = self.b0_inhomogeneity_mode
-        amplitude = float(self.b0_inhomogeneity_ppm)
-        if mode == "none" or amplitude == 0.0:
-            return np.zeros(self.simulation_shape, dtype=float)
         # The pattern scale belongs to the whole phantom; a simulated region
         # samples the same pattern at its own voxel centres.
-        unshifted_axes = [
-            2.0 * (np.arange(count, dtype=float) + 0.5) / count - 1.0
-            for count in self.shape
-        ]
-        sampled_axes = [2.0 * axis - 1.0 for axis in self._normalized_axes()]
-        shift = 2.0 * np.asarray(self.b0_inhomogeneity_center, dtype=float) - 1.0
-        x, y, z = np.meshgrid(
-            *(axis - offset for axis, offset in zip(sampled_axes, shift)),
-            indexing="ij",
+        return analytic_b0_pattern(
+            self.b0_inhomogeneity_mode,
+            self.b0_inhomogeneity_ppm,
+            self.b0_inhomogeneity_center,
+            self.shape,
+            self._normalized_axes(),
         )
-        if mode == "linear_x":
-            normalized = x
-        elif mode == "linear_y":
-            normalized = y
-        elif mode == "linear_z":
-            normalized = z
-        else:
-            radial_axes = 2 if mode == "radial_xy" else 3
-            radial_distance = np.sqrt(
-                sum(axis * axis for axis in (x, y, z)[:radial_axes]) / radial_axes
-            )
-            edge_distance = float(
-                np.sqrt(
-                    sum(np.max(axis * axis) for axis in unshifted_axes[:radial_axes])
-                    / radial_axes
-                )
-            )
-            normalized = (
-                radial_distance / edge_distance - 0.5
-                if edge_distance > 0.0
-                else np.zeros(self.simulation_shape, dtype=float)
-            )
-        return amplitude * normalized
 
     def rasterize_kpl(self) -> np.ndarray:
         """Rasterize per-shape kPL values, followed by optional overrides.
