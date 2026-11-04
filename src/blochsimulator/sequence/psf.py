@@ -16,7 +16,9 @@ inverse DFT over the acquired k-space grid. At the voxel centres it equals
 the sequence's centred-FFT reconstruction; in between it samples the same
 band-limited image finely. 2D spiral frames are reconstructed by exact
 density-compensated gridding, ``sum_j w_j s_j exp(2 pi i k_j . x)``, with the
-Pipe-Menon weights of the NUFFT reconstruction.
+Pipe-Menon weights of the NUFFT reconstruction. Phase-encoded 2D CSI holds
+one FID per k-space cell; its PSF is that of the spectral line at the
+source frequency, plus the line shape of the source voxel's spectrum.
 
 Gradient errors (a per-sample deviation ``dk`` of the actual from the
 nominal trajectory, see :func:`.kspace_trajectory.gradient_error`) multiply
@@ -47,6 +49,9 @@ MAX_SAMPLE_IMAGE_PRODUCTS = 1 << 30
 MAX_SLICE_PROFILE_POSITIONS = 801
 # The T2* ensemble rephases at 12 / R2' (see PointSource.frequency_ensemble).
 T2_STAR_REVIVAL_RATE_PRODUCT = 12.0
+# A long ADC event resolves the discrete ensemble lines in its spectrum (CSI
+# FIDs), so the ensemble rephases no earlier than this many event durations.
+T2_STAR_REVIVAL_ADC_DURATIONS = 4.0
 
 
 @dataclass(frozen=True)
@@ -101,7 +106,9 @@ class PointSource:
             return 0.0
         return max(0.0, 1.0 / self.t2_star_s - 1.0 / self.t2_s)
 
-    def frequency_ensemble(self) -> tuple[np.ndarray, np.ndarray]:
+    def frequency_ensemble(
+        self, min_revival_s: float = 0.0
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Return isochromat frequencies in Hz and their weights.
 
         The frequencies are spaced by ``R2' / 12`` (in Hz for R2' in 1/s) around
@@ -112,12 +119,18 @@ class PointSource:
         ``0.3 / R2' <= |t| <= 5 / R2'`` with the default 49 spins. Spin-echo
         peaks reach the sum of the weights (about 0.96) instead of 1, and the
         equispaced ensemble rephases spuriously at ``|t| = 12 / R2'``.
+        A longer ``min_revival_s`` narrows the spacing to ``1 / min_revival_s``
+        and adds spins so that the ensemble covers the same frequency range.
         """
         rate = self.reversible_rate_per_s
         if rate == 0.0 or self.t2_star_spins == 1:
             return np.asarray([self.off_resonance_hz]), np.ones(1)
         count = self.t2_star_spins
         spacing_hz = rate / T2_STAR_REVIVAL_RATE_PRODUCT
+        if min_revival_s * spacing_hz > 1.0:
+            half = int(np.ceil((count - 1) / 2.0 * min_revival_s * spacing_hz))
+            count = 2 * half + 1
+            spacing_hz = 1.0 / min_revival_s
         offsets_hz = (np.arange(count, dtype=float) - (count - 1) / 2.0) * spacing_hz
         edges_hz = np.append(
             offsets_hz - spacing_hz / 2.0, offsets_hz[-1] + spacing_hz / 2.0
@@ -147,6 +160,7 @@ def simulate_point_sources(
     ``signal`` replaced by all source signals, shape ``(source, adc)``.
     A point does not dephase across a gradient, so ``spoiler_mode='ideal'``
     is the meaningful default; ``'gradient'`` keeps only gradient phases.
+    T2* ensembles rephase no earlier than four times the longest ADC event.
     """
     from ..phantom import Phantom
     from ..simulator import BlochSimulator
@@ -158,6 +172,10 @@ def simulate_point_sources(
         raise TypeError("sources must be PointSource instances")
     if simulator is None:
         simulator = BlochSimulator()
+    min_revival_s = T2_STAR_REVIVAL_ADC_DURATIONS * max(
+        (event.num_samples * event.dwell_s for event in program.adc_events),
+        default=0.0,
+    )
 
     signals = []
     result = None
@@ -165,7 +183,7 @@ def simulate_point_sources(
         progress_callback(0, len(sources))
     for start in range(0, len(sources), MAX_SOURCES_PER_RUN):
         batch = sources[start : start + MAX_SOURCES_PER_RUN]
-        ensembles = [source.frequency_ensemble() for source in batch]
+        ensembles = [source.frequency_ensemble(min_revival_s) for source in batch]
         counts = np.asarray([frequencies.size for frequencies, _ in ensembles])
         n_spins = int(counts.sum())
         owner = np.repeat(np.arange(len(batch)), counts)
@@ -509,16 +527,117 @@ def spiral_psf_layouts(result) -> tuple:
     return tuple(layouts)
 
 
+@dataclass(frozen=True)
+class CSIPSFLayout(CartesianPSFLayout):
+    """One repetition of a phase-encoded 2D CSI acquisition.
+
+    Every k-space cell holds a whole FID. The spatial PSF is that of the
+    spectral line at ``frequency_hz``: each FID is projected onto
+    ``exp(-2 pi i f t)``, the evolution of a spin at ``f``, which is the
+    spectrum of the cell at ``f`` (its peak height for a single line).
+    """
+
+    kind = "csi"
+
+    frequency_hz: float = 0.0
+    dwell_s: float = 1.0
+    spectral_points: int = 1
+
+    @property
+    def spectral_time_s(self) -> np.ndarray:
+        return np.arange(self.spectral_points, dtype=float) * self.dwell_s
+
+    @property
+    def spectral_resolution_hz(self) -> float:
+        return 1.0 / (self.spectral_points * self.dwell_s)
+
+    def at_frequency(self, frequency_hz) -> "CSIPSFLayout":
+        return replace(self, frequency_hz=float(frequency_hz))
+
+    def fids(self, result) -> np.ndarray:
+        """Return ``(source, phase, read, spectral_point)`` FIDs of a result."""
+        if np.asarray(result.signal).ndim != 2:
+            raise ValueError("point-source results must have signal (source, adc)")
+        grid = self._layout.reshape_signal(result.signal)
+        return grid[:, self._index] if self._layout.num_repetitions > 1 else grid
+
+    def kspace(self, result) -> np.ndarray:
+        """Return the ``(source, phase, read)`` line amplitude at ``frequency_hz``."""
+        projection = spectral_evolution(self.frequency_hz, self.spectral_time_s)
+        return self.fids(result) @ np.conj(projection) / self.spectral_points
+
+    def with_gradient_error(self, result, gradient_error_cyc_per_m):
+        raise ValueError(
+            "CSI phase encoding has no trajectory to correct; the gradient "
+            "errors stay uncorrected"
+        )
+
+
+# The demodulated signal of a spin at frequency offset f evolves as
+# exp(-2 pi i f t) in this simulator.
+def spectral_evolution(frequency_hz, time_s) -> np.ndarray:
+    return np.exp(-2j * np.pi * np.multiply.outer(frequency_hz, time_s))
+
+
+def csi_psf_layouts(result) -> tuple:
+    """Return every repetition of a 2D CSI result a PSF can be computed for."""
+    from .encoding import in_plane_center_from_definitions
+
+    csi = result.spectroscopic_acquisition
+    if csi is None:
+        raise ValueError("this result has no CSI acquisition layout")
+    centre = in_plane_center_from_definitions(
+        result.metadata.get("sequence_definitions", {})
+    )
+    labels = (
+        [f"repetition={index}" for index in range(csi.num_repetitions)]
+        if csi.num_repetitions > 1
+        else ["frame=0"]
+    )
+    return tuple(
+        CSIPSFLayout(
+            label=label,
+            roles=("phase", "read"),
+            k_cyc_per_m=(csi.ky_cyc_per_m, csi.kx_cyc_per_m),
+            fov_m=(csi.fov_m[1], csi.fov_m[0]),
+            matrix=(csi.matrix[1], csi.matrix[0]),
+            encoding_frame=csi.encoding_frame,
+            center_m=(*centre, 0.0),
+            slice_index=0,
+            _layout=csi,
+            _index=index,
+            dwell_s=csi.dwell_s,
+            spectral_points=csi.spectral_points,
+        )
+        for index, label in enumerate(labels)
+    )
+
+
+def _source_layouts(layouts, source) -> tuple:
+    """Tune CSI layouts to the spectral line of ``source``."""
+    return tuple(
+        (
+            layout.at_frequency(source.off_resonance_hz)
+            if layout.kind == "csi"
+            else layout
+        )
+        for layout in layouts
+    )
+
+
 def psf_layouts(result) -> tuple:
-    """Return the Cartesian or spiral frames a PSF can be computed for."""
+    """Return the Cartesian, spiral or CSI frames a PSF can be computed for."""
     if result.spiral_acquisition is not None:
         return spiral_psf_layouts(result)
+    if result.spectroscopic_acquisition is not None:
+        return csi_psf_layouts(result)
     try:
         return cartesian_psf_layouts(result)
     except ValueError:
         raise ValueError(
-            "PSF estimation supports Cartesian 2D frames and 3D volumes and "
-            "2D spiral frames; this sequence has no supported acquisition layout"
+            "PSF estimation supports Cartesian 2D frames and 3D volumes, 2D "
+            "spiral frames and 2D CSI; this sequence has no supported "
+            "acquisition layout"
         ) from None
 
 
@@ -571,6 +690,28 @@ class AxisPSFMetrics:
 
 
 @dataclass(frozen=True)
+class SpectralPSFMetrics:
+    """Spectral line of a CSI point source in its own voxel, in Hz."""
+
+    resolution_hz: float
+    fwhm_hz: float
+    ideal_fwhm_hz: float
+    peak_offset_hz: float
+    peak_sidelobe_ratio: float
+    ideal_peak_sidelobe_ratio: float
+
+    @property
+    def fwhm_points(self) -> float:
+        """FWHM in spectral points, ``1 / (N dwell)`` each."""
+        return self.fwhm_hz / self.resolution_hz
+
+    @property
+    def broadening(self) -> float:
+        """FWHM relative to the line of an undamped FID."""
+        return self.fwhm_hz / self.ideal_fwhm_hz
+
+
+@dataclass(frozen=True)
 class PSFResult:
     """PSF of one frame for one point source.
 
@@ -584,6 +725,13 @@ class PSFResult:
     ``k_cyc_per_m``; for spiral frames it holds one value per sample and
     ``k_cyc_per_m`` the per-sample k components of the reconstruction.
     ``gradient_error`` is ``"none"``, ``"uncorrected"`` or ``"corrected"``.
+    CSI layouts (``kind == "csi"``) show the spatial PSF of the spectral line
+    at the source frequency; ``spectral_profile`` then holds
+    ``(frequency offset from the source in Hz, line, ideal line)`` of the
+    spectrum at the source position, the ideal being an undamped FID with
+    the k-space centre amplitude, and ``spectral_metrics`` its metrics. The
+    widths are of the magnitude line, which is sqrt(3) times the absorption
+    FWHM ``1 / (pi T2*)`` for a Lorentzian.
     """
 
     source: PointSource
@@ -605,6 +753,8 @@ class PSFResult:
     encoding_frame: EncodingFrame
     kind: str = "cartesian"
     gradient_error: str = "none"
+    spectral_profile: Optional[tuple] = None
+    spectral_metrics: Optional[SpectralPSFMetrics] = None
 
 
 def _wrap(values, period):
@@ -692,7 +842,7 @@ def psf_from_result(
     scanner xyz. It is imposed on the source's signal; with
     ``trajectory_correction`` the reconstruction uses the actual trajectory.
     """
-    layouts = psf_layouts(result)
+    layouts = _source_layouts(psf_layouts(result), source)
     frame = int(frame)
     if not 0 <= frame < len(layouts):
         raise ValueError(f"frame must lie in [0, {len(layouts) - 1}]")
@@ -776,6 +926,17 @@ def psf_from_result(
             ideal_peak_sidelobe_ratio=ideal_sidelobe,
         )
 
+    spectral_profile = None
+    spectral_metrics = None
+    if layout.kind == "csi":
+        spectral_profile, spectral_metrics = _spectral_line(
+            layout,
+            layout.fids(result)[int(source_index)],
+            source_offset,
+            reference,
+            int(profile_oversampling),
+        )
+
     return PSFResult(
         source=source,
         label=layout.label,
@@ -800,7 +961,36 @@ def psf_from_result(
         encoding_frame=layout.encoding_frame,
         kind=layout.kind,
         gradient_error=error_mode,
+        spectral_profile=spectral_profile,
+        spectral_metrics=spectral_metrics,
     )
+
+
+def _spectral_line(layout, fids, source_offset, reference, oversampling):
+    """Spectrum at the source position and its metrics, see :class:`PSFResult`."""
+    time = layout.spectral_time_s
+    points = layout.spectral_points
+    at_source = [np.atleast_1d(value) for value in source_offset]
+    series = evaluate_cartesian_image(
+        np.moveaxis(fids, -1, 0), layout.k_cyc_per_m, at_source
+    ).reshape(points)
+    ideal_series = reference * spectral_evolution(layout.frequency_hz, time)
+    resolution = layout.spectral_resolution_hz
+    offsets = _periodic_offsets(points * oversampling, resolution / oversampling)
+    projection = np.conj(spectral_evolution(layout.frequency_hz + offsets, time))
+    line = projection @ series / points
+    ideal_line = projection @ ideal_series / points
+    width, peak_offset, sidelobe = profile_metrics(offsets, line)
+    ideal_width, _, ideal_sidelobe = profile_metrics(offsets, ideal_line)
+    metrics = SpectralPSFMetrics(
+        resolution_hz=resolution,
+        fwhm_hz=width,
+        ideal_fwhm_hz=ideal_width,
+        peak_offset_hz=float(_wrap(peak_offset, 1.0 / layout.dwell_s)),
+        peak_sidelobe_ratio=sidelobe,
+        ideal_peak_sidelobe_ratio=ideal_sidelobe,
+    )
+    return (offsets, line, ideal_line), metrics
 
 
 def estimate_psf(
@@ -962,7 +1152,7 @@ def estimate_slice_profile(
     )
     sources = tuple(source.moved_to(in_plane + normal * value) for value in positions)
     result = simulate_point_sources(program, sources, **simulation_options)
-    layouts = psf_layouts(result)
+    layouts = _source_layouts(psf_layouts(result), source)
     if len(layouts[0].roles) == 3:
         raise ValueError(
             "3D acquisitions encode the partition direction; use estimate_psf"

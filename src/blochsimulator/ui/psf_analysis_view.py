@@ -49,6 +49,7 @@ ROLE_COLORS = {
 }
 SPIRAL_COLOR = "#0f766e"
 SLICE_COLOR = "#15803d"
+SPECTRAL_COLOR = "#be185d"
 OTHER_SLICE_COLOR = "#94a3b8"
 NOMINAL_FILL = (21, 128, 61, 28)
 # The page scrolls, so the plots keep a readable size in small windows.
@@ -245,9 +246,11 @@ class PSFAnalysisView(QWidget):
             "relaxation during the readout, flip-angle and hyperpolarized "
             "depletion along the k-space order, off-resonance, and T2* through "
             "a Lorentzian frequency ensemble. Supported are Cartesian 2D "
-            "frames and 3D volumes and 2D spiral frames, which are "
-            "reconstructed by density-compensated gridding. Gradient errors "
-            "come from the imperfections set in the k-space tab."
+            "frames and 3D volumes, 2D spiral frames, which are "
+            "reconstructed by density-compensated gridding, and 2D CSI, "
+            "whose spatial PSF is that of the spectral line at the source "
+            "frequency. Gradient errors come from the imperfections set in "
+            "the k-space tab."
         )
         self.summary_label.setWordWrap(True)
         self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -363,10 +366,21 @@ class PSFAnalysisView(QWidget):
             "same sweep seen in the other slices (cross-talk).",
         )
         self.slice_message = pg.TextItem(color="#475569", anchor=(0.5, 0.5))
+        self.spectral_plot = self._plot(
+            "5 · Spectral line (CSI)",
+            "Frequency offset from the source [Hz]",
+            "|Spectrum| / ideal peak",
+            "Magnitude spectrum of the reconstructed CSI voxel at the source "
+            "position. Dashed: the line of an undamped FID with the k-space "
+            "centre amplitude, i.e. the spectral resolution limit. T2* widens "
+            "the line; a magnitude Lorentzian is √3 × 1/(π T2*) wide.",
+        )
+        self.spectral_plot.setVisible(False)
         grid.addWidget(self.image_plot, 0, 0)
         grid.addWidget(self.profile_plot, 0, 1)
         grid.addWidget(self.modulation_plot, 1, 0)
         grid.addWidget(self.slice_plot, 1, 1)
+        grid.addWidget(self.spectral_plot, 2, 0, 1, 2)
         layout.addLayout(grid, 1)
 
         self.metrics_table = QTableWidget(0, 7)
@@ -466,7 +480,8 @@ class PSFAnalysisView(QWidget):
             1,
             " Hz",
             "Frequency offset of the source; EPI shifts it along the phase "
-            "direction by Δf · echo spacing · N voxels.",
+            "direction by Δf · echo spacing · N voxels. CSI maps the "
+            "spectral line at this frequency.",
         )
         self.hyperpolarized = QCheckBox("Hyperpolarized")
         self.hyperpolarized.setToolTip(
@@ -727,11 +742,19 @@ class PSFAnalysisView(QWidget):
         """Redraw all plots from the stored computation."""
         self._dirty = False
         psf = self.psf
-        for plot in (self.profile_plot, self.modulation_plot, self.slice_plot):
+        for plot in (
+            self.profile_plot,
+            self.modulation_plot,
+            self.slice_plot,
+            self.spectral_plot,
+        ):
             plot.clear()
             plot.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
         self.metrics_table.setRowCount(0)
         self._fit_metrics_table()
+        self.spectral_plot.setVisible(
+            psf is not None and psf.spectral_profile is not None
+        )
         if psf is None:
             self.image_item.clear()
             self.title_label.setText("PSF analysis")
@@ -742,6 +765,7 @@ class PSFAnalysisView(QWidget):
         self._render_profiles(psf)
         self._render_modulation(psf)
         self._render_slice_profile(psf)
+        self._render_spectral_line(psf)
         self._render_metrics(psf)
 
     def _render_summary(self):
@@ -753,6 +777,8 @@ class PSFAnalysisView(QWidget):
         title = f"{computation.context.title} · "
         if psf.kind == "spiral":
             title += "2D spiral frame"
+        elif psf.kind == "csi":
+            title += "2D CSI"
         else:
             title += "3D volume" if len(psf.roles) == 3 else "2D frame"
         if len(psf.frame_labels) > 1:
@@ -1035,6 +1061,28 @@ class PSFAnalysisView(QWidget):
             xMin=float(positions_mm.min()), xMax=float(positions_mm.max()), yMin=0.0
         )
 
+    def _render_spectral_line(self, psf):
+        if psf.spectral_profile is None:
+            return
+        plot = self.spectral_plot
+        offsets, line, ideal = psf.spectral_profile
+        scale = float(np.abs(ideal).max()) or 1.0
+        plot.plot(
+            offsets,
+            np.abs(line) / scale,
+            pen=pg.mkPen(SPECTRAL_COLOR, width=2),
+            name="simulated",
+        )
+        plot.plot(
+            offsets,
+            np.abs(ideal) / scale,
+            pen=pg.mkPen(SPECTRAL_COLOR, width=1, style=Qt.DashLine),
+            name="ideal",
+        )
+        plot.enableAutoRange()
+        # The spectrum spans one bandwidth; |spectrum| is never negative.
+        plot.setLimits(xMin=float(offsets.min()), xMax=float(offsets.max()), yMin=0.0)
+
     def _render_metrics(self, psf):
         rows = []
         for role in psf.roles[::-1]:
@@ -1056,6 +1104,17 @@ class PSFAnalysisView(QWidget):
             f"{100 * psf.voxel_energy_fraction:.1f} % of the PSF energy in the "
             f"source voxel (ideal {100 * psf.ideal_voxel_energy_fraction:.1f} %)."
         ]
+        spectral = psf.spectral_metrics
+        if spectral is not None:
+            lines.append(
+                f"Spectral line: FWHM {_format(spectral.fwhm_hz, '{:.3g}')} Hz "
+                f"({_format(spectral.fwhm_points, '{:.2f}')} points of "
+                f"{spectral.resolution_hz:.3g} Hz, "
+                f"{_format(spectral.broadening, '{:.2f}')} × the undamped "
+                f"line), peak shift {_format(spectral.peak_offset_hz, '{:+.3g}')} "
+                f"Hz, side lobe {_format(100 * spectral.peak_sidelobe_ratio, '{:.1f}')} % "
+                f"(ideal {_format(100 * spectral.ideal_peak_sidelobe_ratio, '{:.1f}')} %)."
+            )
         profile = self.computation.slice_profile
         if profile is not None:
             frame = min(psf.frame, len(profile.metrics) - 1)

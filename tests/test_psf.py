@@ -373,3 +373,77 @@ def test_gradient_error_shape_is_checked():
     result = simulate_point_sources(program, (source,), simulator=_simulator())
     with pytest.raises(ValueError):
         psf_from_result(result, source, gradient_error_cyc_per_m=np.zeros((3, 3)))
+
+
+def _csi(tmp_path, name="csi.seq", **kwargs):
+    from blochsimulator.sequence.pulseq_builders import make_pulseq_csi
+
+    options = dict(
+        fov_m=(0.08, 0.08),
+        matrix=(8, 8),
+        spectral_points=64,
+        spectral_bandwidth_hz=2000.0,
+        repetition_time_s=0.06,
+    )
+    options.update(kwargs)
+    return _round_trip(make_pulseq_csi(**options), tmp_path / name)
+
+
+def test_csi_psf_maps_the_off_resonant_line_at_the_source(tmp_path):
+    program = _csi(tmp_path, read_offset_m=0.01)
+    source = PointSource(
+        position_m=(0.013, -0.004, 0.0), off_resonance_hz=250.0, t1_s=5e-3
+    )
+    psf = estimate_psf(program, source, simulator=_simulator())
+
+    assert psf.kind == "csi"
+    assert psf.roles == ("phase", "read")
+    assert psf.peak_efficiency == pytest.approx(1.0, abs=0.05)
+    # Full T1 recovery per TR keeps both directions at the ideal kernel.
+    for role in ("phase", "read"):
+        metrics = psf.axis_metrics[role]
+        assert metrics.broadening == pytest.approx(1.0, abs=0.02)
+        assert metrics.peak_offset_voxels == pytest.approx(0.0, abs=0.02)
+
+    spectral = psf.spectral_metrics
+    assert spectral is not None
+    assert spectral.resolution_hz == pytest.approx(2000.0 / 64)
+    assert spectral.peak_offset_hz == pytest.approx(0.0, abs=1.0)
+    assert spectral.fwhm_hz == pytest.approx(spectral.ideal_fwhm_hz, rel=0.02)
+    assert spectral.fwhm_points == pytest.approx(1.207, abs=0.03)
+    offsets, line, ideal = psf.spectral_profile
+    assert offsets.shape == line.shape == ideal.shape
+    assert offsets[np.argmax(np.abs(line))] == pytest.approx(0.0, abs=1.0)
+
+
+def test_csi_spectral_line_follows_t2_star(tmp_path):
+    program = _csi(
+        tmp_path,
+        matrix=(2, 2),
+        spectral_points=512,
+        repetition_time_s=0.3,
+        repetitions=2,
+    )
+    source = PointSource(t2_s=1.0, t2_star_s=0.02, off_resonance_hz=30.0)
+    psf = estimate_psf(program, source, simulator=_simulator(), frame=1)
+
+    assert psf.frame_labels == ("repetition=0", "repetition=1")
+    assert psf.frame == 1
+    spectral = psf.spectral_metrics
+    # The magnitude of a Lorentzian is sqrt(3) times its absorption FWHM.
+    assert spectral.fwhm_hz == pytest.approx(np.sqrt(3.0) / (np.pi * 0.02), rel=0.08)
+    assert spectral.broadening > 5.0
+    assert spectral.peak_offset_hz == pytest.approx(0.0, abs=1.0)
+
+
+def test_csi_rejects_trajectory_correction_and_has_a_slice_profile(tmp_path):
+    from blochsimulator.sequence.psf import csi_psf_layouts
+
+    program = _csi(tmp_path, matrix=(4, 4), spectral_points=32)
+    source = PointSource()
+    result = simulate_point_sources(program, [source], simulator=_simulator())
+    (layout,) = csi_psf_layouts(result)
+    with pytest.raises(ValueError, match="no trajectory"):
+        layout.with_gradient_error(result, np.zeros((1, 3)))
+    profile = estimate_slice_profile(program, source, simulator=_simulator())
+    assert profile.metrics[0].fwhm_m == pytest.approx(0.01, rel=0.35)

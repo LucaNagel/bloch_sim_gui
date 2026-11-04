@@ -10,7 +10,7 @@ from blochsimulator.sequence.advanced_bssfp_builders import (
     make_pulseq_spectral_selective_bssfp,
 )
 from blochsimulator.sequence.kspace_trajectory import GradientImperfections
-from blochsimulator.sequence.pulseq_builders import make_pulseq_spiral
+from blochsimulator.sequence.pulseq_builders import make_pulseq_csi, make_pulseq_spiral
 from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.psf_analysis_view import (
     PRESETS,
@@ -64,6 +64,19 @@ def _spiral(tmp_path):
     return load_pulseq(path)
 
 
+def _csi(tmp_path):
+    sequence = make_pulseq_csi(
+        fov_m=(0.08, 0.08),
+        matrix=(4, 4),
+        spectral_points=64,
+        spectral_bandwidth_hz=2000.0,
+        repetition_time_s=0.06,
+    )
+    path = tmp_path / "csi.seq"
+    sequence.write(str(path), v141_compat=True)
+    return load_pulseq(path)
+
+
 def _view(program, token=("revision", 0)):
     view = PSFAnalysisView()
     state = {"token": token}
@@ -105,6 +118,7 @@ def test_psf_view_computes_2d_psf_and_slice_profile(qt_application, tmp_path):
     assert view.frame_selector.count() == 2
     assert view.frame_selector.isEnabled()
     assert not view.plane_selector.isEnabled()
+    assert not view.spectral_plot.isVisible()
     assert view.title_label.text().startswith("Test sequence · 2D frame")
     assert "(10, 0, 2) mm" in view.summary_label.text()
 
@@ -205,6 +219,30 @@ def test_psf_view_spiral_psf_and_gradient_error_modes(qt_application, tmp_path):
     assert "nominal trajectory" in view.summary_label.text()
     view.gradient_error_mode.setCurrentText("Ideal gradients")
     assert view.psf.gradient_error == "none"
+    view.close()
+
+
+def test_psf_view_csi_shows_spectral_line(qt_application, tmp_path):
+    view, _ = _view(_csi(tmp_path))
+    view.imperfections_provider = lambda: GradientImperfections(
+        delay_s=(5e-6, 5e-6, 0.0)
+    )
+    view.show()
+    _compute(view)
+
+    psf = view.psf
+    assert psf.kind == "csi"
+    assert "2D CSI" in view.title_label.text()
+    assert view.spectral_plot.isVisible()
+    assert len(view.spectral_plot.listDataItems()) == 2
+    limits = view.spectral_plot.getViewBox().state["limits"]
+    assert limits["yLimits"][0] == 0.0
+    assert "Spectral line: FWHM" in view.metrics_summary.text()
+
+    # Phase encoding has no trajectory, so correction falls back.
+    view.gradient_error_mode.setCurrentText("Errors, trajectory-corrected")
+    assert view.psf.gradient_error == "uncorrected"
+    assert "no trajectory" in view.status_label.text()
     view.close()
 
 
