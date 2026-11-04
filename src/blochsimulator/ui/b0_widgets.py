@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 from typing import Optional
 
 import numpy as np
@@ -229,7 +230,8 @@ class B0WorkspaceWidget(QWidget):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_help = QLabel(
             "Resulting B0 map of the phantom in ppm, shown inside the phantom "
-            "support. The colour scale is symmetric about 0 ppm."
+            "support. Drag in a slice to move the pattern centre (crosshair). "
+            "The colour scale is symmetric about 0 ppm."
         )
         preview_help.setWordWrap(True)
         preview_layout.addWidget(preview_help)
@@ -237,6 +239,7 @@ class B0WorkspaceWidget(QWidget):
         # Neutral (0 ppm) background, so voxels outside the phantom do not
         # read as the most negative offset of the diverging colour scale.
         self.volume.outside_value = 0.0
+        self._build_center_targets()
         preview_layout.addWidget(self.volume, 1)
         self.preview_info = QLabel()
         self.preview_info.setWordWrap(True)
@@ -246,6 +249,92 @@ class B0WorkspaceWidget(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([520, 1180])
         layout.addWidget(splitter, 1)
+
+    def _build_center_targets(self) -> None:
+        """Let a left-drag in a slice move the pattern centre, not the view."""
+        self.center_targets = {}
+        widget_ref = weakref.ref(self)
+        for plane, view in (
+            ("xy", self.volume.xy_view),
+            ("xz", self.volume.xz_view),
+            ("yz", self.volume.yz_view),
+        ):
+            box = view.getView()
+            target = pg.TargetItem(
+                pos=(0.0, 0.0),
+                size=16,
+                symbol="crosshair",
+                pen=pg.mkPen((80, 220, 255), width=2),
+                movable=True,
+            )
+            target.setZValue(2000)
+            target.setToolTip("Drag to move the B0 pattern centre")
+            target.setVisible(False)
+            box.addItem(target, ignoreBounds=True)
+            self.center_targets[plane] = target
+
+            def target_moved(item, selected_plane=plane, ref=widget_ref):
+                widget = ref()
+                if widget is not None:
+                    widget._center_target_moved(selected_plane, item.pos())
+
+            def drag_center(event, axis=None, selected_plane=plane, ref=widget_ref):
+                # Replaces the view-box pan: dragging anywhere in the slice
+                # moves the centre to the cursor; wheel zoom is unchanged.
+                widget = ref()
+                if widget is None or not widget._center_enabled():
+                    event.ignore()
+                    return
+                if event.button() != Qt.LeftButton:
+                    event.ignore()
+                    return
+                event.accept()
+                view_box = widget.center_targets[selected_plane].getViewBox()
+                widget._center_target_moved(
+                    selected_plane, view_box.mapSceneToView(event.scenePos())
+                )
+
+            target.sigPositionChanged.connect(target_moved)
+            box.mouseDragEvent = drag_center
+
+    def _center_enabled(self) -> bool:
+        return self.field is not None and self.mode_combo.currentData() != "none"
+
+    def _center_target_moved(self, plane, position) -> None:
+        if self._updating or self.phantom is None:
+            return
+        fov_mm = np.asarray(self.phantom.fov, dtype=float) * 1000.0
+        axes = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}[plane]
+        center = [spin.value() / 100.0 for spin in self.center_spins]
+        for axis, value in zip(axes, (position.x(), position.y())):
+            center[axis] = min(max(0.5 + value / max(fov_mm[axis], 1e-12), -0.5), 1.5)
+        self._updating = True
+        try:
+            for spin, value in zip(self.center_spins, center):
+                spin.setValue(value * 100.0)
+        finally:
+            self._updating = False
+        self._pattern_changed()
+
+    def _update_center_targets(self) -> None:
+        visible = self._center_enabled() and self.phantom is not None
+        fov_mm = (
+            np.asarray(self.phantom.fov, dtype=float) * 1000.0
+            if self.phantom is not None
+            else np.ones(3)
+        )
+        center = [spin.value() / 100.0 for spin in self.center_spins]
+        self._updating = True
+        try:
+            for plane, axes in (("xy", (0, 1)), ("xz", (0, 2)), ("yz", (1, 2))):
+                target = self.center_targets[plane]
+                target.setPos(
+                    (center[axes[0]] - 0.5) * fov_mm[axes[0]],
+                    (center[axes[1]] - 0.5) * fov_mm[axes[1]],
+                )
+                target.setVisible(visible)
+        finally:
+            self._updating = False
 
     # -- settings <-> UI --------------------------------------------------
     def settings(self) -> B0FieldSettings:
@@ -450,6 +539,8 @@ class B0WorkspaceWidget(QWidget):
         for spin in self.center_spins:
             spin.setEnabled(enabled)
         self.center_reset.setEnabled(enabled)
+        if hasattr(self, "center_targets"):
+            self._update_center_targets()
         self.strength_spin.setEnabled(enabled)
         if mode == "none":
             text = "No spatial variation: only the per-region offsets apply."
@@ -644,6 +735,7 @@ class B0WorkspaceWidget(QWidget):
                 color_map=color_map,
             )
             self._preview_shape = key
+        self._update_center_targets()
         pending = " (not applied yet)" if self._settings_pending else ""
         self.preview_info.setText(
             f"B0 inside the phantom{pending}: mean {np.mean(values):.3g} ppm, range "

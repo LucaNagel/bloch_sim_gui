@@ -269,7 +269,7 @@ The **B0 Field** tab (between *B1 Fields* and *Receiver / Noise*) edits the
 B0 field of the current phantom, the mouse perfusion phantom included:
 
 - a spatial pattern (linear X/Y/Z or radial XY/XYZ, in ppm, with a movable
-  centre),
+  centre: drag in any slice of the preview to move the cyan crosshair),
 - a constant offset per region: per shape for designer phantoms, per tissue
   for the mouse phantom,
 - an optional uniform drift over time (Hz, separate from RF/receiver
