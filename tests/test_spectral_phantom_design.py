@@ -788,6 +788,68 @@ def test_b0_workspace_edits_designer_phantom_pattern_and_shape_offsets():
     app.processEvents()
 
 
+class _FakeDragEvent:
+    def __init__(self, scene_pos):
+        self._scene_pos = scene_pos
+        self.accepted = False
+
+    def button(self):
+        return Qt.LeftButton
+
+    def scenePos(self):
+        return self._scene_pos
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.accepted = False
+
+
+def test_b0_workspace_drag_moves_the_pattern_centre_not_the_view():
+    app = QApplication.instance() or QApplication([])
+    phantom = _spectral_design().build()
+    widget = B0WorkspaceWidget()
+    widget.auto_apply.setChecked(False)
+    widget.resize(1400, 800)
+    widget.show()
+    widget.set_phantom(phantom)
+    app.processEvents()
+    box = widget.volume.xy_view.getView()
+    target = widget.center_targets["xy"]
+    # Without a pattern a drag falls through and no crosshair is shown.
+    assert not target.isVisible()
+    event = _FakeDragEvent(box.mapViewToScene(QPointF(0.0, 0.0)))
+    box.mouseDragEvent(event)
+    assert not event.accepted
+
+    widget.mode_combo.setCurrentIndex(widget.mode_combo.findData("radial_xy"))
+    widget._update_preview()
+    assert all(item.isVisible() for item in widget.center_targets.values())
+    view_range = box.viewRange()
+    fov_mm = np.asarray(phantom.fov) * 1000.0
+    point = QPointF(0.25 * fov_mm[0], -0.1 * fov_mm[1])
+    event = _FakeDragEvent(box.mapViewToScene(point))
+    box.mouseDragEvent(event)
+    assert event.accepted
+    assert box.viewRange() == view_range
+    assert widget.center_spins[0].value() == pytest.approx(75.0, abs=0.5)
+    assert widget.center_spins[1].value() == pytest.approx(40.0, abs=0.5)
+    assert widget.center_spins[2].value() == pytest.approx(50.0)
+    widget._update_preview()
+    assert target.pos().x() == pytest.approx(0.25 * fov_mm[0], abs=0.01 * fov_mm[0])
+
+    # Dragging the crosshair in the coronal slice moves x and z.
+    widget.center_targets["xz"].setPos(-0.2 * fov_mm[0], 0.3 * fov_mm[2])
+    assert widget.center_spins[0].value() == pytest.approx(30.0)
+    assert widget.center_spins[2].value() == pytest.approx(80.0)
+    assert widget.apply_field()
+    stored = PhantomDesign.from_phantom(phantom)
+    assert stored.b0_inhomogeneity_center == pytest.approx((0.3, 0.4, 0.8), abs=0.005)
+    widget.close()
+    app.processEvents()
+
+
 def test_b0_workspace_applies_tissue_offsets_to_the_mouse_phantom():
     app = QApplication.instance() or QApplication([])
     phantom = MousePerfusionConfig(shape=(12, 8, 24)).build()

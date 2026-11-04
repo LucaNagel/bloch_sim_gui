@@ -25,6 +25,8 @@ The project follows [Semantic Versioning](https://semver.org/).
   any phantom, including the mouse perfusion phantom: a spatial pattern,
   constant offsets per shape or tissue, and a drift over time for
   time-resolved phantoms. It replaces the B0 tab of the Phantom Designer.
+  Dragging in its slice preview moves the pattern centre (cyan crosshair)
+  instead of panning the view.
 
 ### Changed
 
