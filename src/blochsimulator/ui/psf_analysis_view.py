@@ -296,8 +296,9 @@ class PSFAnalysisView(QWidget):
         self.image_scale = QComboBox()
         self.image_scale.addItems(["Linear", "dB"])
         self.image_scale.setToolTip(
-            "Colour scale of the PSF image; dB shows side lobes down to "
-            f"{IMAGE_FLOOR_DB:g} dB of the ideal peak"
+            "Colour scale of the PSF image, normalised to the peak of the "
+            "shown plane so the colours span the full range; dB shows side "
+            f"lobes down to {IMAGE_FLOOR_DB:g} dB of that peak"
         )
         self.image_scale.currentIndexChanged.connect(self._display_changed)
         controls.addWidget(self.image_scale)
@@ -832,15 +833,17 @@ class PSFAnalysisView(QWidget):
             # The remaining axes keep their order; rows come first.
             if row_axis > column_axis:
                 magnitude = magnitude.T
-        scale = float(np.abs(psf.ideal_psf).max()) or 1.0
+        # The plane's own peak sets the colour range; plot 2 and the
+        # metrics give the peak relative to the ideal PSF.
+        scale = float(magnitude.max()) or 1.0
         values = magnitude / scale
         if self.image_scale.currentText() == "dB":
             values = np.maximum(
                 20.0 * np.log10(np.maximum(values, 1e-12)), IMAGE_FLOOR_DB
             )
-            levels = (IMAGE_FLOOR_DB, max(0.0, float(values.max())))
+            levels = (IMAGE_FLOOR_DB, 0.0)
         else:
-            levels = (0.0, max(1.0, float(values.max())))
+            levels = (0.0, 1.0)
         self.image_item.setImage(values, levels=levels, autoLevels=False)
         rows = psf.offsets_m[row_axis] / psf.voxel_size_m[row_axis]
         columns = psf.offsets_m[column_axis] / psf.voxel_size_m[column_axis]
