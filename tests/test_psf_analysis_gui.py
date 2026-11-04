@@ -151,7 +151,8 @@ def test_psf_view_computes_2d_psf_and_slice_profile(qt_application, tmp_path):
     view.image_scale.setCurrentText("dB")
     view.modulation_part.setCurrentText("Phase")
     image = view.image_item.image
-    assert image.max() <= 0.5 and image.min() >= -60.0
+    assert image.max() == pytest.approx(0.0) and image.min() >= -60.0
+    assert view.image_item.levels == pytest.approx((-60.0, 0.0))
 
     # A changed sequence marks the result as stale.
     state["token"] = ("revision", 1)
@@ -233,6 +234,9 @@ def test_psf_view_csi_shows_spectral_line(qt_application, tmp_path):
     psf = view.psf
     assert psf.kind == "csi"
     assert "2D CSI" in view.title_label.text()
+    # The colours span the full range whatever the peak efficiency.
+    assert view.image_item.image.max() == pytest.approx(1.0)
+    assert view.image_item.levels == pytest.approx((0.0, 1.0))
     assert view.spectral_plot.isVisible()
     assert len(view.spectral_plot.listDataItems()) == 2
     limits = view.spectral_plot.getViewBox().state["limits"]
