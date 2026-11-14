@@ -13,10 +13,16 @@ from .simulator import (
     design_rf_pulse,
     apply_rf_carrier,
 )  # noqa: F401
+from .sequence.acquisition import (  # noqa: F401
+    AcquisitionDetectionWarning,
+    AcquisitionNotRecognized,
+)
 from .kernel_capabilities import (  # noqa: F401
     DYNAMIC_KERNEL_NAMES,
     SEQUENCE_KERNEL_NAMES,
+    KernelFallbackWarning,
     detect_kernel_capabilities,
+    dynamic_kernel_fallback,
     kernel_capability_metadata,
     resolve_kernel_request,
 )

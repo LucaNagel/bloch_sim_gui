@@ -128,6 +128,32 @@ def test_explicit_checkpoints_always_include_sequence_end():
     assert result.points[0].worst_time_s == pytest.approx(duration)
 
 
+def test_declared_checkpoints_do_not_shift_the_compared_rows():
+    pulse = np.full(200, 250.0)
+    events = (RFEvent(0.0, pulse, 1e-6), RFEvent(1e-3, pulse, 1e-6))
+
+    def program(definitions):
+        return SequenceProgram(
+            events, duration_s=2e-3, metadata={"definitions": definitions}
+        )
+
+    probes = SpinProbeEnsemble.from_axes(
+        [0.0, 0.0, 0.0], frequency_offsets_hz=[0.0, 400.0]
+    )
+    options = dict(timesteps_s=(20e-6,), checkpoints_s=(0.2e-3,))
+    # The declared time lies in free precession and adds no RF boundary.
+    declared = run_timestep_convergence(
+        program({"MagnetizationCheckpointTimes": [0.6e-3]}), probes, **options
+    )
+    plain = run_timestep_convergence(program({}), probes, **options)
+
+    assert declared.checkpoint_times_s == pytest.approx([0.2e-3, 2e-3])
+    point, reference = declared.points[0], plain.points[0]
+    assert point.max_vector_error == pytest.approx(reference.max_vector_error)
+    assert point.rms_vector_error == pytest.approx(reference.rms_vector_error)
+    assert point.worst_time_s == reference.worst_time_s
+
+
 def test_convergence_inputs_reject_invalid_tolerances_and_timesteps():
     program = SequenceProgram((), duration_s=1e-3)
     probes = SpinProbeEnsemble.from_axes([0.0, 0.0, 0.0])

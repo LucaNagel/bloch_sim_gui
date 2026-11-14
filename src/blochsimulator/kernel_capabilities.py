@@ -28,6 +28,48 @@ GUI_KERNEL_NAMES = {
     "sequence": GUI_SEQUENCE_KERNEL_NAMES,
     "dynamic": GUI_DYNAMIC_KERNEL_NAMES,
 }
+# Reason recorded when the spin-major executor is switched off on purpose.
+SPIN_MAJOR_DISABLED_REASON = "disabled by request"
+
+
+class KernelFallbackWarning(RuntimeWarning):
+    """A dynamic simulation ran on another path than the requested kernel.
+
+    The result is still valid, but usually much slower.
+    ``warnings.simplefilter("error", KernelFallbackWarning)`` turns the
+    fallback into an exception.
+    """
+
+
+def dynamic_kernel_fallback(metadata: Mapping | None) -> str | None:
+    """Return why a dynamic run left its requested kernel, or None.
+
+    ``metadata`` is the metadata of a dynamic simulation result. A spin-major
+    executor that was switched off on purpose is not a fallback.
+    """
+    metadata = dict(metadata or {})
+    actual = metadata.get("sequence_kernel")
+    contrast_from = metadata.get("contrast_kernel_fallback_from")
+    if contrast_from:
+        reason = metadata.get("contrast_kernel_fallback_reason")
+        return (
+            f"requested the {contrast_from} kernel, ran {actual}: contrast "
+            "relaxation needs the spin-major executor"
+            + (f" ({reason})" if reason else "")
+        )
+    requested = metadata.get("requested_sequence_kernel") or actual
+    if requested != actual:
+        reason = metadata.get("native_fallback_reason") or "no reason recorded"
+        return f"requested the {requested} kernel, ran {actual}: {reason}"
+    reason = metadata.get("native_spin_major_fallback_reason")
+    if (
+        actual in {"native_serial", "native_parallel"}
+        and not metadata.get("native_spin_major_enabled")
+        and reason
+        and reason != SPIN_MAJOR_DISABLED_REASON
+    ):
+        return f"the {actual} kernel ran without its spin-major executor: {reason}"
+    return None
 
 
 @dataclass(frozen=True)

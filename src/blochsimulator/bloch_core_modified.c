@@ -719,6 +719,26 @@ void blochsim_heterogeneous(
     }
 }
 
+/* State indices must lie in [0, nintervals] and must not fall back, because
+ * the kernel walks each list with a forward cursor. */
+static int streaming_indices_valid(
+    const int *indices, int count, int nintervals, int strictly_increasing)
+{
+    if (count > 0 && indices == NULL) {
+        return 0;
+    }
+    for (int i = 0; i < count; i++) {
+        if (indices[i] < 0 || indices[i] > nintervals) {
+            return 0;
+        }
+        if (i > 0 && (strictly_increasing ? indices[i] <= indices[i - 1]
+                                          : indices[i] < indices[i - 1])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /*
  * Streaming sequence simulation.
  *
@@ -726,6 +746,10 @@ void blochsim_heterogeneous(
  * time-by-spin magnetization array. Each spin is propagated through all
  * intervals and contributes only at requested ADC state boundaries. Checkpoint
  * arrays use checkpoint-major layout: checkpoint * nspins + spin.
+ *
+ * Returns 0 on success, -1 when an accumulator cannot be allocated and -2 when
+ * the inputs are invalid (negative sizes, no receive coil, a missing array or
+ * state indices that fall back or leave [0, nintervals]).
  */
 static int blochsim_sequence_streaming_impl(
     double *rf_real_hz, double *rf_imag_hz,
@@ -745,11 +769,49 @@ static int blochsim_sequence_streaming_impl(
     double *mx_checkpoints, double *my_checkpoints, double *mz_checkpoints,
     int num_threads, int optimized)
 {
+    if (nintervals < 0 || nspins < 0 || nadc < 0 || ncheckpoints < 0
+        || ncrushes < 0 || ncoils < 1) {
+        return -2;
+    }
+    if (nintervals > 0
+        && (rf_real_hz == NULL || rf_imag_hz == NULL || gx_hz_m == NULL
+            || gy_hz_m == NULL || gz_hz_m == NULL || dt_s == NULL)) {
+        return -2;
+    }
+    if (nspins > 0
+        && (t1_s == NULL || t2_s == NULL || df_hz == NULL || x_m == NULL
+            || y_m == NULL || z_m == NULL || pd == NULL || tx_real == NULL
+            || tx_imag == NULL || rx_real == NULL || rx_imag == NULL
+            || mx_init == NULL || my_init == NULL || mz_init == NULL
+            || mx_final == NULL || my_final == NULL || mz_final == NULL)) {
+        return -2;
+    }
+    if (nadc > 0
+        && (adc_demod_real == NULL || adc_demod_imag == NULL
+            || signal_real == NULL || signal_imag == NULL)) {
+        return -2;
+    }
+    if (ncheckpoints > 0 && nspins > 0
+        && (mx_checkpoints == NULL || my_checkpoints == NULL
+            || mz_checkpoints == NULL)) {
+        return -2;
+    }
+    if (!streaming_indices_valid(adc_state_indices, nadc, nintervals, 0)
+        || !streaming_indices_valid(
+            checkpoint_state_indices, ncheckpoints, nintervals, 0)
+        || !streaming_indices_valid(
+            transverse_crush_state_indices, ncrushes, nintervals, 1)) {
+        return -2;
+    }
+
     int thread_count = num_threads > 0 ? num_threads : 1;
 #ifndef _OPENMP
     thread_count = 1;
 #endif
     size_t samples_per_thread = (size_t)ncoils * (size_t)(nadc > 0 ? nadc : 1);
+    if (samples_per_thread > SIZE_MAX / sizeof(double) / (size_t)thread_count) {
+        return -1;
+    }
     size_t signal_count = (size_t)thread_count * samples_per_thread;
     double *thread_signal_real = (double *)calloc(signal_count, sizeof(double));
     double *thread_signal_imag = (double *)calloc(signal_count, sizeof(double));
@@ -762,7 +824,10 @@ static int blochsim_sequence_streaming_impl(
     /* Most segmented phantoms contain only a few exact T1/T2 pairs. Detect a
      * bounded number of groups and evaluate relaxation exponentials once per
      * group and interval. Continuous parameter maps automatically fall back to
-     * per-spin evaluation after the group limit is exceeded. */
+     * per-spin evaluation after the group limit is exceeded. A failed table
+     * allocation takes the same per-spin path without reporting it: the run
+     * is slower, and the per-spin exp() is the same expression, so results
+     * match the grouped tables up to fast-math rounding. */
     enum { MAX_RELAXATION_GROUPS = 64 };
     int *relaxation_labels = NULL;
     double relaxation_t1[MAX_RELAXATION_GROUPS];
@@ -830,7 +895,8 @@ static int blochsim_sequence_streaming_impl(
         }
     }
 
-    for (int sample = 0; sample < ncoils * nadc; sample++) {
+    size_t signal_samples = (size_t)ncoils * (size_t)nadc;
+    for (size_t sample = 0; sample < signal_samples; sample++) {
         signal_real[sample] = 0.0;
         signal_imag[sample] = 0.0;
     }

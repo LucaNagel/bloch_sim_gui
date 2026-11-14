@@ -51,6 +51,12 @@ class Phantom:
         Descriptive name for the phantom
     metadata : dict, optional
         Additional metadata (field strength, creation info, etc.)
+    positions_m : ndarray, optional
+        Explicit spin positions in metres, shape ``(n, 3)``, for a 1D phantom
+        of shape ``(n,)``. Use :meth:`from_positions`. Such a phantom is a set
+        of free spins (probes, point sources), not a voxel grid: ``fov`` is
+        a placeholder, it has no voxel cell or volume, and it cannot be
+        saved.
 
     Examples
     --------
@@ -83,6 +89,7 @@ class Phantom:
     rx_sensitivity_maps: Optional[np.ndarray] = None
     coordinate_system: str = "object_xyz"
     affine_ijk_to_xyz_m: Optional[np.ndarray] = None
+    positions_m: Optional[np.ndarray] = field(default=None, repr=False)
 
     # Computed fields (populated in __post_init__)
     positions: np.ndarray = field(init=False, repr=False)
@@ -193,6 +200,20 @@ class Phantom:
                     f"M0 map shape {self.m0_map.shape} should be {expected_m0_shape}"
                 )
 
+        if self.positions_m is not None:
+            if ndim != 1:
+                raise ValueError("positions_m requires a 1D phantom shape (n,)")
+            positions = np.array(self.positions_m, dtype=np.float64, copy=True)
+            if positions.shape != (self.shape[0], 3):
+                raise ValueError(
+                    f"positions_m shape {positions.shape} should be "
+                    f"{(self.shape[0], 3)}"
+                )
+            if not np.all(np.isfinite(positions)):
+                raise ValueError("positions_m must be finite")
+            positions.setflags(write=False)
+            self.positions_m = positions
+
     def _set_defaults(self):
         """Set default values for optional fields."""
         # Default proton density: all ones
@@ -257,6 +278,12 @@ class Phantom:
 
     def _compute_coordinates(self):
         """Compute position arrays for each voxel."""
+        if self.positions_m is not None:
+            self.positions = np.array(self.positions_m, copy=True)
+            self.x = self.positions[:, 0].copy()
+            self.y = self.positions[:, 1].copy()
+            self.z = self.positions[:, 2].copy()
+            return
         coords = self.coordinate_vectors(self.shape, self.affine_ijk_to_xyz_m)
         ndim = self.ndim
 
@@ -279,6 +306,37 @@ class Phantom:
             self.y = Y.ravel()
             self.z = Z.ravel()
             self.positions = np.column_stack([self.x, self.y, self.z])
+
+    @classmethod
+    def from_positions(
+        cls, positions_m: np.ndarray, t1_map: np.ndarray, t2_map: np.ndarray, **kwargs
+    ) -> "Phantom":
+        """Build a phantom of free spins at explicit positions.
+
+        ``positions_m`` has shape ``(n, 3)`` in metres; every map has shape
+        ``(n,)`` (``m0_map`` ``(n, 3)``, ``rx_sensitivity_maps``
+        ``(n_coils, n)``). The positions are kept exactly; nothing derives
+        them from ``shape`` or ``fov``. ``shape`` and ``fov`` are set here.
+        """
+        positions = np.asarray(positions_m, dtype=np.float64)
+        if positions.ndim != 2 or positions.shape[1] != 3 or positions.shape[0] < 1:
+            raise ValueError("positions_m must have shape (n, 3) with n >= 1")
+        for key in ("shape", "fov", "affine_ijk_to_xyz_m"):
+            if key in kwargs:
+                raise TypeError(f"from_positions() sets {key} itself")
+        return cls(
+            shape=(positions.shape[0],),
+            fov=(1.0,),
+            t1_map=t1_map,
+            t2_map=t2_map,
+            positions_m=positions,
+            **kwargs,
+        )
+
+    @property
+    def has_explicit_positions(self) -> bool:
+        """True for free-spin phantoms built with explicit ``positions_m``."""
+        return self.positions_m is not None
 
     @staticmethod
     def default_affine(shape: Tuple[int, ...], fov: Tuple[float, ...]) -> np.ndarray:
@@ -346,6 +404,8 @@ class Phantom:
     @property
     def voxel_volume_m3(self) -> float:
         """Physical voxel volume in m³ for a 3D phantom."""
+        if self.has_explicit_positions:
+            raise ValueError("a phantom with explicit positions has no voxel volume")
         if self.ndim != 3:
             raise ValueError(
                 "voxel volume requires a 3D phantom with explicit slice thickness"
@@ -509,11 +569,21 @@ class Phantom:
             metadata=self.metadata.copy(),
             coordinate_system=self.coordinate_system,
             affine_ijk_to_xyz_m=self.affine_ijk_to_xyz_m.copy(),
+            positions_m=self.positions_m,
         )
+
+    def _require_grid(self, action: str) -> None:
+        if self.has_explicit_positions:
+            raise ValueError(
+                f"cannot {action} a phantom with explicit positions; only voxel "
+                "grid phantoms are supported"
+            )
 
     def to_xarray(self):
         """Return this phantom as a coordinate-aware ``xarray.Dataset``."""
         import xarray as xr
+
+        self._require_grid("convert")
 
         spatial_dims = tuple("xyz"[: self.ndim])
         coords = {
@@ -645,6 +715,7 @@ class Phantom:
         filename : str or Path
             Output filename. Extension determines format.
         """
+        self._require_grid("save")
         filename = Path(filename)
 
         data = {

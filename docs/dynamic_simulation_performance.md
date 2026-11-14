@@ -26,6 +26,11 @@ additional pools, and smaller checkpoint dtypes use the previous paths.
 `BLOCHSIM_DYNAMIC_SPIN_MAJOR=0` selects the previous driver;
 `BLOCHSIM_DYNAMIC_SPIN_MAJOR_RF_CACHE=0` disables only the propagator cache.
 Result metadata reports the actual `native_spin_major_` coverage and fallback.
+A run that loses the spin-major executor for one of these reasons also emits a
+`KernelFallbackWarning` and a status message naming the reason; switching it
+off through the environment variable does not.
+`warnings.simplefilter("error", blochsimulator.KernelFallbackWarning)` turns
+the warning into an exception for scripts that must not run on a slow path.
 
 The `simulate_dynamic_sequence` driver and `BlochSimulator` expose four CPU
 kernel selections:

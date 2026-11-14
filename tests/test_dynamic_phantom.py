@@ -1384,6 +1384,34 @@ def test_dynamic_driver_round_trip(tmp_path, suffix):
     )
 
 
+def test_equilibrium_polarization_requires_spin_density_maps():
+    template = _dynamic_phantom()
+    with pytest.raises(ValueError, match="initial_spin_density_maps"):
+        replace(template, equilibrium_polarization=0.5)
+
+    # Attributes set after construction are checked again before a run.
+    phantom = _dynamic_phantom()
+    phantom.equilibrium_polarization = 0.5
+    program = SequenceProgram((RFEvent(0.0, np.array([100.0]), 1e-4),), 1e-3)
+    with pytest.raises(ValueError, match="initial_spin_density_maps"):
+        BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+            program, phantom, nucleus="C13", field_strength_t=3.0
+        )
+
+
+@pytest.mark.parametrize("suffix", [".npz", ".nc"])
+def test_saved_equilibrium_without_spin_density_loads_as_hyperpolarized(
+    tmp_path, suffix
+):
+    # Older versions accepted and ignored this pairing; loading keeps that.
+    phantom = _dynamic_phantom()
+    phantom.equilibrium_polarization = 0.5
+    loaded = DynamicSpectralPhantom.load(phantom.save(tmp_path / f"legacy{suffix}"))
+
+    assert loaded.initial_spin_density_maps is None
+    assert loaded.equilibrium_polarization == 0.0
+
+
 def test_dynamic_phantom_xarray_dataset_labels_pools_and_coordinates():
     phantom = _dynamic_phantom()
     dataset = phantom.to_xarray()

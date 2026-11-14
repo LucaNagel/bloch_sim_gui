@@ -192,9 +192,8 @@ def simulate_point_sources(
         )
         receive = np.zeros((len(batch), n_spins), dtype=np.complex128)
         receive[owner, np.arange(n_spins)] = 1.0
-        phantom = Phantom(
-            shape=(n_spins,),
-            fov=(1.0,),
+        phantom = Phantom.from_positions(
+            positions,
             t1_map=np.repeat([source.t1_s for source in batch], counts),
             t2_map=np.repeat([source.t2_s for source in batch], counts),
             pd_map=np.concatenate([weights for _, weights in ensembles]),
@@ -206,11 +205,6 @@ def simulate_point_sources(
             name="PSF point sources",
             metadata={"psf_point_sources": True, "n_point_sources": len(batch)},
         )
-        # Point sources are not constrained to an axis-aligned grid.
-        phantom.positions = positions.copy()
-        phantom.x = positions[:, 0].copy()
-        phantom.y = positions[:, 1].copy()
-        phantom.z = positions[:, 2].copy()
         result = simulator.simulate_sequence(
             program,
             phantom,

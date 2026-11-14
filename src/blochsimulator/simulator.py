@@ -2232,14 +2232,18 @@ class BlochSimulator:
         )
 
     def simulate_dynamic_sequence(self, program, phantom, **kwargs):
-        """Simulate a regional two-pool hyperpolarized dynamic phantom."""
-        from .dynamic_phantom import simulate_dynamic_sequence
+        """Simulate a regional multi-pool hyperpolarized dynamic phantom.
+
+        Unknown keyword arguments raise ``TypeError``. A run that leaves the
+        requested kernel emits a ``KernelFallbackWarning``.
+        """
+        from .dynamic_phantom import _run_dynamic_sequence, _warn_kernel_fallback
 
         kwargs.setdefault("sequence_kernel", self.dynamic_sequence_kernel)
         kwargs.setdefault("use_parallel", self.use_parallel)
         kwargs.setdefault("num_threads", self.num_threads)
         kwargs.setdefault("memory_budget_bytes", self._memory_budget().limit_bytes)
-        return simulate_dynamic_sequence(program, phantom, **kwargs)
+        return _warn_kernel_fallback(_run_dynamic_sequence(program, phantom, kwargs))
 
     def simulate_sequence_probes(
         self,
@@ -2327,9 +2331,8 @@ class BlochSimulator:
         if not np.all(np.isfinite(m0_map)):
             raise ValueError("initial_magnetization must be finite")
 
-        phantom = Phantom(
-            shape=(n_spins,),
-            fov=(1.0,),
+        phantom = Phantom.from_positions(
+            repeated_positions,
             t1_map=np.full((n_spins,), float(t1_s), dtype=float),
             t2_map=np.full((n_spins,), float(t2_s), dtype=float),
             pd_map=np.ones((n_spins,), dtype=float),
@@ -2343,11 +2346,6 @@ class BlochSimulator:
                 "n_probe_frequencies": n_frequencies,
             },
         )
-        # Probe coordinates are not constrained to an axis-aligned grid.
-        phantom.positions = repeated_positions.copy()
-        phantom.x = repeated_positions[:, 0].copy()
-        phantom.y = repeated_positions[:, 1].copy()
-        phantom.z = repeated_positions[:, 2].copy()
 
         result = self.simulate_sequence(
             program,
@@ -2480,6 +2478,11 @@ class BlochSimulator:
             spin_sampling if spoiler_mode == "gradient" else None
         )
         sampling.validate_phantom_dimensions(phantom.ndim)
+        if sampling.enabled and phantom.has_explicit_positions:
+            raise ValueError(
+                "subvoxel spin sampling needs a voxel grid; this phantom has "
+                "explicit spin positions"
+            )
 
         compiled = SequenceCompiler().compile(
             program,
@@ -2808,77 +2811,10 @@ class BlochSimulator:
             physical_b1_field_arrays,
             physical_sequence_waveforms,
         )
-        from .sequence.acquisition import (
-            CartesianAcquisitionFrames,
-            infer_cartesian_acquisition,
-            infer_cartesian_acquisition_frames,
-            infer_cartesian_acquisition_volumes,
-            infer_spectroscopic_acquisition,
-            infer_spiral_acquisition,
-        )
+        from .sequence.acquisition import detect_acquisitions
 
         acquisition_dimensions = AcquisitionDimensions.from_program(program)
-        spectroscopic_metadata = program.metadata.get("spectroscopic_acquisition")
-        if spectroscopic_metadata is None:
-            try:
-                spectroscopic_metadata = infer_spectroscopic_acquisition(
-                    program, compiled=compiled
-                ).to_metadata()
-            except ValueError:
-                spectroscopic_metadata = None
-        cartesian_metadata = program.metadata.get("cartesian_acquisition")
-        spiral_metadata = program.metadata.get("spiral_acquisition")
-        if spiral_metadata is None:
-            try:
-                spiral_metadata = infer_spiral_acquisition(
-                    program, compiled=compiled
-                ).to_metadata()
-            except ValueError:
-                spiral_metadata = None
-        if cartesian_metadata is None:
-            program_acquisition = program.metadata.get("acquisition")
-            if (
-                isinstance(program_acquisition, dict)
-                and program_acquisition.get("type") == "cartesian_2d"
-            ):
-                cartesian_metadata = program_acquisition
-        cartesian_frame_metadata = program.metadata.get("cartesian_acquisition_frames")
-        cartesian_volume_metadata = program.metadata.get(
-            "cartesian_acquisition_volumes"
-        )
-        if (
-            spectroscopic_metadata is None
-            and spiral_metadata is None
-            and cartesian_metadata is None
-        ):
-            try:
-                cartesian_metadata = infer_cartesian_acquisition(
-                    program, compiled=compiled
-                ).to_metadata()
-            except ValueError:
-                if cartesian_frame_metadata is None:
-                    try:
-                        cartesian_frame_metadata = infer_cartesian_acquisition_frames(
-                            program, compiled=compiled
-                        ).to_metadata()
-                    except ValueError:
-                        cartesian_frame_metadata = None
-        if (
-            spectroscopic_metadata is None
-            and cartesian_metadata is None
-            and cartesian_frame_metadata is not None
-            and cartesian_volume_metadata is None
-        ):
-            try:
-                cartesian_volume_metadata = infer_cartesian_acquisition_volumes(
-                    program,
-                    compiled=compiled,
-                    frames=CartesianAcquisitionFrames.from_metadata(
-                        cartesian_frame_metadata
-                    ),
-                ).to_metadata()
-            except ValueError:
-                cartesian_volume_metadata = None
+        detected_acquisitions = detect_acquisitions(program, compiled=compiled)
         definitions = dict(program.metadata.get("definitions", {}))
         physical_nucleus = str(
             phantom.metadata.get("nucleus")
@@ -2932,11 +2868,7 @@ class BlochSimulator:
                     phantom.voxel_volume_m3 if len(phantom.shape) == 3 else None
                 ),
                 "acquisition_dimensions": acquisition_dimensions.to_metadata(),
-                "spectroscopic_acquisition": spectroscopic_metadata,
-                "cartesian_acquisition": cartesian_metadata,
-                "cartesian_acquisition_frames": cartesian_frame_metadata,
-                "cartesian_acquisition_volumes": cartesian_volume_metadata,
-                "spiral_acquisition": spiral_metadata,
+                **detected_acquisitions,
                 "sequence_definitions": definitions,
                 "adc_label_values": dict(program.metadata.get("adc_label_values", {})),
                 "spectral_spatial_schedule": {

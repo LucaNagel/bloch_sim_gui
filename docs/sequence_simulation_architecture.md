@@ -113,6 +113,91 @@ RF-discretization in dynamic hyperpolarized bSSFP is represented by the bSSFP
 motif, but the independent oracle does not yet solve coupled exchange or inflow;
 those dynamic equations require a separate convergence validation.
 
+### Time-step check after each GUI run
+
+The motifs above do not cover every imported or designed pulse. After each
+sequence run, the GUI therefore calls `estimate_timestep_error`. It repeats the
+sequence, without ADC events, for a few probe spins at the chosen step and at a
+quarter of it. It then reports the largest magnetization-vector difference at RF
+ends, declared checkpoints and the sequence end. The RF step error is second
+order, so the quarter-step reference underestimates the true error by about 6 %.
+
+`timestep_error_inputs` picks the probe spins. For each static pool, spectral
+component or dynamic pool, it takes the median, minimum and maximum
+off-resonance (at most 12 frequencies), each with its T1/T2. Probe positions
+span the phantom along the dominant gradient direction during RF (9 samples).
+Without a gradient during RF, there is one position.
+
+The check gets about 10 % of the main run's wall time. The budget assumes
+2e-5 s per quarter-step interval and allows at least 1,000 and at most 400,000
+intervals. A longer sequence is checked from its start, and the result is marked
+`truncated`.
+
+The result is stored in `metadata["timestep_error"]`. Above 1 % of M0, the
+completion message notes the step, and the label under the time-step field
+turns into a warning.
+
+Measured on an M3 at 20 µs against 5 µs:
+
+| Sequence | Largest probe error |
+| --- | ---: |
+| Block FID | 1e-11 |
+| Sinc slice | 6.7e-7 |
+| FLASH | 1.4e-6 |
+| IR-EPI, HS inversion | 2.0e-4 |
+| SPSP slice (30 mm, two bands) | 1.5–2.1 % |
+| SS-bSSFP (pools at −245/1655 Hz, T1 30 s, T2 1 s) | 52 % |
+
+Cost of the check:
+
+| Run | Main run | Check |
+| --- | ---: | ---: |
+| FLASH 32×32 | 0.065 s | +0.021 s |
+| SPSP | 0.005 s | +0.006 s |
+| SS-bSSFP, dynamic 8×8×4 | 3.9 s | +0.25 s (6.5 %) |
+
+The check uses the static kernel, without exchange or inflow. One dynamic voxel
+was tested with the default SS-bSSFP, lactate at 1655 Hz and pyruvate at
+−245 Hz, T1 30 s and T2 1 s. Against 1 µs, its lactate error was 0.288 at
+20 µs and 0.072 at 10 µs. The static check gives 0.549 for the same sequence,
+so here it is a conservative proxy. A general self-convergence check of the
+dynamic solver with exchange and inflow is still open.
+
+### Static and dynamic kernel agreement
+
+The static kernel (`simulate_sequence`, `simulate_spectral_sequence`) rotates
+exactly over each step and then relaxes. Its native build uses `-ffast-math`.
+The dynamic kernel splits free precession and relaxation symmetrically around
+the RF rotation and is built without fast math. Without exchange, both solve the
+same Bloch equation, so their difference is a pure time-step error.
+
+`tests/test_dynamic_static_kernel_agreement.py` checks this for every GUI kernel
+pair. It uses one relaxing pool (T1 2 s, T2 80 ms, B0 ±200 Hz over five voxels)
+under four phase-cycled 1 ms sinc pulses with a slice gradient. The second
+dynamic pool stays empty. Measured on an M3:
+
+| Step | Dynamic − static | Dynamic error | Static error |
+| --- | ---: | ---: | ---: |
+| 20 µs | 7.3e-4 | 6.0e-4 | 1.2e-3 |
+| 5 µs | 6.6e-5 | 3.7e-5 | 8.8e-5 |
+| 1 µs | 7.1e-6 | 1.4e-6 | 7.5e-6 |
+
+Values are the largest signal difference relative to the peak signal. The error
+columns compare against the dynamic kernel at 0.25 µs with a 0.25 µs RF raster.
+The dynamic error falls in second order. The static error falls in first order
+at small steps (1.6e-6 at 0.25 µs), so the static kernel carries most of the
+difference. The test requires the difference to fall with the step and to stay
+below 2e-5 at 1 µs. In one voxel without a gradient, the kernels agree to 1e-7
+without relaxation and to 4e-13 with T1 alone; the difference comes from T2
+during RF.
+
+Thermal recovery in a dynamic phantom needs `initial_spin_density_maps`.
+Without them, Mz relaxes toward zero like hyperpolarized magnetization. A
+positive `equilibrium_polarization` without these maps therefore raises a
+`ValueError`, both when the phantom is built and before a run. Saved files
+from older versions that hold this pairing load with polarization 0, which
+matches how they were simulated.
+
 ## Data flow
 
 1. Internal events, legacy arrays, or a Pulseq importer create a
@@ -123,6 +208,17 @@ those dynamic equations require a separate convergence validation.
 4. The C/Cython streaming kernel advances each chunk, accumulates ADC signal,
    and returns only final/checkpoint states.
 5. Python sums chunk signals and reconstructs spatial result arrays.
+
+The kernel walks the ADC, checkpoint and crusher state indices with forward
+cursors. `simulate_sequence_chunk` therefore rejects, with `ValueError`, any
+index outside `[0, n_intervals]`, ADC or checkpoint indices that fall back, and
+crusher indices that are not strictly increasing. Unchecked, such an index
+would leave ADC samples at zero or checkpoint rows uninitialized. The compiler
+always produces valid indices, so the check only guards direct calls. Counts
+above the C `int` range are rejected the same way. If the grouped T1/T2
+relaxation tables cannot be allocated, the optimized kernel falls back to
+per-spin exponentials without reporting it; the run is slower but uses the same
+expressions.
 
 Gradient phase is generated only by the Bloch kernel. It must not be applied a
 second time by the legacy analytical k-space module.

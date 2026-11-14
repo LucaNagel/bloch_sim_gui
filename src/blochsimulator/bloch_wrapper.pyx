@@ -5,6 +5,7 @@ import numpy as np
 cimport numpy as np
 cimport cython
 from libc.math cimport exp, sqrt
+from libc.limits cimport INT_MAX
 
 
 # The strict wrapper includes this file and overrides the marker after the
@@ -637,13 +638,17 @@ def simulate_sequence_chunk(
     longitudinal magnetization approached by T1 recovery; ``None`` keeps the
     thermal equilibrium Mz = 1, and zero models hyperpolarized decay.
     """
-    cdef int nintervals = rf_hz.shape[0]
-    cdef int nspins = t1_s.shape[0]
-    cdef int nadc = adc_state_indices.shape[0]
-    cdef int ncheckpoints = checkpoint_state_indices.shape[0]
-    cdef int ncrushes = transverse_crush_state_indices.shape[0]
-    cdef int ncoils = rx_sensitivities.shape[0]
+    # Sizes stay Py_ssize_t so products such as ncoils * nadc cannot wrap;
+    # the C kernel takes int counts, so each one is range-checked first.
+    cdef Py_ssize_t nintervals = rf_hz.shape[0]
+    cdef Py_ssize_t nspins = t1_s.shape[0]
+    cdef Py_ssize_t nadc = adc_state_indices.shape[0]
+    cdef Py_ssize_t ncheckpoints = checkpoint_state_indices.shape[0]
+    cdef Py_ssize_t ncrushes = transverse_crush_state_indices.shape[0]
+    cdef Py_ssize_t ncoils = rx_sensitivities.shape[0]
     cdef bint use_optimized
+    if max(nintervals, nspins, nadc, ncheckpoints, ncrushes, ncoils) > INT_MAX:
+        raise ValueError("sequence chunk sizes must fit the native kernel's int range")
     if kernel == "optimized":
         use_optimized = True
     elif kernel == "reference":
@@ -677,6 +682,25 @@ def simulate_sequence_chunk(
         if not np.all(np.isfinite(mz_equilibrium_c)):
             raise ValueError("mz_equilibrium must be finite")
         mz_equilibrium_ptr = <double*>mz_equilibrium_c.data
+    # The kernel walks each index list with a forward cursor and compares it
+    # with the current state, so an index that falls back or lies outside
+    # [0, nintervals] would leave ADC samples at zero and checkpoint rows unset.
+    if nadc and (
+        np.any(adc_state_indices < 0)
+        or np.any(adc_state_indices > nintervals)
+        or np.any(np.diff(adc_state_indices) < 0)
+    ):
+        raise ValueError(
+            "ADC state indices must be non-decreasing sequence states in [0, nintervals]"
+        )
+    if ncheckpoints and (
+        np.any(checkpoint_state_indices < 0)
+        or np.any(checkpoint_state_indices > nintervals)
+        or np.any(np.diff(checkpoint_state_indices) < 0)
+    ):
+        raise ValueError(
+            "checkpoint state indices must be non-decreasing sequence states in [0, nintervals]"
+        )
     if ncrushes and (
         np.any(transverse_crush_state_indices < 0)
         or np.any(transverse_crush_state_indices > nintervals)
@@ -724,6 +748,8 @@ def simulate_sequence_chunk(
     cdef np.ndarray[DTYPE_t, ndim=1] mx_final = np.empty(nspins, dtype=np.float64)
     cdef np.ndarray[DTYPE_t, ndim=1] my_final = np.empty(nspins, dtype=np.float64)
     cdef np.ndarray[DTYPE_t, ndim=1] mz_final = np.empty(nspins, dtype=np.float64)
+    # np.empty is safe: the index checks above guarantee that the kernel
+    # writes every checkpoint row for every spin.
     cdef np.ndarray[DTYPE_t, ndim=1] mx_check = np.empty(ncheckpoints * nspins, dtype=np.float64)
     cdef np.ndarray[DTYPE_t, ndim=1] my_check = np.empty(ncheckpoints * nspins, dtype=np.float64)
     cdef np.ndarray[DTYPE_t, ndim=1] mz_check = np.empty(ncheckpoints * nspins, dtype=np.float64)
@@ -734,16 +760,16 @@ def simulate_sequence_chunk(
             status = blochsim_sequence_streaming_optimized(
                 <double*>rf_real.data, <double*>rf_imag.data,
                 <double*>gx.data, <double*>gy.data, <double*>gz.data,
-                <double*>dt_c.data, nintervals,
+                <double*>dt_c.data, <int>nintervals,
                 <double*>t1_c.data, <double*>t2_c.data, <double*>df_c.data,
                 <double*>x.data, <double*>y.data, <double*>z.data, <double*>pd_c.data,
                 <double*>tx_real.data, <double*>tx_imag.data,
-                <double*>rx_real.data, <double*>rx_imag.data, ncoils,
-                <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
+                <double*>rx_real.data, <double*>rx_imag.data, <int>ncoils,
+                <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, <int>nspins,
                 mz_equilibrium_ptr,
                 <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
-                nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
-                <int*>crush_indices_c.data, ncrushes,
+                <int>nadc, <int*>checkpoint_indices_c.data, <int>ncheckpoints,
+                <int*>crush_indices_c.data, <int>ncrushes,
                 <double*>signal_real.data, <double*>signal_imag.data,
                 <double*>mx_final.data, <double*>my_final.data, <double*>mz_final.data,
                 <double*>mx_check.data, <double*>my_check.data, <double*>mz_check.data,
@@ -753,20 +779,22 @@ def simulate_sequence_chunk(
             status = blochsim_sequence_streaming(
                 <double*>rf_real.data, <double*>rf_imag.data,
                 <double*>gx.data, <double*>gy.data, <double*>gz.data,
-                <double*>dt_c.data, nintervals,
+                <double*>dt_c.data, <int>nintervals,
                 <double*>t1_c.data, <double*>t2_c.data, <double*>df_c.data,
                 <double*>x.data, <double*>y.data, <double*>z.data, <double*>pd_c.data,
                 <double*>tx_real.data, <double*>tx_imag.data,
-                <double*>rx_real.data, <double*>rx_imag.data, ncoils,
-                <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, nspins,
+                <double*>rx_real.data, <double*>rx_imag.data, <int>ncoils,
+                <double*>mx_init.data, <double*>my_init.data, <double*>mz_init.data, <int>nspins,
                 mz_equilibrium_ptr,
                 <int*>adc_indices_c.data, <double*>demod_real.data, <double*>demod_imag.data,
-                nadc, <int*>checkpoint_indices_c.data, ncheckpoints,
-                <int*>crush_indices_c.data, ncrushes,
+                <int>nadc, <int*>checkpoint_indices_c.data, <int>ncheckpoints,
+                <int*>crush_indices_c.data, <int>ncrushes,
                 <double*>signal_real.data, <double*>signal_imag.data,
                 <double*>mx_final.data, <double*>my_final.data, <double*>mz_final.data,
                 <double*>mx_check.data, <double*>my_check.data, <double*>mz_check.data,
                 num_threads)
+    if status == -2:
+        raise ValueError("native streaming kernel rejected its sizes, pointers or state indices")
     if status != 0:
         raise MemoryError("native streaming kernel could not allocate ADC accumulators")
 

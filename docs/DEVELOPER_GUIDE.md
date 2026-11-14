@@ -766,6 +766,28 @@ slowing the specialized two-pool loop. Reduced precision or insufficient
 memory retain the established NumPy path. Never drop an unsupported field: add
 a fallback reason and expose the actual path in result metadata.
 
+A fallback is also announced. `simulate_dynamic_sequence` emits one
+`KernelFallbackWarning` per call when the run left the requested kernel or a
+native kernel ran without its spin-major executor;
+`kernel_capabilities.dynamic_kernel_fallback(metadata)` builds the message.
+A new fallback path must set the metadata fields that helper reads. The entry
+point rejects unknown keyword arguments with `TypeError`, so a mistyped option
+never selects a default silently. Only the private switches listed in
+`_PRIVATE_BLOCK_OPTIONS` pass through to the block solver.
+
+Acquisition layouts follow the same rule. Both simulation entry points call
+`sequence.acquisition.detect_acquisitions`. An `infer_*` function raises
+`AcquisitionNotRecognized` (a `ValueError` subclass) when a sequence is not
+of its kind; the layout is then `None` and the reason is listed in
+`metadata["acquisition_detection"]["not_recognized"]`. Any other `ValueError`
+means a sequence of that kind is malformed: the layout is also `None`, but
+the reason goes to `metadata["acquisition_detection"]["errors"]`, an
+`AcquisitionDetectionWarning` is emitted and the GUI completion message
+names it. Raise `AcquisitionNotRecognized` only for gates that decide whether
+a pattern applies, and a plain `ValueError` once the pattern is established.
+`warnings.simplefilter("error", AcquisitionDetectionWarning)` makes these
+errors fatal.
+
 An ADC action at state index zero intentionally disables the complete-plan
 driver. It samples the unadvanced initial state through the established
 interval path so the existing bitwise contract is retained; this is a

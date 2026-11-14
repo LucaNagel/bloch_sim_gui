@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from itertools import product
 from types import SimpleNamespace
@@ -38,6 +39,25 @@ def _adc_time_tolerance(times_s: np.ndarray) -> float:
     times = np.asarray(times_s, dtype=float)
     scale = float(np.max(np.abs(times))) if times.size else 0.0
     return max(1e-12, 64.0 * np.finfo(float).eps * scale)
+
+
+class AcquisitionNotRecognized(ValueError):
+    """The sequence does not have the layout one ``infer_*`` function expects.
+
+    Only this exception means "this acquisition type does not apply". Any other
+    error from an inference is a real failure, such as malformed definitions or
+    compiled data that contradict the program.
+    """
+
+
+class AcquisitionDetectionWarning(RuntimeWarning):
+    """An acquisition inference failed for a reason other than a layout mismatch.
+
+    The simulation result is still returned without that acquisition layout,
+    and ``metadata["acquisition_detection"]["errors"]`` keeps the reason.
+    ``warnings.simplefilter("error", AcquisitionDetectionWarning)`` turns it
+    into an error.
+    """
 
 
 @dataclass(frozen=True)
@@ -1677,26 +1697,28 @@ def infer_spiral_acquisition(
     sequence_name = str(definitions.get("name", "")).strip().lower()
     declared = trajectory_name == "spiral" or "spiral" in sequence_name
     if trajectory_name and trajectory_name != "spiral":
-        raise ValueError("sequence declares a non-spiral trajectory")
+        raise AcquisitionNotRecognized("sequence declares a non-spiral trajectory")
 
     adc_events = program.adc_events
     if not adc_events:
-        raise ValueError("spiral sequence contains no ADC events")
+        raise AcquisitionNotRecognized("spiral sequence contains no ADC events")
     dwell = adc_events[0].dwell_s
     if any(
         not np.isclose(event.dwell_s, dwell, rtol=0.0, atol=1e-15)
         for event in adc_events
     ):
-        raise ValueError("spiral ADC events do not share one dwell time")
+        raise AcquisitionNotRecognized("spiral ADC events do not share one dwell time")
     if min(event.num_samples for event in adc_events) < 3:
-        raise ValueError("spiral ADC events need at least three samples")
+        raise AcquisitionNotRecognized("spiral ADC events need at least three samples")
 
     kspace = calculate_kspace(program) if kspace is None else kspace
     reference = kspace.event_k(0)
     if not np.all(np.isfinite(reference)):
-        raise ValueError("spiral readout starts before the first excitation")
+        raise AcquisitionNotRecognized(
+            "spiral readout starts before the first excitation"
+        )
     if not declared and classify_readout(reference) != "spiral":
-        raise ValueError("sequence is not a spiral acquisition")
+        raise AcquisitionNotRecognized("sequence is not a spiral acquisition")
 
     fov_value = numeric_definition_array(definitions.get("fov", ()), "spiral FOV")
     if fov_value.size < 2:
@@ -1799,30 +1821,32 @@ def infer_cartesian_acquisition(
 
     adc_events = program.adc_events
     if not adc_events:
-        raise ValueError("sequence contains no ADC events")
+        raise AcquisitionNotRecognized("sequence contains no ADC events")
     outer_dimensions = AcquisitionDimensions.from_program(program)
     if outer_dimensions.varying_axes:
         axes = ", ".join(outer_dimensions.varying_axes)
-        raise ValueError(
+        raise AcquisitionNotRecognized(
             "single 2D Cartesian inference does not support varying outer "
             f"acquisition dimensions: {axes}"
         )
     read_matrix = adc_events[0].num_samples
     if read_matrix < 2:
-        raise ValueError("Cartesian inference requires at least two samples per line")
+        raise AcquisitionNotRecognized(
+            "Cartesian inference requires at least two samples per line"
+        )
     if any(event.num_samples != read_matrix for event in adc_events):
-        raise ValueError("ADC events do not have a common read matrix")
+        raise AcquisitionNotRecognized("ADC events do not have a common read matrix")
     dwell_s = adc_events[0].dwell_s
     if any(
         not np.isclose(event.dwell_s, dwell_s, rtol=0.0, atol=1e-15)
         for event in adc_events
     ):
-        raise ValueError("ADC events do not have a common dwell time")
+        raise AcquisitionNotRecognized("ADC events do not have a common dwell time")
     if any(
         current.start_s <= previous.start_s
         for previous, current in zip(adc_events, adc_events[1:])
     ):
-        raise ValueError("ADC events are not strictly chronological")
+        raise AcquisitionNotRecognized("ADC events are not strictly chronological")
 
     definitions = dict(program.metadata.get("definitions", {}))
     encoding_frame = EncodingFrame.from_definitions(definitions)
@@ -1840,10 +1864,12 @@ def infer_cartesian_acquisition(
             None,
         )
     if fov_value is None:
-        raise ValueError("Pulseq sequence has no FOV definition")
+        raise AcquisitionNotRecognized("Pulseq sequence has no FOV definition")
     fov = numeric_definition_array(fov_value, "Cartesian FOV")
     if fov.size < 2 or not np.all(np.isfinite(fov[:2])) or np.any(fov[:2] <= 0):
-        raise ValueError("Pulseq FOV definition does not contain valid x/y values")
+        raise AcquisitionNotRecognized(
+            "Pulseq FOV definition does not contain valid x/y values"
+        )
     fov_x, fov_y = (float(fov[0]), float(fov[1]))
 
     compiled = SequenceCompiler().compile(program) if compiled is None else compiled
@@ -1882,18 +1908,20 @@ def infer_cartesian_acquisition(
     delta_x = np.diff(raw[:, :, 0], axis=1)
     mean_delta_x = np.mean(delta_x, axis=1)
     if np.any(np.abs(mean_delta_x) <= tolerance_x):
-        raise ValueError("ADC events do not contain a readout gradient")
+        raise AcquisitionNotRecognized("ADC events do not contain a readout gradient")
     directions = np.where(mean_delta_x > 0, 1, -1)
     expected_delta_x = directions[:, None] / fov_x
     if not np.allclose(delta_x, expected_delta_x, rtol=0.0, atol=tolerance_x):
-        raise ValueError("ADC readout samples are not on a regular read grid")
+        raise AcquisitionNotRecognized(
+            "ADC readout samples are not on a regular read grid"
+        )
     if not np.allclose(np.diff(raw[:, :, 1], axis=1), 0.0, rtol=0.0, atol=tolerance_y):
-        raise ValueError("phase gradient changes during an ADC line")
+        raise AcquisitionNotRecognized("phase gradient changes during an ADC line")
     z_scale = max(1.0, float(np.max(np.abs(raw[:, :, 2]))))
     if not np.allclose(
         np.diff(raw[:, :, 2], axis=1), 0.0, rtol=0.0, atol=1e-9 * z_scale
     ):
-        raise ValueError("partition gradient changes during an ADC line")
+        raise AcquisitionNotRecognized("partition gradient changes during an ADC line")
 
     ordered_x = np.stack(
         [
@@ -1903,7 +1931,9 @@ def infer_cartesian_acquisition(
     )
     common_x = np.mean(ordered_x, axis=0)
     if not np.allclose(ordered_x, common_x, rtol=0.0, atol=tolerance_x):
-        raise ValueError("EPI readout lines do not share one Cartesian kx grid")
+        raise AcquisitionNotRecognized(
+            "EPI readout lines do not share one Cartesian kx grid"
+        )
 
     line_y = np.mean(raw[:, :, 1], axis=1)
     phase_order = np.argsort(line_y)
@@ -1911,7 +1941,9 @@ def infer_cartesian_acquisition(
     if phase_matrix > 1 and not np.allclose(
         np.diff(sorted_y), 1.0 / fov_y, rtol=0.0, atol=tolerance_y
     ):
-        raise ValueError("ADC lines do not form one regular Cartesian ky grid")
+        raise AcquisitionNotRecognized(
+            "ADC lines do not form one regular Cartesian ky grid"
+        )
     phase_indices = np.empty(phase_matrix, dtype=int)
     phase_indices[phase_order] = np.arange(phase_matrix)
 
@@ -1923,7 +1955,9 @@ def infer_cartesian_acquisition(
         rtol=0.0,
         atol=tolerance_x * fov_x,
     ):
-        raise ValueError("kx coordinates cannot be represented by one Cartesian grid")
+        raise AcquisitionNotRecognized(
+            "kx coordinates cannot be represented by one Cartesian grid"
+        )
     rounded_kx_offset = round(2.0 * kx_offset) / 2.0
     if np.allclose(
         ordered_x * fov_x,
@@ -1940,7 +1974,9 @@ def infer_cartesian_acquisition(
         rtol=0.0,
         atol=tolerance_y * fov_y,
     ):
-        raise ValueError("ky coordinates cannot be represented by one Cartesian grid")
+        raise AcquisitionNotRecognized(
+            "ky coordinates cannot be represented by one Cartesian grid"
+        )
     rounded_ky_offset = round(2.0 * ky_offset) / 2.0
     if np.allclose(
         sorted_y * fov_y,
@@ -1986,7 +2022,7 @@ def infer_spectroscopic_acquisition(
 
     adc_events = program.adc_events
     if not adc_events:
-        raise ValueError("sequence contains no ADC events")
+        raise AcquisitionNotRecognized("sequence contains no ADC events")
     definitions = {
         str(key).lower(): value
         for key, value in dict(program.metadata.get("definitions", {})).items()
@@ -1995,10 +2031,14 @@ def infer_spectroscopic_acquisition(
     spectral_value = definitions.get("spectralpoints")
     fov_value = definitions.get("fov")
     if matrix_value is None or fov_value is None:
-        raise ValueError("CSI inference requires MatrixSize and FOV definitions")
+        raise AcquisitionNotRecognized(
+            "CSI inference requires MatrixSize and FOV definitions"
+        )
     matrix_values = numeric_definition_array(matrix_value, "CSI MatrixSize")
     if matrix_values.size < 3:
-        raise ValueError("CSI MatrixSize must contain x, y, and spectral sizes")
+        raise AcquisitionNotRecognized(
+            "CSI MatrixSize must contain x, y, and spectral sizes"
+        )
     nx, ny, matrix_spectral = (
         _positive_integer(value, "CSI MatrixSize") for value in matrix_values[:3]
     )
@@ -2008,39 +2048,91 @@ def infer_spectroscopic_acquisition(
         else _positive_integer(spectral_value, "SpectralPoints")
     )
     if spectral_points != matrix_spectral:
-        raise ValueError("CSI MatrixSize and SpectralPoints definitions disagree")
+        raise AcquisitionNotRecognized(
+            "CSI MatrixSize and SpectralPoints definitions disagree"
+        )
     repetitions_value = definitions.get("repetitions", 1)
     repetitions = _positive_integer(repetitions_value, "CSI Repetitions")
     if len(adc_events) != nx * ny * repetitions:
-        raise ValueError(
+        raise AcquisitionNotRecognized(
             "ADC event count does not match the declared CSI grid and repetitions"
         )
     if any(event.num_samples != spectral_points for event in adc_events):
-        raise ValueError("ADC event sizes do not match CSI SpectralPoints")
+        raise AcquisitionNotRecognized(
+            "ADC event sizes do not match CSI SpectralPoints"
+        )
     dwell_s = adc_events[0].dwell_s
     if any(
         not np.isclose(event.dwell_s, dwell_s, rtol=0.0, atol=1e-15)
         for event in adc_events
     ):
-        raise ValueError("CSI ADC events do not have a common spectral dwell")
+        raise AcquisitionNotRecognized(
+            "CSI ADC events do not have a common spectral dwell"
+        )
 
     fov = numeric_definition_array(fov_value, "CSI FOV")
     if fov.size < 2 or not np.all(np.isfinite(fov[:2])) or np.any(fov[:2] <= 0):
-        raise ValueError("CSI FOV definition does not contain valid x/y values")
+        raise AcquisitionNotRecognized(
+            "CSI FOV definition does not contain valid x/y values"
+        )
     labels = program.metadata.get("adc_label_values", {})
     lin = tuple(labels.get("LIN", ()))
     par = tuple(labels.get("PAR", ()))
     if len(lin) != len(adc_events) or len(par) != len(adc_events):
-        raise ValueError("CSI inference requires one LIN and PAR label per FID")
+        raise AcquisitionNotRecognized(
+            "CSI inference requires one LIN and PAR label per FID"
+        )
     encoding_indices = tuple((int(x), int(y)) for x, y in zip(lin, par))
     if repetitions == 1:
         repetition_indices = (0,) * len(adc_events)
     else:
         repetition_indices = tuple(int(value) for value in labels.get("REP", ()))
         if len(repetition_indices) != len(adc_events):
-            raise ValueError("repeated CSI requires one REP label per FID")
+            raise AcquisitionNotRecognized(
+                "repeated CSI requires one REP label per FID"
+            )
+    # A 3D Cartesian readout can match the counts above by coincidence
+    # (MatrixSize nx ny nz with nz readout samples); its labels then do not
+    # tile the nx-by-ny grid.
+    expected_grid = sorted((x, y) for y in range(ny) for x in range(nx))
+    for repetition in range(repetitions):
+        repetition_grid = sorted(
+            index
+            for index, value in zip(encoding_indices, repetition_indices)
+            if value == repetition
+        )
+        if repetition_grid != expected_grid:
+            raise AcquisitionNotRecognized(
+                "LIN and PAR labels do not cover the CSI grid once per repetition"
+            )
 
     compiled = SequenceCompiler().compile(program) if compiled is None else compiled
+    encoding_frame = EncodingFrame.from_definitions(
+        program.metadata.get("definitions", {})
+    )
+    moments = np.asarray(compiled.adc_gradient_moment_cyc_per_m, dtype=float)
+    if (
+        (nx, ny) != (1, 1)
+        and spectral_points > 1
+        and moments.shape == (len(adc_events) * spectral_points, 3)
+    ):
+        # A CSI FID is sampled without an in-plane gradient. The limit is
+        # twice the validate_gradient_moments tolerance, so every FID set that
+        # check accepts also passes here.
+        drift = np.ptp(
+            encoding_frame.scanner_to_encoding(
+                moments.reshape(len(adc_events), spectral_points, 3)
+            )[..., :2],
+            axis=1,
+        )
+        limit = (
+            2.0 * max(1e-9, 1e-3 / float(fov[0])),
+            2.0 * max(1e-9, 1e-3 / float(fov[1])),
+        )
+        if np.any(drift[:, 0] > limit[0]) or np.any(drift[:, 1] > limit[1]):
+            raise AcquisitionNotRecognized(
+                "ADC samples move through k-space, so they are not CSI FIDs"
+            )
     origins = tuple(
         tuple(float(value) for value in origin)
         for origin in _adc_gradient_moment_origins(program, compiled, adc_events)
@@ -2053,9 +2145,7 @@ def infer_spectroscopic_acquisition(
         encoding_indices=encoding_indices,
         repetition_indices=repetition_indices,
         moment_origins_cyc_per_m=origins,
-        encoding_frame=EncodingFrame.from_definitions(
-            program.metadata.get("definitions", {})
-        ),
+        encoding_frame=encoding_frame,
     )
     acquisition.validate_adc_times(compiled.adc_times_s)
     acquisition.validate_gradient_moments(compiled.adc_gradient_moment_cyc_per_m)
@@ -2080,7 +2170,7 @@ def infer_cartesian_acquisition_frames(
 
     adc_events = program.adc_events
     if not adc_events:
-        raise ValueError("sequence contains no ADC events")
+        raise AcquisitionNotRecognized("sequence contains no ADC events")
     compiled = SequenceCompiler().compile(program) if compiled is None else compiled
     dimensions = AcquisitionDimensions.from_program(program)
 
@@ -2098,7 +2188,9 @@ def infer_cartesian_acquisition_frames(
     for event_index, frame_index in enumerate(event_frames):
         grouped_events.setdefault(frame_index, []).append(event_index)
     if len(grouped_events) < 2:
-        raise ValueError("sequence does not contain multiple explicit 2D frames")
+        raise AcquisitionNotRecognized(
+            "sequence does not contain multiple explicit 2D frames"
+        )
 
     event_offsets = np.concatenate(
         ([0], np.cumsum(dimensions.adc_event_sample_counts, dtype=np.int64))
@@ -2193,20 +2285,26 @@ def infer_cartesian_acquisition_volumes(
     matrix_value = definitions.get("encodingmatrixsize", definitions.get("matrixsize"))
     fov_value = definitions.get("encodingfov", definitions.get("fov"))
     if matrix_value is None or fov_value is None:
-        raise ValueError(
+        raise AcquisitionNotRecognized(
             "3D Cartesian inference requires MatrixSize and FOV definitions"
         )
     matrix = numeric_definition_array(matrix_value, "3D Cartesian MatrixSize")
     fov = numeric_definition_array(fov_value, "3D Cartesian FOV")
     if matrix.size < 3:
-        raise ValueError("3D Cartesian MatrixSize must contain x, y, and z sizes")
+        raise AcquisitionNotRecognized(
+            "3D Cartesian MatrixSize must contain x, y, and z sizes"
+        )
     if fov.size < 3 or not np.all(np.isfinite(fov[:3])) or np.any(fov[:3] <= 0):
-        raise ValueError("3D Cartesian FOV must contain positive x, y, and z values")
+        raise AcquisitionNotRecognized(
+            "3D Cartesian FOV must contain positive x, y, and z values"
+        )
     read_matrix, phase_matrix, partition_matrix = (
         _positive_integer(value, "3D Cartesian MatrixSize") for value in matrix[:3]
     )
     if partition_matrix < 2:
-        raise ValueError("3D Cartesian inference requires at least two kz partitions")
+        raise AcquisitionNotRecognized(
+            "3D Cartesian inference requires at least two kz partitions"
+        )
 
     compiled = SequenceCompiler().compile(program) if compiled is None else compiled
     frames = (
@@ -2221,9 +2319,13 @@ def infer_cartesian_acquisition_volumes(
             acquisition.read_matrix != read_matrix
             or acquisition.phase_matrix != phase_matrix
         ):
-            raise ValueError("2D frame grid does not match the declared 3D MatrixSize")
+            raise AcquisitionNotRecognized(
+                "2D frame grid does not match the declared 3D MatrixSize"
+            )
         if not np.allclose(acquisition.fov_m, fov[:2], rtol=0.0, atol=1e-12):
-            raise ValueError("2D frame FOV does not match the declared 3D FOV")
+            raise AcquisitionNotRecognized(
+                "2D frame FOV does not match the declared 3D FOV"
+            )
 
     moments = np.asarray(compiled.adc_gradient_moment_cyc_per_m, dtype=float)
     if moments.shape != (frames.dimensions.num_samples, 3):
@@ -2240,7 +2342,7 @@ def infer_cartesian_acquisition_volumes(
         outer_index = tuple(frame_index[index] for index in outer_axes)
         grouped_frames.setdefault(outer_index, []).append(frame)
     if any(len(items) != partition_matrix for items in grouped_frames.values()):
-        raise ValueError(
+        raise AcquisitionNotRecognized(
             "each Cartesian volume must contain the declared number of kz partitions"
         )
 
@@ -2266,7 +2368,9 @@ def infer_cartesian_acquisition_volumes(
             relative = acquisition.encoding_frame.scanner_to_encoding(relative)
             kz = float(np.mean(relative[:, 2]))
             if not np.allclose(relative[:, 2], kz, rtol=0.0, atol=tolerance_z):
-                raise ValueError("kz changes within one Cartesian partition frame")
+                raise AcquisitionNotRecognized(
+                    "kz changes within one Cartesian partition frame"
+                )
             frame_coordinates.append((kz, frame))
         frame_coordinates.sort(key=lambda item: item[0])
         sorted_kz = np.asarray([item[0] for item in frame_coordinates], dtype=float)
@@ -2276,7 +2380,9 @@ def infer_cartesian_acquisition_volumes(
             rtol=0.0,
             atol=tolerance_z,
         ):
-            raise ValueError("ADC frames do not form one regular Cartesian kz grid")
+            raise AcquisitionNotRecognized(
+                "ADC frames do not form one regular Cartesian kz grid"
+            )
         ordered_frames = tuple(item[1] for item in frame_coordinates)
         partition_order = tuple(
             frames.frame_indices[frame][partition_axis] for frame in ordered_frames
@@ -2297,7 +2403,9 @@ def infer_cartesian_acquisition_volumes(
         np.allclose(values, common_kz, rtol=0.0, atol=tolerance_z)
         for values in volume_kz
     ):
-        raise ValueError("Cartesian volumes do not share one common kz grid")
+        raise AcquisitionNotRecognized(
+            "Cartesian volumes do not share one common kz grid"
+        )
 
     base_z = np.arange(partition_matrix, dtype=float) - partition_matrix // 2
     kz_offset = float(np.mean(common_kz * float(fov[2]) - base_z))
@@ -2307,7 +2415,9 @@ def infer_cartesian_acquisition_volumes(
         rtol=0.0,
         atol=tolerance_z * float(fov[2]),
     ):
-        raise ValueError("kz coordinates cannot be represented by one Cartesian grid")
+        raise AcquisitionNotRecognized(
+            "kz coordinates cannot be represented by one Cartesian grid"
+        )
     rounded_kz_offset = round(2.0 * kz_offset) / 2.0
     if np.allclose(
         common_kz * float(fov[2]),
@@ -2329,6 +2439,92 @@ def infer_cartesian_acquisition_volumes(
     if volumes.matrix != expected:
         raise ValueError("inferred Cartesian volume matrix is inconsistent")
     return volumes
+
+
+def detect_acquisitions(program: SequenceProgram, *, compiled) -> dict:
+    """Return the acquisition layouts a sequence simulation result carries.
+
+    Layouts the program declares in its metadata win over inference. The
+    inferences run in a fixed order: spectroscopic (CSI), spiral, single 2D
+    Cartesian, Cartesian frames, then Cartesian volumes. A layout that does
+    not apply (:class:`AcquisitionNotRecognized`) is ``None`` and its reason
+    is listed under ``acquisition_detection["not_recognized"]``. Any other
+    ``ValueError`` also leaves the layout ``None`` but is listed under
+    ``acquisition_detection["errors"]`` and raises an
+    :class:`AcquisitionDetectionWarning`.
+    """
+    not_recognized = {}
+    errors = {}
+
+    def attempt(key, infer):
+        try:
+            return infer().to_metadata()
+        except AcquisitionNotRecognized as exc:
+            not_recognized[key] = str(exc)
+        except ValueError as exc:
+            errors[key] = f"{type(exc).__name__}: {exc}"
+            warnings.warn(
+                f"{key.replace('_', ' ')} detection failed: {exc}",
+                AcquisitionDetectionWarning,
+                stacklevel=3,
+            )
+        return None
+
+    metadata = program.metadata
+    spectroscopic = metadata.get("spectroscopic_acquisition")
+    if spectroscopic is None:
+        spectroscopic = attempt(
+            "spectroscopic_acquisition",
+            lambda: infer_spectroscopic_acquisition(program, compiled=compiled),
+        )
+    spiral = metadata.get("spiral_acquisition")
+    if spiral is None:
+        spiral = attempt(
+            "spiral_acquisition",
+            lambda: infer_spiral_acquisition(program, compiled=compiled),
+        )
+    cartesian = metadata.get("cartesian_acquisition")
+    if cartesian is None:
+        declared = metadata.get("acquisition")
+        if isinstance(declared, dict) and declared.get("type") == "cartesian_2d":
+            cartesian = declared
+    frames = metadata.get("cartesian_acquisition_frames")
+    volumes = metadata.get("cartesian_acquisition_volumes")
+    if spectroscopic is None and spiral is None and cartesian is None:
+        cartesian = attempt(
+            "cartesian_acquisition",
+            lambda: infer_cartesian_acquisition(program, compiled=compiled),
+        )
+        if cartesian is None and frames is None:
+            frames = attempt(
+                "cartesian_acquisition_frames",
+                lambda: infer_cartesian_acquisition_frames(program, compiled=compiled),
+            )
+    if (
+        spectroscopic is None
+        and cartesian is None
+        and frames is not None
+        and volumes is None
+    ):
+        volumes = attempt(
+            "cartesian_acquisition_volumes",
+            lambda: infer_cartesian_acquisition_volumes(
+                program,
+                compiled=compiled,
+                frames=CartesianAcquisitionFrames.from_metadata(frames),
+            ),
+        )
+    return {
+        "spectroscopic_acquisition": spectroscopic,
+        "cartesian_acquisition": cartesian,
+        "cartesian_acquisition_frames": frames,
+        "cartesian_acquisition_volumes": volumes,
+        "spiral_acquisition": spiral,
+        "acquisition_detection": {
+            "not_recognized": not_recognized,
+            "errors": errors,
+        },
+    }
 
 
 def _adc_gradient_moment_origins(
@@ -2382,7 +2578,9 @@ def _derive_rf_delimited_dimensions(
 ):
     rf_events = program.rf_events
     if len(rf_events) < 2:
-        raise ValueError("outer dimensions are absent and cannot be derived")
+        raise AcquisitionNotRecognized(
+            "outer dimensions are absent and cannot be derived"
+        )
 
     rf_group_for_event = []
     for adc in program.adc_events:
@@ -2392,12 +2590,14 @@ def _derive_rf_delimited_dimensions(
             if rf.end_s <= adc.start_s + 1e-15
         ]
         if not preceding:
-            raise ValueError("an ADC event precedes the first RF excitation")
+            raise AcquisitionNotRecognized(
+                "an ADC event precedes the first RF excitation"
+            )
         rf_group_for_event.append(preceding[-1])
     used_groups = tuple(dict.fromkeys(rf_group_for_event))
     counts = [rf_group_for_event.count(group) for group in used_groups]
     if len(used_groups) < 2 or min(counts) < 2:
-        raise ValueError(
+        raise AcquisitionNotRecognized(
             "RF-delimited frame derivation requires multiple ADC lines per frame"
         )
 

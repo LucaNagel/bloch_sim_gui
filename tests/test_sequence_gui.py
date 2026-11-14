@@ -233,11 +233,63 @@ def test_execution_completion_message_reports_backend_contract_and_fallback():
     assert "bitwise contract" in fallback
     assert "fallback: initial-time ADC requires the CPU path" in fallback
 
+    slower = SequenceSimulationWidget._execution_completion_message(
+        {
+            "requested_sequence_kernel": "native_parallel",
+            "sequence_kernel": "native_parallel",
+            "native_spin_major_enabled": False,
+            "native_spin_major_fallback_reason": "dynamic B0 is unsupported",
+        }
+    )
+    assert "requested" not in slower
+    assert "spin-major kernel not used: dynamic B0 is unsupported" in slower
+
+    disabled = SequenceSimulationWidget._execution_completion_message(
+        {
+            "sequence_kernel": "native_parallel",
+            "native_spin_major_enabled": False,
+            "native_spin_major_fallback_reason": "disabled by request",
+        }
+    )
+    assert "spin-major" not in disabled
+
+    contrast = SequenceSimulationWidget._execution_completion_message(
+        {
+            "requested_sequence_kernel": "reference",
+            "sequence_kernel": "reference",
+            "contrast_kernel_fallback_from": "native_parallel",
+            "contrast_kernel_fallback_reason": "memory budget is too small",
+        }
+    )
+    assert "requested Native automatic; used" in contrast
+    assert (
+        "fallback: contrast relaxation needs the spin-major kernel "
+        "(memory budget is too small)" in contrast
+    )
+
     standard = SequenceSimulationWidget._execution_completion_message(
         {"sequence_kernel": "optimized", "numerical_contract": "legacy-fast-math"}
     )
     assert "legacy" not in standard
     assert "Float64 with fast-math (standard C build)" in standard
+
+    detection = SequenceSimulationWidget._execution_completion_message(
+        {
+            "sequence_kernel": "optimized",
+            "acquisition_detection": {
+                "not_recognized": {"cartesian_acquisition": "not Cartesian"},
+                "errors": {
+                    "spiral_acquisition": "ValueError: spiral FOV values must be "
+                    "positive and finite"
+                },
+            },
+        }
+    )
+    assert (
+        "spiral acquisition detection failed: ValueError: spiral FOV values "
+        "must be positive and finite" in detection
+    )
+    assert "not Cartesian" not in detection
 
 
 def test_rf_phase_plot_includes_programmed_phase_and_carrier_evolution():

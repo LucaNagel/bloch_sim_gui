@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, Optional, Tuple
+import warnings
 
 import numpy as np
 
@@ -22,7 +23,12 @@ from .dynamic_execution import (
     SEGMENT_RF,
     build_dynamic_execution_plan,
 )
-from .kernel_capabilities import DYNAMIC_KERNEL_NAMES
+from .kernel_capabilities import (
+    DYNAMIC_KERNEL_NAMES,
+    SPIN_MAJOR_DISABLED_REASON,
+    KernelFallbackWarning,
+    dynamic_kernel_fallback,
+)
 
 
 class _BoundedArrayCache:
@@ -873,6 +879,7 @@ class DynamicSpectralPhantom:
             or self.equilibrium_polarization < 0
         ):
             raise ValueError("equilibrium polarization must be finite and non-negative")
+        _check_equilibrium_target(self)
         self.kpl_map_s_inv = np.asarray(self.kpl_map_s_inv, dtype=np.float64)
         if self.kpl_map_s_inv.shape != self.shape:
             raise ValueError("kPL map shape must match dynamic phantom")
@@ -1637,6 +1644,14 @@ class DynamicSpectralPhantom:
                 spatial_scale_map=np.asarray(ds["dynamic_b0_scale_map"]),
                 pool_scale=tuple(dynamic_b0_metadata.get("pool_scale", (1.0, 1.0))),
             )
+        spin_density = (
+            None
+            if "initial_spin_density" not in ds
+            else {
+                name: np.asarray(ds["initial_spin_density"].sel(species=name))
+                for name in pool_names
+            }
+        )
         phantom = cls(
             shape=shape,
             fov=fov,
@@ -1645,15 +1660,8 @@ class DynamicSpectralPhantom:
                 name: np.asarray(ds["initial_concentration"].sel(species=name))
                 for name in pool_names
             },
-            initial_spin_density_maps=(
-                None
-                if "initial_spin_density" not in ds
-                else {
-                    name: np.asarray(ds["initial_spin_density"].sel(species=name))
-                    for name in pool_names
-                }
-            ),
-            equilibrium_polarization=float(header.get("equilibrium_polarization", 0.0)),
+            initial_spin_density_maps=spin_density,
+            equilibrium_polarization=_loaded_equilibrium(header, spin_density),
             kpl_map_s_inv=np.asarray(ds["kpl_map_s_inv"]),
             b0_map=(
                 np.asarray(ds["b0_hz"])
@@ -1864,6 +1872,14 @@ class DynamicSpectralPhantom:
                 spatial_scale_map=arrays["dynamic_b0_scale_map"],
                 pool_scale=tuple(dynamic_b0_metadata.get("pool_scale", (1.0, 1.0))),
             )
+        spin_density = (
+            None
+            if "spin_density_0" not in arrays
+            else {
+                pool.name: arrays[f"spin_density_{index}"]
+                for index, pool in enumerate(pools)
+            }
+        )
         phantom = cls(
             shape=tuple(header["shape"]),
             fov=tuple(header["fov"]),
@@ -1872,15 +1888,8 @@ class DynamicSpectralPhantom:
                 pool.name: arrays[f"initial_{index}"]
                 for index, pool in enumerate(pools)
             },
-            initial_spin_density_maps=(
-                None
-                if "spin_density_0" not in arrays
-                else {
-                    pool.name: arrays[f"spin_density_{index}"]
-                    for index, pool in enumerate(pools)
-                }
-            ),
-            equilibrium_polarization=float(header.get("equilibrium_polarization", 0.0)),
+            initial_spin_density_maps=spin_density,
+            equilibrium_polarization=_loaded_equilibrium(header, spin_density),
             kpl_map_s_inv=arrays["kpl_map_s_inv"],
             b0_map=arrays.get("b0_map"),
             b0_map_ppm=arrays.get("b0_map_ppm"),
@@ -2963,7 +2972,7 @@ def _spin_major_fallback_reason(
     Everything else keeps the existing native paths.
     """
     if not requested:
-        return "disabled by request"
+        return SPIN_MAJOR_DISABLED_REASON
     if not available:
         return "extension is unavailable"
     if phantom.n_species > _SPIN_MAJOR_MAX_POOLS:
@@ -3662,7 +3671,6 @@ def _simulate_dynamic_sequence_block(
     _native_spin_major=None,
     _native_spin_major_rf_cache=None,
     _spin_major_rf_propagator_budget_bytes=None,
-    **_ignored,
 ):
     """Run the complete sequence on a regional dynamic spectral phantom.
 
@@ -3676,14 +3684,7 @@ def _simulate_dynamic_sequence_block(
         physical_b1_field_arrays,
         physical_sequence_waveforms,
     )
-    from .sequence.acquisition import (
-        CartesianAcquisitionFrames,
-        infer_cartesian_acquisition,
-        infer_cartesian_acquisition_frames,
-        infer_cartesian_acquisition_volumes,
-        infer_spectroscopic_acquisition,
-        infer_spiral_acquisition,
-    )
+    from .sequence.acquisition import detect_acquisitions
     from .sequence.spin_sampling import (
         coerce_spin_sampling,
         phantom_voxel_basis_m,
@@ -6693,65 +6694,7 @@ def _simulate_dynamic_sequence_block(
             (compiled.checkpoint_times_s.size, phantom.n_species) + phantom.shape + (3,)
         )
     dimensions = AcquisitionDimensions.from_program(program)
-    spectroscopic_metadata = program.metadata.get("spectroscopic_acquisition")
-    if spectroscopic_metadata is None:
-        try:
-            spectroscopic_metadata = infer_spectroscopic_acquisition(
-                program, compiled=compiled
-            ).to_metadata()
-        except ValueError:
-            spectroscopic_metadata = None
-    spiral_metadata = program.metadata.get("spiral_acquisition")
-    if spiral_metadata is None:
-        try:
-            spiral_metadata = infer_spiral_acquisition(
-                program, compiled=compiled
-            ).to_metadata()
-        except ValueError:
-            spiral_metadata = None
-    cartesian_metadata = program.metadata.get("cartesian_acquisition")
-    if cartesian_metadata is None:
-        program_acquisition = program.metadata.get("acquisition")
-        if (
-            isinstance(program_acquisition, dict)
-            and program_acquisition.get("type") == "cartesian_2d"
-        ):
-            cartesian_metadata = program_acquisition
-    cartesian_frame_metadata = program.metadata.get("cartesian_acquisition_frames")
-    cartesian_volume_metadata = program.metadata.get("cartesian_acquisition_volumes")
-    if (
-        spectroscopic_metadata is None
-        and spiral_metadata is None
-        and cartesian_metadata is None
-    ):
-        try:
-            cartesian_metadata = infer_cartesian_acquisition(
-                program, compiled=compiled
-            ).to_metadata()
-        except ValueError:
-            if cartesian_frame_metadata is None:
-                try:
-                    cartesian_frame_metadata = infer_cartesian_acquisition_frames(
-                        program, compiled=compiled
-                    ).to_metadata()
-                except ValueError:
-                    cartesian_frame_metadata = None
-    if (
-        spectroscopic_metadata is None
-        and cartesian_metadata is None
-        and cartesian_frame_metadata is not None
-        and cartesian_volume_metadata is None
-    ):
-        try:
-            cartesian_volume_metadata = infer_cartesian_acquisition_volumes(
-                program,
-                compiled=compiled,
-                frames=CartesianAcquisitionFrames.from_metadata(
-                    cartesian_frame_metadata
-                ),
-            ).to_metadata()
-        except ValueError:
-            cartesian_volume_metadata = None
+    detected_acquisitions = detect_acquisitions(program, compiled=compiled)
     sequence_waveforms = physical_sequence_waveforms(program, effective_nucleus)
     physical_field_maps = physical_b1_field_arrays(phantom, sequence_waveforms)
     result = SequenceSimulationResult(
@@ -6776,11 +6719,7 @@ def _simulate_dynamic_sequence_block(
             ),
             "pool_names": tuple(pool.name for pool in phantom.pools),
             "acquisition_dimensions": dimensions.to_metadata(),
-            "spectroscopic_acquisition": spectroscopic_metadata,
-            "cartesian_acquisition": cartesian_metadata,
-            "cartesian_acquisition_frames": cartesian_frame_metadata,
-            "cartesian_acquisition_volumes": cartesian_volume_metadata,
-            "spiral_acquisition": spiral_metadata,
+            **detected_acquisitions,
             "sequence_definitions": dict(program.metadata.get("definitions", {})),
             "pool_frequency_offsets_hz": tuple(float(value) for value in pool_offsets),
             "field_strength_t": field,
@@ -7012,6 +6951,17 @@ def _simulate_dynamic_sequence_block(
     return result
 
 
+# Internal switches that the entry point hands on to the block solver. Every
+# other keyword that is not a named parameter is a caller mistake.
+_PRIVATE_BLOCK_OPTIONS = frozenset(
+    {
+        "_native_spin_major",
+        "_native_spin_major_rf_cache",
+        "_spin_major_rf_propagator_budget_bytes",
+    }
+)
+
+
 def _simulate_dynamic_sequence_single_source(
     program,
     phantom: DynamicSpectralPhantom,
@@ -7034,7 +6984,7 @@ def _simulate_dynamic_sequence_single_source(
     spoiler_mode="ideal",
     checkpoint_dtype=None,
     parent_voxel_chunk_size=None,
-    **_ignored,
+    **block_options,
 ):
     """Run a dynamic sequence, streaming large objects by parent voxel.
 
@@ -7046,6 +6996,12 @@ def _simulate_dynamic_sequence_single_source(
     from .sequence import SequenceCompiler
     from .sequence.spin_sampling import coerce_spin_sampling
 
+    unknown = sorted(set(block_options) - _PRIVATE_BLOCK_OPTIONS)
+    if unknown:
+        raise TypeError(
+            "simulate_dynamic_sequence() got unexpected keyword argument(s): "
+            + ", ".join(unknown)
+        )
     spoiler_mode = str(spoiler_mode).strip().lower()
     if spoiler_mode not in {"ideal", "gradient"}:
         raise ValueError("spoiler_mode must be 'ideal' or 'gradient'")
@@ -7116,18 +7072,19 @@ def _simulate_dynamic_sequence_single_source(
     # spin-major prediction here holds for all of them. Spin-major blocks keep
     # one ADC row per block instead of one per parent voxel.
     spin_major_planned = False
+    spin_major_unplanned_reason = None
     if sequence_kernel in {"native_serial", "native_parallel"}:
-        spin_major_planned = (
-            _spin_major_fallback_reason(
-                requested=_spin_major_requested(_ignored.get("_native_spin_major")),
-                available=_spin_major_kernel() is not None,
-                phantom=phantom,
-                real_dtype=real_dtype,
-                checkpoint_dtype=effective_checkpoint_dtype,
-                spatial_tx=global_tx_classification == "spatial",
-                execution_plan=execution_plan,
-            )
-            is None
+        spin_major_unplanned_reason = _spin_major_fallback_reason(
+            requested=_spin_major_requested(block_options.get("_native_spin_major")),
+            available=_spin_major_kernel() is not None,
+            phantom=phantom,
+            real_dtype=real_dtype,
+            checkpoint_dtype=effective_checkpoint_dtype,
+            spatial_tx=global_tx_classification == "spatial",
+            execution_plan=execution_plan,
+        )
+        if (
+            spin_major_unplanned_reason is None
             and _spin_major_slice_limits(
                 memory_budget_bytes,
                 n_rx_coils,
@@ -7138,8 +7095,10 @@ def _simulate_dynamic_sequence_single_source(
                     and phantom.pyruvate_inflow.has_spatial_delays
                 ),
             )
-            is not None
-        )
+            is None
+        ):
+            spin_major_unplanned_reason = "memory budget is too small"
+        spin_major_planned = spin_major_unplanned_reason is None
     contrast_kernel_fallback = None
     if (
         phantom.contrast_relaxation is not None
@@ -7152,8 +7111,22 @@ def _simulate_dynamic_sequence_single_source(
         if status_callback is not None:
             status_callback(
                 "Contrast relaxation needs the spin-major kernel; running the "
-                f"reference kernel instead of {contrast_kernel_fallback}."
+                f"reference kernel instead of {contrast_kernel_fallback}"
+                + (
+                    f" ({spin_major_unplanned_reason})."
+                    if spin_major_unplanned_reason
+                    else "."
+                )
             )
+    elif status_callback is not None and spin_major_unplanned_reason not in (
+        None,
+        SPIN_MAJOR_DISABLED_REASON,
+    ):
+        # Said once here, before the blocks start, so a slow run is explained.
+        status_callback(
+            "The spin-major kernel cannot run this simulation "
+            f"({spin_major_unplanned_reason}); using a slower dynamic path."
+        )
     adc_row_bytes = phantom.n_species * n_rx_coils * adc_count * complex_dtype.itemsize
 
     # Public outputs remain global. Everything proportional to the expanded
@@ -7242,7 +7215,7 @@ def _simulate_dynamic_sequence_single_source(
     )
     # Cached RF propagators use what the planned blocks and spin-major slice
     # tables leave of the budget; they never shrink the blocks.
-    spin_major_rf_budget_bytes = _ignored.pop(
+    spin_major_rf_budget_bytes = block_options.pop(
         "_spin_major_rf_propagator_budget_bytes", None
     )
     if spin_major_rf_budget_bytes is None and memory_budget_bytes is not None:
@@ -7277,7 +7250,7 @@ def _simulate_dynamic_sequence_single_source(
         _tx_classification=global_tx_classification,
         _constant_tx_sensitivity=global_constant_tx,
         _spin_major_rf_propagator_budget_bytes=spin_major_rf_budget_bytes,
-        **_ignored,
+        **block_options,
     )
     if not use_chunking:
         result = _simulate_dynamic_sequence_block(
@@ -7292,6 +7265,7 @@ def _simulate_dynamic_sequence_single_source(
             return result
         metadata = dict(result.metadata)
         metadata["contrast_kernel_fallback_from"] = contrast_kernel_fallback
+        metadata["contrast_kernel_fallback_reason"] = spin_major_unplanned_reason
         return replace(result, metadata=metadata)
 
     block_count = (parent_count + chunk_parent_count - 1) // chunk_parent_count
@@ -7420,6 +7394,7 @@ def _simulate_dynamic_sequence_single_source(
     )
     if contrast_kernel_fallback is not None:
         metadata["contrast_kernel_fallback_from"] = contrast_kernel_fallback
+        metadata["contrast_kernel_fallback_reason"] = spin_major_unplanned_reason
     return replace(
         template_result,
         signal=species_signal.sum(axis=0),
@@ -7711,6 +7686,15 @@ def _simulate_independent_pools(program, phantom, pools, kwargs):
     )
 
 
+def _warn_kernel_fallback(result):
+    """Warn the caller of the public entry point about a replaced kernel."""
+    message = dynamic_kernel_fallback(result.metadata)
+    if message is not None:
+        # Frames: this helper, the public entry point, its caller.
+        warnings.warn(message, KernelFallbackWarning, stacklevel=3)
+    return result
+
+
 def simulate_dynamic_sequence(program, phantom: DynamicSpectralPhantom, **kwargs):
     """Run a dynamic sequence, streaming large objects by parent voxel.
 
@@ -7719,7 +7703,45 @@ def simulate_dynamic_sequence(program, phantom: DynamicSpectralPhantom, **kwargs
     molecule). They are simulated in additional passes as their own
     precursor and superposed onto the primary result. Pools that never
     exchange magnetization may likewise run in one pass each.
+
+    Unknown keyword arguments raise ``TypeError``. A run that leaves the
+    requested kernel emits a ``KernelFallbackWarning``; the reason is also
+    recorded in the result metadata.
     """
+    return _warn_kernel_fallback(_run_dynamic_sequence(program, phantom, kwargs))
+
+
+def _loaded_equilibrium(header, spin_density) -> float:
+    """Return the saved thermal polarization, dropping one that had no effect.
+
+    Files written before the check may pair a positive value with missing
+    spin density maps; the solver ignored it then, so loading keeps that.
+    """
+    if spin_density is None:
+        return 0.0
+    return float(header.get("equilibrium_polarization", 0.0))
+
+
+def _check_equilibrium_target(phantom) -> None:
+    """Reject a thermal polarization that the solver would silently ignore.
+
+    Thermal recovery scales the spin density maps; without them every pool is
+    hyperpolarized and Mz relaxes toward zero.
+    """
+    if (
+        phantom.equilibrium_polarization > 0
+        and phantom.initial_spin_density_maps is None
+    ):
+        raise ValueError(
+            "equilibrium_polarization > 0 needs initial_spin_density_maps; "
+            "without them Mz relaxes toward zero"
+        )
+
+
+def _run_dynamic_sequence(program, phantom: DynamicSpectralPhantom, kwargs):
+    """Run the superposed passes of a dynamic sequence; see the public entry."""
+    # Attributes may change after construction, so check again before running.
+    _check_equilibrium_target(phantom)
     inflow = phantom.pyruvate_inflow
     colabelled = () if inflow is None else tuple(inflow.colabelled_pools)
     if not colabelled:

@@ -60,7 +60,11 @@ from PyQt5.QtWidgets import (
 )
 
 from ..memory import MEMORY_ERROR_PREFIX
-from ..kernel_capabilities import DYNAMIC_KERNEL_NAMES, SEQUENCE_KERNEL_NAMES
+from ..kernel_capabilities import (
+    DYNAMIC_KERNEL_NAMES,
+    SEQUENCE_KERNEL_NAMES,
+    SPIN_MAJOR_DISABLED_REASON,
+)
 from ..default_phantoms import (
     DEFAULT_COMPOUNDS,
     build_default_phantom,
@@ -101,6 +105,7 @@ from ..sequence import (
     declares_ideal_spoilers,
     deduplicate_observations,
     ernst_angle_deg,
+    estimate_timestep_error,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
     infer_cartesian_acquisition_volumes,
@@ -126,11 +131,13 @@ from ..sequence import (
     recommend_spin_grid_for_pathways,
     recommend_spin_grid_for_phase_train,
     slice_inversion_times,
+    timestep_error_inputs,
     variable_flip_angle_schedule,
     weighted_pathway_sampling_error,
 )
 from ..sequence.bruker_export import suggest_bruker_method
 from ..sequence.compiler import IDEAL_SPOILER_DEFINITION
+from ..sequence.convergence import DEFAULT_TIMESTEP_ERROR_INTERVAL_BUDGET
 from ..sequence.gradient_load import GradientLoadEstimate
 from ..sequence.encoding_order import (
     AXIS_ORDERS,
@@ -185,7 +192,14 @@ from ..units import (
     rf_hz_to_gauss_for_nucleus,
 )
 from .controls import UniversalTimeControl
-from .default_settings import DEFAULT_SEQUENCE_TIMESTEP_US, SEQUENCE_TIMESTEP_TOOLTIP
+from .default_settings import (
+    DEFAULT_SEQUENCE_TIMESTEP_US,
+    SEQUENCE_TIMESTEP_TOOLTIP,
+    TIMESTEP_ERROR_MIN_INTERVALS,
+    TIMESTEP_ERROR_NOTE_THRESHOLD,
+    TIMESTEP_ERROR_RUNTIME_FRACTION,
+    TIMESTEP_ERROR_SECONDS_PER_INTERVAL,
+)
 from .dialogs import PulseImportDialog
 from .metabolite_excitation_plan import MetaboliteExcitationPlanDialog
 from .spectral_spatial_designer import (
@@ -1404,6 +1418,56 @@ class SequenceSimulationThread(QThread):
     def request_cancel(self):
         self._cancel_requested = True
 
+    @staticmethod
+    def _timestep_error_budget(main_runtime_s):
+        """Quarter-step RF intervals the check may use after a run this long."""
+
+        share = TIMESTEP_ERROR_RUNTIME_FRACTION * max(0.0, float(main_runtime_s))
+        intervals = share / TIMESTEP_ERROR_SECONDS_PER_INTERVAL
+        return int(
+            min(
+                DEFAULT_TIMESTEP_ERROR_INTERVAL_BUDGET,
+                max(TIMESTEP_ERROR_MIN_INTERVALS, intervals),
+            )
+        )
+
+    def _timestep_error_metadata(self, main_runtime_s=0.0):
+        """Repeat the sequence for a few probe spins at a quarter step.
+
+        The probes use the phantom's extent, off-resonances and T1/T2. A
+        separate serial simulator keeps the main simulator's last result. The
+        interval budget keeps the check near a tenth of the main run; a cut
+        check covers the start of the sequence.
+        """
+
+        if self.simulation_timestep_s is not None:
+            self.stage.emit("Checking the RF time step against a quarter step…")
+        try:
+            inputs = timestep_error_inputs(
+                self.phantom,
+                field_strength_t=self.field_strength_t,
+                nucleus=self.nucleus,
+                sequence_reference_ppm=self.sequence_reference_ppm,
+            )
+            checker = BlochSimulator(
+                use_parallel=False,
+                sequence_kernel=getattr(self.simulator, "sequence_kernel", "optimized"),
+            )
+            estimate = estimate_timestep_error(
+                self.program,
+                self.simulation_timestep_s,
+                spoiler_mode=self.spoiler_mode,
+                simulator=checker,
+                max_reference_intervals=self._timestep_error_budget(main_runtime_s),
+                cancel_callback=lambda: self._cancel_requested,
+                **inputs,
+            )
+        except Exception as exc:
+            if self._cancel_requested:
+                raise
+            return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+        return estimate.to_metadata()
+
     def run(self):
         try:
             if isinstance(self.phantom, DynamicSpectralPhantom):
@@ -1437,13 +1501,15 @@ class SequenceSimulationThread(QThread):
                 "progress_callback": lambda done, total: self.progress.emit(
                     done, total * progress_phases
                 ),
-                "chunk_voxels": self.chunk_voxels,
                 "cancel_callback": lambda: self._cancel_requested,
                 "status_callback": lambda message: self.stage.emit(message),
                 "simulation_timestep_s": self.simulation_timestep_s,
                 "spin_sampling": self.spin_sampling,
                 "spoiler_mode": self.spoiler_mode,
             }
+            # The dynamic solver sizes its blocks from the memory budget.
+            if not isinstance(self.phantom, DynamicSpectralPhantom):
+                kwargs["chunk_voxels"] = self.chunk_voxels
             if self.live_preview:
                 kwargs["preview_callback"] = lambda fraction, signal: self.preview.emit(
                     fraction, signal
@@ -1454,7 +1520,9 @@ class SequenceSimulationThread(QThread):
                     nucleus=self.nucleus,
                     sequence_reference_ppm=self.sequence_reference_ppm,
                 )
+            main_started = time.perf_counter()
             result = simulate(self.program, self.phantom, **kwargs)
+            main_runtime_s = time.perf_counter() - main_started
             result.metadata["receiver_acquisition"] = receiver_acquisition_metadata(
                 self.program,
                 nucleus=self.nucleus,
@@ -1463,6 +1531,10 @@ class SequenceSimulationThread(QThread):
                 signal_weighting=self.signal_weighting,
             )
             result = apply_receiver_noise(result, self.receiver_noise)
+            if not self._cancel_requested:
+                result.metadata["timestep_error"] = self._timestep_error_metadata(
+                    main_runtime_s
+                )
             if not self._cancel_requested:
                 animation = None
                 if animation_times.size:
@@ -3020,11 +3092,25 @@ class SequenceSimulationWidget(QWidget):
         sequence_layout.addWidget(QLabel("Time step"), 3, 0)
         sequence_layout.addWidget(self.simulation_timestep_us, 3, 1)
         sequence_layout.addWidget(self.sequence_live_preview, 3, 2, 1, 2)
+        self.timestep_check_label = QLabel()
+        self.timestep_check_label.setObjectName("sequence_timestep_check")
+        self.timestep_check_label.setWordWrap(True)
+        self.timestep_check_label.setToolTip(
+            "After each run a few probe spins (centre and lines along the "
+            "RF-active gradients, at the phantom's off-resonances and T1/T2) "
+            "repeat the sequence at a quarter of the time step. The largest "
+            "magnetization difference estimates the time-step error."
+        )
+        self.timestep_check_label.hide()
+        self.simulation_timestep_us.valueChanged.connect(
+            lambda _value: self._show_timestep_check(None)
+        )
+        sequence_layout.addWidget(self.timestep_check_label, 4, 0, 1, 4)
 
         rule = QFrame()
         rule.setProperty("role", "rule")
         rule.setFrameShape(QFrame.HLine)
-        sequence_layout.addWidget(rule, 4, 0, 1, 4)
+        sequence_layout.addWidget(rule, 5, 0, 1, 4)
 
         self.generate_sequence_button = QPushButton("Generate sequence")
         self.generate_sequence_button.setToolTip(
@@ -3078,7 +3164,7 @@ class SequenceSimulationWidget(QWidget):
         actions_row.addWidget(self.generate_sequence_button, 1)
         actions_row.addWidget(self.import_sequence_button)
         actions_row.addWidget(self.export_pulseq_button)
-        sequence_layout.addLayout(actions_row, 5, 0, 1, 4)
+        sequence_layout.addLayout(actions_row, 6, 0, 1, 4)
 
         self.sequence_source.set_groups(
             [
@@ -3121,7 +3207,7 @@ class SequenceSimulationWidget(QWidget):
         self.sequence_info = QLabel()
         self.sequence_info.setWordWrap(True)
         self.sequence_info.setVisible(False)
-        sequence_layout.addWidget(self.sequence_info, 6, 0, 1, 4)
+        sequence_layout.addWidget(self.sequence_info, 7, 0, 1, 4)
         self.sequence_status_label = QLabel()
         self.sequence_status_label.setObjectName("sequence_status")
         self.sequence_status_label.setWordWrap(True)
@@ -3140,7 +3226,7 @@ class SequenceSimulationWidget(QWidget):
         status_row = QHBoxLayout()
         status_row.addWidget(self.sequence_status_label, 1)
         status_row.addWidget(self.psf_analysis_link, 0, Qt.AlignRight | Qt.AlignTop)
-        sequence_layout.addLayout(status_row, 7, 0, 1, 4)
+        sequence_layout.addLayout(status_row, 8, 0, 1, 4)
         # The name of the generated sequence is in the status line; the table
         # keeps the summary rows for scripts and tests.
         self.sequence_summary_table = QTableWidget(0, 2)
@@ -17698,6 +17784,7 @@ class SequenceSimulationWidget(QWidget):
         self._reset_run_controls(completed=True, elapsed_s=elapsed_s)
         self.export_button.setEnabled(True)
         self._status_update(self._execution_completion_message(result.metadata))
+        self._show_timestep_check(result.metadata.get("timestep_error"))
         self._set_sequence_cursor(1.0)
         self._configure_frame_selector()
         self._configure_spectroscopy_selectors()
@@ -17774,7 +17861,11 @@ class SequenceSimulationWidget(QWidget):
         }
 
         actual = str(metadata.get("sequence_kernel") or "").strip()
-        requested = str(metadata.get("requested_sequence_kernel") or actual).strip()
+        requested = str(
+            metadata.get("contrast_kernel_fallback_from")
+            or metadata.get("requested_sequence_kernel")
+            or actual
+        ).strip()
         actual_label = kernel_labels.get(actual, actual or "unknown CPU path")
         requested_label = kernel_labels.get(requested, requested or "unknown path")
         if requested and actual and requested != actual:
@@ -17808,7 +17899,23 @@ class SequenceSimulationWidget(QWidget):
         fallback_reason = metadata.get("native_fallback_reason") or metadata.get(
             "fallback_reason"
         )
+        if metadata.get("contrast_kernel_fallback_from"):
+            contrast_reason = metadata.get("contrast_kernel_fallback_reason")
+            fallback_reason = "contrast relaxation needs the spin-major kernel" + (
+                f" ({contrast_reason})" if contrast_reason else ""
+            )
         fallback_used = bool(requested and actual and requested != actual)
+        spin_major_reason = metadata.get("native_spin_major_fallback_reason")
+        if (
+            not fallback_used
+            and actual in {"native_serial", "native_parallel"}
+            and not metadata.get("native_spin_major_enabled")
+            and spin_major_reason
+            and spin_major_reason != SPIN_MAJOR_DISABLED_REASON
+        ):
+            details.append(
+                f"slower path, spin-major kernel not used: {spin_major_reason}"
+            )
         if fallback_used:
             details.append(
                 f"fallback: {fallback_reason}" if fallback_reason else "fallback used"
@@ -17823,9 +17930,88 @@ class SequenceSimulationWidget(QWidget):
                 else "mixed native/NumPy execution"
             )
 
+        detection = metadata.get("acquisition_detection")
+        detection_errors = (
+            detection.get("errors") if isinstance(detection, dict) else None
+        )
+        for key, reason in dict(detection_errors or {}).items():
+            details.append(f"{str(key).replace('_', ' ')} detection failed: {reason}")
+
+        timestep_note = SequenceSimulationWidget._timestep_error_note(
+            metadata.get("timestep_error")
+        )
+        if timestep_note:
+            details.append(timestep_note)
+
         if details:
             message += "; " + "; ".join(details)
         return message
+
+    def _show_timestep_check(self, check):
+        """Show the last run's time-step check below the time-step field."""
+
+        label = self.timestep_check_label
+        text = ""
+        tone = "muted"
+        if isinstance(check, dict):
+            status = check.get("status")
+            error = check.get("max_vector_error")
+            if status == "failed":
+                text = f"Time-step check failed: {check.get('error')}"
+                tone = "warning"
+            elif status == "identical_discretization":
+                text = (
+                    "Time-step check: the RF raster is not finer than the step, "
+                    "so the step adds no error."
+                )
+            elif status in ("checked", "truncated") and error is not None:
+                step_us = 1e6 * float(check["simulation_timestep_s"])
+                reference_us = 1e6 * float(check["reference_timestep_s"])
+                percent = 100.0 * float(error)
+                bound = "< 0.01%" if percent < 0.01 else f"{percent:.2g}%"
+                text = (
+                    f"Last run at {step_us:g} µs: probe magnetization within "
+                    f"{bound} of M0 of a {reference_us:g} µs run"
+                )
+                if status == "truncated":
+                    text += (
+                        f" (first {float(check['checked_duration_s']):.4g} s "
+                        "checked)"
+                    )
+                if float(error) > TIMESTEP_ERROR_NOTE_THRESHOLD:
+                    text += " — consider a smaller step."
+                    tone = "warning"
+                else:
+                    text += "."
+        label.setText(text)
+        set_tone(label, tone)
+        label.setVisible(bool(text))
+
+    @staticmethod
+    def _timestep_error_note(check, threshold=TIMESTEP_ERROR_NOTE_THRESHOLD):
+        """Return a note when the time-step check failed or exceeds threshold."""
+
+        if not isinstance(check, dict):
+            return ""
+        if check.get("status") == "failed":
+            return f"RF time-step check failed: {check.get('error')}"
+        error = check.get("max_vector_error")
+        if check.get("status") not in ("checked", "truncated") or error is None:
+            return ""
+        if not float(error) > float(threshold):
+            return ""
+        step_us = 1e6 * float(check["simulation_timestep_s"])
+        reference_us = 1e6 * float(check["reference_timestep_s"])
+        note = (
+            f"RF time step {step_us:g} µs: probe magnetization differs by up to "
+            f"{100.0 * float(error):.3g}% of M0 from a {reference_us:g} µs run"
+        )
+        probe = check.get("worst_probe")
+        if isinstance(probe, dict) and probe.get("frequency_offset_hz") is not None:
+            note += f" (at {float(probe['frequency_offset_hz']):+.6g} Hz)"
+        if check.get("status") == "truncated":
+            note += f", first {float(check['checked_duration_s']):.4g} s checked"
+        return note + " — consider a smaller step"
 
     @staticmethod
     def _session_sequence_name(program):

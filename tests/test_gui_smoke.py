@@ -403,7 +403,6 @@ def test_shared_pulse_loader_dispatches_headerless_txt_import_options():
 def test_adiabatic_free_mode_does_not_force_global_ten_ns_time_step():
     window = MagicMock()
     window.workspace_mode = "free"
-    window._adiabatic_timestep_warning_shown = False
     window.rf_designer.is_adiabatic_passage.return_value = True
     window.rf_designer.pulse_type.currentText.return_value = "Adiabatic Full Passage"
     window.rf_designer.b1_amplitude.value.return_value = 0.08
@@ -423,7 +422,6 @@ def test_adiabatic_free_mode_does_not_force_global_ten_ns_time_step():
 def test_adiabatic_free_mode_skips_prompt_at_recommended_time_step():
     window = MagicMock()
     window.workspace_mode = "free"
-    window._adiabatic_timestep_warning_shown = False
     window.rf_designer.is_adiabatic_passage.return_value = True
     window.rf_designer.pulse_type.currentText.return_value = "Adiabatic Half Passage"
     window.rf_designer.b1_amplitude.value.return_value = 0.08

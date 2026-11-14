@@ -219,7 +219,6 @@ class BlochSimulatorGUI(QMainWindow):
         workspace_defaults = WorkspaceDefaults.from_settings(self.app_settings)
         self._workspace_field_strength_t = workspace_defaults.field_strength_t
         self._workspace_nucleus = workspace_defaults.phantom_nucleus
-        self._adiabatic_timestep_warning_shown = False
         set_default_memory_policy(self._load_memory_policy())
         self.simulator = BlochSimulator(
             use_parallel=True,

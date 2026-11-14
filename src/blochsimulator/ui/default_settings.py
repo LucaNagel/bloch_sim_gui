@@ -37,8 +37,22 @@ SEQUENCE_TIMESTEP_TOOLTIP = (
     "4% at 20 µs (×11)\n"
     "• Spectral-spatial (SPSP): 1% at 2 µs, 5% at 5 µs, ≥ 10% from 10 µs — "
     "use 1 µs\n\n"
-    "Otherwise the error grows roughly with the square of the step."
+    "Otherwise the error grows roughly with the square of the step. After "
+    "each run a few probe spins repeat the sequence at a quarter of the step; "
+    "a largest magnetization difference above 1% is reported with the result. "
+    "Pools far off the selected frequency (e.g. lactate in SS-bSSFP) can be "
+    "much worse than the signal benchmarks above."
 )
+# Probe magnetization error (fraction of M0) above which a finished run notes
+# that the RF time step is too coarse.
+TIMESTEP_ERROR_NOTE_THRESHOLD = 0.01
+# The check gets about this share of the main run's wall time, but at least
+# TIMESTEP_ERROR_MIN_INTERVALS quarter-step RF intervals; longer sequences are
+# checked from their start. One quarter-step interval costs 13-19 us on an M3
+# (mostly the Python compile of the step and reference runs).
+TIMESTEP_ERROR_RUNTIME_FRACTION = 0.1
+TIMESTEP_ERROR_SECONDS_PER_INTERVAL = 2e-5
+TIMESTEP_ERROR_MIN_INTERVALS = 1_000
 
 
 @dataclass(frozen=True)
