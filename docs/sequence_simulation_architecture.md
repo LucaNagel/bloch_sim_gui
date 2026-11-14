@@ -110,8 +110,9 @@ This is a regression baseline for the representative motifs, not yet a global
 recommendation for arbitrary imported sequences. Full ADC and image validation
 must still confirm the surviving candidates on actual sequence programs.
 RF-discretization in dynamic hyperpolarized bSSFP is represented by the bSSFP
-motif, but the independent oracle does not yet solve coupled exchange or inflow;
-those dynamic equations require a separate convergence validation.
+motif, but the independent oracle does not solve coupled exchange or inflow.
+`tests/test_dynamic_timestep_self_convergence.py` therefore checks the dynamic
+kernel against itself at 1 µs (see below).
 
 ### Time-step check after each GUI run
 
@@ -128,13 +129,16 @@ off-resonance (at most 12 frequencies), each with its T1/T2. Probe positions
 span the phantom along the dominant gradient direction during RF (9 samples).
 Without a gradient during RF, there is one position.
 
-The check gets about 10 % of the main run's wall time. The budget assumes
+The check gets about 10 % of the main run's wall time (50 % for dynamic
+phantoms, below). The budget assumes
 2e-5 s per quarter-step interval and allows at least 1,000 and at most 400,000
 intervals. A longer sequence is checked from its start, and the result is marked
 `truncated`.
 
-The result is stored in `metadata["timestep_error"]`. Above 1 % of M0, the
-completion message notes the step, and the label under the time-step field
+The result is stored in `metadata["timestep_error"]`, with `"source"` naming
+the check (`"static_probes"` here, `"dynamic_kernel"` for dynamic phantoms,
+below). Above 1 % (of M0 for probes, of the pool's peak for dynamic phantoms),
+the completion message notes the step, and the label under the time-step field
 turns into a warning.
 
 Measured on an M3 at 20 µs against 5 µs:
@@ -154,14 +158,75 @@ Cost of the check:
 | --- | ---: | ---: |
 | FLASH 32×32 | 0.065 s | +0.021 s |
 | SPSP | 0.005 s | +0.006 s |
-| SS-bSSFP, dynamic 8×8×4 | 3.9 s | +0.25 s (6.5 %) |
+| SS-bSSFP, dynamic 8×8×4 (dynamic check, below) | 2.2 s | +1.0 s (47 %) |
 
-The check uses the static kernel, without exchange or inflow. One dynamic voxel
-was tested with the default SS-bSSFP, lactate at 1655 Hz and pyruvate at
-−245 Hz, T1 30 s and T2 1 s. Against 1 µs, its lactate error was 0.288 at
-20 µs and 0.072 at 10 µs. The static check gives 0.549 for the same sequence,
-so here it is a conservative proxy. A general self-convergence check of the
-dynamic solver with exchange and inflow is still open.
+#### Dynamic phantoms
+
+For a `DynamicSpectralPhantom` the GUI calls `estimate_dynamic_timestep_error`
+instead of the probe check. It runs the dynamic kernel itself, with conversion,
+inflow (also co-labelled pools), washout and dynamic B0, at the chosen step and
+at a quarter of it. The probe check used the static kernel without any of these.
+
+Voxels do not couple, so the kernel can simulate a voxel subset of the full
+phantom (private option `_voxel_indices`). Every map applies unchanged, and each
+selected voxel reproduces its full-phantom result to 1e-12.
+`dynamic_timestep_error_voxels` picks at most 256 voxels: the median and the
+extremes of each pool's off-resonance; the extremes of B1, kPL, kPA, inflow
+delivery and arrival, washout loss and the dynamic-B0 scale; one voxel per
+washout or contrast compartment; and the brightest voxel of each pool. Evenly
+spaced voxels fill the rest. Smaller phantoms are checked whole.
+
+The error is `|M(step) - M(reference)|` per voxel and pool at RF ends,
+declared checkpoints and the end of the checked part. It is divided by that
+pool's peak magnetization in that voxel, but by at least 1 % of the pool's
+largest peak. Hyperpolarized pools have no fixed M0, so this unit differs from
+the probe check.
+
+Convergence order, measured on an M3 (`test_dynamic_timestep_self_convergence.py`):
+six voxels, kPL 2–20 s⁻¹, pyruvate inflow with a co-labelled pool, and washout
+with a source compartment. The same kernel runs against 1 µs. The signal error
+at 20 µs is 6.1e-4, and the final-magnetization error is 8.5e-4. Each halving
+of the step reduces both by 4.03 (20 → 10 µs) and 4.12 (10 → 5 µs). Against a
+1 µs reference, second order predicts exactly these ratios, so the dynamic
+kernel is second order with exchange, inflow and washout. On resonance, the
+coupled terms dominate the remaining splitting error (6e-6 versus 6e-9 for
+relaxation alone), and they also fall in second order.
+
+Default SS-bSSFP, dynamic 8×8×4 (152 voxels):
+
+- Pools: pyruvate at −245 Hz and lactate at 1655 Hz, kPL 0.05–0.5 s⁻¹.
+- Phantom: inflow, washout and a B1 map.
+- Run: 20 µs, M3.
+
+The true error is the same normalized error at 20 µs against 1 µs, over all
+voxels. The estimate uses a 5 µs reference.
+
+| Check | Cost | Checked | Estimate | True / estimate |
+| --- | ---: | ---: | ---: | ---: |
+| Full sequence | 6.7 s (310 %) | 2.43 s | 0.231 | 1.06 |
+| 10 % of the run | 0.21–0.23 s | first 0.07 s | 0.029–0.032 | 7.7–8.4 |
+| GUI, 50 % of the run | 1.01–1.06 s | first 0.36–0.38 s | 0.125–0.129 | 1.90–1.97 |
+| 100 % of the run | 2.08 s | first 0.73 s | 0.197 | 1.25 |
+
+The true error is 0.246, for lactate at about +1650 Hz at 1.20 s.
+
+On a 16×16×10 phantom with 1968 voxels, the 256 selected voxels give 0.220,
+against 0.248 over all voxels (factor 1.13).
+
+The cost hardly depends on the voxel count. It is a fixed Python cost per RF
+interval: compiling the RF intervals and evaluating the inflow curves. One
+quarter-step interval of the step and reference runs costs 37–42 µs, and
+`TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL` assumes 4e-5 s. A long dynamic
+sequence is therefore checked only from its start. The result is then marked
+`truncated`, and the GUI names the checked duration.
+
+In hyperpolarized bSSFP, the time-step error builds up over the pulse train.
+A truncated check is therefore a lower bound. With the probe check's 10 %
+share it underestimates the full error about eight times. Dynamic phantoms
+therefore get their own share, `TIMESTEP_ERROR_DYNAMIC_RUNTIME_FRACTION = 0.5`:
+the check adds about half the main run and comes within a factor of two
+(1.90–1.97 in three GUI runs). The margin is small. Where the main run is fast
+compared with the per-interval cost, less of the sequence is checked.
 
 ### Static and dynamic kernel agreement
 

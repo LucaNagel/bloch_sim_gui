@@ -38,13 +38,16 @@ SEQUENCE_TIMESTEP_TOOLTIP = (
     "• Spectral-spatial (SPSP): 1% at 2 µs, 5% at 5 µs, ≥ 10% from 10 µs — "
     "use 1 µs\n\n"
     "Otherwise the error grows roughly with the square of the step. After "
-    "each run a few probe spins repeat the sequence at a quarter of the step; "
-    "a largest magnetization difference above 1% is reported with the result. "
-    "Pools far off the selected frequency (e.g. lactate in SS-bSSFP) can be "
-    "much worse than the signal benchmarks above."
+    "each run a few probe spins (dynamic phantoms: a few voxels in the "
+    "dynamic kernel) repeat the sequence at a quarter of the step, adding about "
+    "a tenth of the run time (half for dynamic phantoms); a largest "
+    "magnetization difference above 1% is reported with the result. Pools "
+    "far off the selected frequency (e.g. lactate in SS-bSSFP) can be much "
+    "worse than the signal benchmarks above."
 )
-# Probe magnetization error (fraction of M0) above which a finished run notes
-# that the RF time step is too coarse.
+# Magnetization error above which a finished run notes that the RF time step
+# is too coarse: a fraction of M0 for probe spins, and of each pool's peak
+# magnetization in its voxel for dynamic phantoms.
 TIMESTEP_ERROR_NOTE_THRESHOLD = 0.01
 # The check gets about this share of the main run's wall time, but at least
 # TIMESTEP_ERROR_MIN_INTERVALS quarter-step RF intervals; longer sequences are
@@ -53,6 +56,14 @@ TIMESTEP_ERROR_NOTE_THRESHOLD = 0.01
 TIMESTEP_ERROR_RUNTIME_FRACTION = 0.1
 TIMESTEP_ERROR_SECONDS_PER_INTERVAL = 2e-5
 TIMESTEP_ERROR_MIN_INTERVALS = 1_000
+# Dynamic phantoms are checked in the dynamic kernel itself, on at most 256
+# voxels. One quarter-step interval of that costs 37-42 us on an M3, almost
+# independent of the voxel count (RF compile and inflow curves per interval).
+# The error of hyperpolarized bSSFP builds up over the pulse train, so a check
+# cut to a tenth of the run sees only its start (SS-bSSFP 8x8x4: about 8x too
+# low). Half the run brings the estimate within a factor of 2.
+TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL = 4e-5
+TIMESTEP_ERROR_DYNAMIC_RUNTIME_FRACTION = 0.5
 
 
 @dataclass(frozen=True)

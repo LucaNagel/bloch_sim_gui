@@ -105,6 +105,7 @@ from ..sequence import (
     declares_ideal_spoilers,
     deduplicate_observations,
     ernst_angle_deg,
+    estimate_dynamic_timestep_error,
     estimate_timestep_error,
     infer_cartesian_acquisition,
     infer_cartesian_acquisition_frames,
@@ -195,6 +196,8 @@ from .controls import UniversalTimeControl
 from .default_settings import (
     DEFAULT_SEQUENCE_TIMESTEP_US,
     SEQUENCE_TIMESTEP_TOOLTIP,
+    TIMESTEP_ERROR_DYNAMIC_RUNTIME_FRACTION,
+    TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL,
     TIMESTEP_ERROR_MIN_INTERVALS,
     TIMESTEP_ERROR_NOTE_THRESHOLD,
     TIMESTEP_ERROR_RUNTIME_FRACTION,
@@ -1419,11 +1422,21 @@ class SequenceSimulationThread(QThread):
         self._cancel_requested = True
 
     @staticmethod
-    def _timestep_error_budget(main_runtime_s):
-        """Quarter-step RF intervals the check may use after a run this long."""
+    def _timestep_error_budget(
+        main_runtime_s,
+        seconds_per_interval=TIMESTEP_ERROR_SECONDS_PER_INTERVAL,
+        fraction=None,
+    ):
+        """Quarter-step RF intervals the check may use after a run this long.
 
-        share = TIMESTEP_ERROR_RUNTIME_FRACTION * max(0.0, float(main_runtime_s))
-        intervals = share / TIMESTEP_ERROR_SECONDS_PER_INTERVAL
+        ``fraction`` is the share of the main run's wall time; by default
+        ``TIMESTEP_ERROR_RUNTIME_FRACTION``.
+        """
+
+        if fraction is None:
+            fraction = TIMESTEP_ERROR_RUNTIME_FRACTION
+        share = float(fraction) * max(0.0, float(main_runtime_s))
+        intervals = share / float(seconds_per_interval)
         return int(
             min(
                 DEFAULT_TIMESTEP_ERROR_INTERVAL_BUDGET,
@@ -1432,16 +1445,22 @@ class SequenceSimulationThread(QThread):
         )
 
     def _timestep_error_metadata(self, main_runtime_s=0.0):
-        """Repeat the sequence for a few probe spins at a quarter step.
+        """Repeat the sequence at a quarter step and compare.
 
-        The probes use the phantom's extent, off-resonances and T1/T2. A
-        separate serial simulator keeps the main simulator's last result. The
-        interval budget keeps the check near a tenth of the main run; a cut
-        check covers the start of the sequence.
+        Static and spectral phantoms use a few probe spins with the phantom's
+        extent, off-resonances and T1/T2. Dynamic phantoms repeat the dynamic
+        kernel itself on a few voxels (extremes of B0, kPL, inflow and the
+        other maps), with exchange, inflow and washout. A separate serial
+        simulator keeps the main simulator's last result. The interval budget
+        keeps the check near a tenth of the main run (half for dynamic
+        phantoms, whose error builds up over long pulse trains); a cut check
+        covers the start of the sequence. The metadata name the source.
         """
 
         if self.simulation_timestep_s is not None:
             self.stage.emit("Checking the RF time step against a quarter step…")
+        if isinstance(self.phantom, DynamicSpectralPhantom):
+            return self._dynamic_timestep_error_metadata(main_runtime_s)
         try:
             inputs = timestep_error_inputs(
                 self.phantom,
@@ -1465,8 +1484,49 @@ class SequenceSimulationThread(QThread):
         except Exception as exc:
             if self._cancel_requested:
                 raise
-            return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            return self._failed_timestep_error("static_probes", exc)
         return estimate.to_metadata()
+
+    def _dynamic_timestep_error_metadata(self, main_runtime_s):
+        """Run the dynamic kernel at the step and a quarter step on few voxels."""
+
+        try:
+            checker = BlochSimulator(
+                use_parallel=False,
+                dynamic_sequence_kernel=getattr(
+                    self.simulator, "dynamic_sequence_kernel", "optimized"
+                ),
+            )
+            estimate = estimate_dynamic_timestep_error(
+                self.program,
+                self.phantom,
+                self.simulation_timestep_s,
+                field_strength_t=self.field_strength_t,
+                nucleus=self.nucleus,
+                sequence_reference_ppm=self.sequence_reference_ppm,
+                spoiler_mode=self.spoiler_mode,
+                spin_sampling=self.spin_sampling,
+                simulator=checker,
+                max_reference_intervals=self._timestep_error_budget(
+                    main_runtime_s,
+                    TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL,
+                    TIMESTEP_ERROR_DYNAMIC_RUNTIME_FRACTION,
+                ),
+                cancel_callback=lambda: self._cancel_requested,
+            )
+        except Exception as exc:
+            if self._cancel_requested:
+                raise
+            return self._failed_timestep_error("dynamic_kernel", exc)
+        return estimate.to_metadata()
+
+    @staticmethod
+    def _failed_timestep_error(source, exc):
+        return {
+            "status": "failed",
+            "source": source,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     def run(self):
         try:
@@ -17969,9 +18029,13 @@ class SequenceSimulationWidget(QWidget):
                 reference_us = 1e6 * float(check["reference_timestep_s"])
                 percent = 100.0 * float(error)
                 bound = "< 0.01%" if percent < 0.01 else f"{percent:.2g}%"
+                if check.get("source") == "dynamic_kernel":
+                    quantity, unit = "pool magnetization", "of each pool's peak"
+                else:
+                    quantity, unit = "probe magnetization", "of M0"
                 text = (
-                    f"Last run at {step_us:g} µs: probe magnetization within "
-                    f"{bound} of M0 of a {reference_us:g} µs run"
+                    f"Last run at {step_us:g} µs: {quantity} within "
+                    f"{bound} {unit} of a {reference_us:g} µs run"
                 )
                 if status == "truncated":
                     text += (
@@ -18002,13 +18066,18 @@ class SequenceSimulationWidget(QWidget):
             return ""
         step_us = 1e6 * float(check["simulation_timestep_s"])
         reference_us = 1e6 * float(check["reference_timestep_s"])
+        if check.get("source") == "dynamic_kernel":
+            quantity, unit = "pool magnetization", "of the pool's peak"
+        else:
+            quantity, unit = "probe magnetization", "of M0"
         note = (
-            f"RF time step {step_us:g} µs: probe magnetization differs by up to "
-            f"{100.0 * float(error):.3g}% of M0 from a {reference_us:g} µs run"
+            f"RF time step {step_us:g} µs: {quantity} differs by up to "
+            f"{100.0 * float(error):.3g}% {unit} from a {reference_us:g} µs run"
         )
         probe = check.get("worst_probe")
         if isinstance(probe, dict) and probe.get("frequency_offset_hz") is not None:
-            note += f" (at {float(probe['frequency_offset_hz']):+.6g} Hz)"
+            pool = f"{probe['pool']} " if probe.get("pool") else ""
+            note += f" ({pool}at {float(probe['frequency_offset_hz']):+.6g} Hz)"
         if check.get("status") == "truncated":
             note += f", first {float(check['checked_duration_s']):.4g} s checked"
         return note + " — consider a smaller step"

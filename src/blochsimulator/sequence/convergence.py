@@ -383,9 +383,13 @@ _NO_RELAXATION_S = 1e6
 class TimestepErrorEstimate:
     """Self-convergence estimate of the RF-active time-step error.
 
-    ``max_vector_error`` is the largest ``|M(step) - M(reference)|`` of the
-    probe spins over RF-end checkpoints and the end of the checked part, in
-    units of the equilibrium magnetization. ``status`` is ``"checked"``,
+    ``max_vector_error`` is the largest ``|M(step) - M(reference)|`` over
+    RF-end checkpoints and the end of the checked part. ``source`` says what
+    was simulated and sets the unit: ``"static_probes"`` (thermal probe spins
+    in the static kernel, in units of the equilibrium magnetization) or
+    ``"dynamic_kernel"`` (phantom voxels in the dynamic kernel, with exchange,
+    inflow and washout; per voxel and pool in units of that pool's peak
+    magnetization in that voxel). ``status`` is ``"checked"``,
     ``"truncated"`` (only the first ``checked_duration_s`` fit the interval
     budget), ``"identical_discretization"`` (the reference grid equals the
     step grid inside every RF event, so the error is exactly zero),
@@ -403,6 +407,7 @@ class TimestepErrorEstimate:
     sequence_duration_s: float
     reference_interval_count: int
     runtime_s: float
+    source: str = "static_probes"
 
     @property
     def simulated(self) -> bool:
@@ -430,6 +435,7 @@ class TimestepErrorEstimate:
             }
         return {
             "status": self.status,
+            "source": self.source,
             "simulation_timestep_s": self.simulation_timestep_s,
             "reference_timestep_s": self.reference_timestep_s,
             "max_vector_error": error if np.isfinite(error) else None,
@@ -479,58 +485,21 @@ def estimate_timestep_error(
     the sequence up to the first RF event beyond that budget is checked.
     """
 
-    if not isinstance(program, SequenceProgram):
-        raise TypeError(f"program must be SequenceProgram, got {type(program)}")
-    from .compiler import SequenceCompiler
-
     start = perf_counter()
-    duration = float(program.duration_s)
-    step = None if simulation_timestep_s is None else float(simulation_timestep_s)
-    if step is not None and (not np.isfinite(step) or step <= 0):
-        raise ValueError("simulation_timestep_s must be None or finite and positive")
-    if reference_timestep_s is None:
-        reference = None if step is None else step / TIMESTEP_ERROR_REFERENCE_RATIO
-    else:
-        reference = float(reference_timestep_s)
-        if not np.isfinite(reference) or reference <= 0:
-            raise ValueError("reference_timestep_s must be finite and positive")
+    step, reference, skip = _timestep_error_steps(
+        program, simulation_timestep_s, reference_timestep_s
+    )
     if int(line_samples) != line_samples or line_samples < 2:
         raise ValueError("line_samples must be an integer of at least 2")
-    if int(max_reference_intervals) != max_reference_intervals or (
-        max_reference_intervals <= 0
-    ):
-        raise ValueError("max_reference_intervals must be a positive integer")
+    _check_interval_budget(max_reference_intervals)
     frequencies = _axis_values(frequency_offsets_hz, np.float64, "frequency_offsets_hz")
     t1 = _per_spin_values(t1_s, np.float64, frequencies.size, "t1_s")
     t2 = _per_spin_values(t2_s, np.float64, frequencies.size, "t2_s")
     if np.any(t1 <= 0) or np.any(t2 <= 0):
         raise ValueError("t1_s and t2_s must be positive")
     sample_positions = _vectors(positions_m, "positions_m")
-
-    def skipped(status: str) -> TimestepErrorEstimate:
-        return TimestepErrorEstimate(
-            status=status,
-            simulation_timestep_s=step,
-            reference_timestep_s=reference,
-            max_vector_error=0.0 if status == "identical_discretization" else np.nan,
-            worst_time_s=None,
-            worst_probe=None,
-            probe_count=0,
-            checked_duration_s=0.0,
-            sequence_duration_s=duration,
-            reference_interval_count=0,
-            runtime_s=perf_counter() - start,
-        )
-
-    if step is None:
-        return skipped("native_raster")
-    if reference >= step:
-        return skipped("finer_than_reference")
-    rf_step = SequenceCompiler._rf_step
-    if all(
-        rf_step(event, step) == rf_step(event, reference) for event in program.rf_events
-    ):
-        return skipped("identical_discretization")
+    if skip is not None:
+        return _skipped_timestep_error(skip, program, step, reference, start)
 
     checked, truncated = _timestep_error_program(
         program, reference, int(max_reference_intervals)
@@ -591,9 +560,350 @@ def estimate_timestep_error(
         worst_probe=probes.describe(int(worst_probe)),
         probe_count=probes.n_spins,
         checked_duration_s=float(checked.duration_s),
-        sequence_duration_s=duration,
+        sequence_duration_s=float(program.duration_s),
         reference_interval_count=int(gold.metadata["n_intervals"]),
         runtime_s=perf_counter() - start,
+    )
+
+
+def _timestep_error_steps(
+    program: SequenceProgram,
+    simulation_timestep_s: float | None,
+    reference_timestep_s: float | None,
+) -> tuple[float | None, float | None, str | None]:
+    """Return the step, the reference step and the skip status, if any."""
+
+    if not isinstance(program, SequenceProgram):
+        raise TypeError(f"program must be SequenceProgram, got {type(program)}")
+    from .compiler import SequenceCompiler
+
+    step = None if simulation_timestep_s is None else float(simulation_timestep_s)
+    if step is not None and (not np.isfinite(step) or step <= 0):
+        raise ValueError("simulation_timestep_s must be None or finite and positive")
+    if reference_timestep_s is None:
+        reference = None if step is None else step / TIMESTEP_ERROR_REFERENCE_RATIO
+    else:
+        reference = float(reference_timestep_s)
+        if not np.isfinite(reference) or reference <= 0:
+            raise ValueError("reference_timestep_s must be finite and positive")
+    if step is None:
+        return step, reference, "native_raster"
+    if reference >= step:
+        return step, reference, "finer_than_reference"
+    rf_step = SequenceCompiler._rf_step
+    if all(
+        rf_step(event, step) == rf_step(event, reference) for event in program.rf_events
+    ):
+        return step, reference, "identical_discretization"
+    return step, reference, None
+
+
+def _check_interval_budget(max_reference_intervals) -> None:
+    if int(max_reference_intervals) != max_reference_intervals or (
+        max_reference_intervals <= 0
+    ):
+        raise ValueError("max_reference_intervals must be a positive integer")
+
+
+def _skipped_timestep_error(
+    status: str,
+    program: SequenceProgram,
+    step: float | None,
+    reference: float | None,
+    start: float,
+    source: str = "static_probes",
+) -> TimestepErrorEstimate:
+    return TimestepErrorEstimate(
+        status=status,
+        simulation_timestep_s=step,
+        reference_timestep_s=reference,
+        max_vector_error=0.0 if status == "identical_discretization" else np.nan,
+        worst_time_s=None,
+        worst_probe=None,
+        probe_count=0,
+        checked_duration_s=0.0,
+        sequence_duration_s=float(program.duration_s),
+        reference_interval_count=0,
+        runtime_s=perf_counter() - start,
+        source=source,
+    )
+
+
+DEFAULT_DYNAMIC_TIMESTEP_ERROR_MAX_VOXELS = 256
+# A pool's error in a voxel is relative to its peak magnetization there, but
+# at least to this fraction of the pool's largest peak in the checked voxels,
+# so nearly empty voxels do not dominate.
+DYNAMIC_TIMESTEP_ERROR_PEAK_FLOOR = 1e-2
+
+
+def dynamic_timestep_error_voxels(
+    phantom,
+    *,
+    field_strength_t: float | None = None,
+    nucleus: str | None = None,
+    sequence_reference_ppm: float | None = None,
+    max_voxels: int = DEFAULT_DYNAMIC_TIMESTEP_ERROR_MAX_VOXELS,
+) -> np.ndarray:
+    """Return flat indices of the active voxels the dynamic check simulates.
+
+    A phantom with at most ``max_voxels`` active voxels is checked whole.
+    Otherwise the extremes of every voxel map the dynamic kernel uses come
+    first: per pool the median, lowest and highest off-resonance (B0 plus
+    chemical shift relative to the sequence reference), the lowest and
+    highest Tx sensitivity, kPL and kPA, inflow delivery and arrival delay,
+    washout loss and dynamic B0 scale, one voxel per washout and contrast
+    compartment and the brightest voxel per pool. Evenly spaced active
+    voxels fill the rest. The indices are sorted and unique.
+    """
+
+    if int(max_voxels) != max_voxels or max_voxels < 1:
+        raise ValueError("max_voxels must be a positive integer")
+    active = np.flatnonzero(np.asarray(phantom.mask).ravel()).astype(np.int64)
+    if active.size == 0:
+        raise ValueError("the phantom has no active voxels")
+    if active.size <= max_voxels:
+        return active
+
+    def values(array, dtype=np.float64):
+        return np.asarray(array, dtype=dtype).ravel()[active]
+
+    picks: list[int] = []
+
+    def extremes(array, median=False):
+        order = np.argsort(array, kind="stable")
+        if median:
+            picks.append(int(order[(order.size - 1) // 2]))
+        picks.extend((int(order[0]), int(order[-1])))
+
+    def one_per_group(array):
+        _, first = np.unique(array, return_index=True)
+        picks.extend(int(index) for index in first)
+
+    frequencies = timestep_error_frequencies(
+        phantom,
+        field_strength_t=field_strength_t,
+        nucleus=nucleus,
+        sequence_reference_ppm=sequence_reference_ppm,
+    )
+    for pool_frequencies in frequencies:
+        extremes(pool_frequencies[active], median=True)
+    tx = getattr(phantom, "tx_sensitivity_map", None)
+    if tx is not None:
+        extremes(np.abs(values(tx, np.complex128)))
+    extremes(values(phantom.kpl_map_s_inv))
+    kpa = getattr(phantom, "kpa_map_s_inv", None)
+    if kpa is not None and phantom.n_species > 2:
+        extremes(values(kpa))
+    inflow = phantom.pyruvate_inflow
+    if inflow is not None:
+        extremes(values(inflow.delivery_map))
+        if inflow.arrival_delay_map_s is not None:
+            extremes(values(inflow.arrival_delay_map_s))
+    washout = phantom.voxel_washout
+    if washout is not None:
+        extremes(values(washout.loss_map_s_inv))
+        if washout.compartment_map is not None:
+            one_per_group(values(washout.compartment_map, np.int64))
+    contrast = getattr(phantom, "contrast_relaxation", None)
+    if contrast is not None:
+        one_per_group(values(contrast.compartment_map, np.int64))
+    if phantom.dynamic_b0 is not None:
+        extremes(values(phantom.dynamic_b0.spatial_scale_map))
+    for pool in phantom.pools:
+        density = phantom.initial_concentration_maps.get(pool.name)
+        if density is not None:
+            picks.append(int(np.argmax(np.abs(values(density)))))
+
+    chosen = list(dict.fromkeys(picks))[:max_voxels]
+    remaining = np.setdiff1d(np.arange(active.size), chosen, assume_unique=True)
+    fill = max_voxels - len(chosen)
+    if fill > 0 and remaining.size:
+        spaced = np.linspace(0, remaining.size - 1, min(fill, remaining.size))
+        chosen.extend(remaining[np.unique(np.round(spaced).astype(np.int64))])
+    return np.unique(active[np.asarray(chosen, dtype=np.int64)])
+
+
+def timestep_error_frequencies(
+    phantom,
+    *,
+    field_strength_t: float | None = None,
+    nucleus: str | None = None,
+    sequence_reference_ppm: float | None = None,
+) -> np.ndarray:
+    """Return the static off-resonance of every dynamic pool and voxel in Hz.
+
+    The shape is ``(n_pools, n_voxels)`` over the flattened phantom: B0 plus
+    the pool's chemical shift (and shift map) relative to the sequence
+    reference, as the dynamic kernel sees them before dynamic B0.
+    """
+
+    from ..units import ppm_to_hz
+
+    field = phantom.field_strength if field_strength_t is None else field_strength_t
+    field = float(field)
+    effective_nucleus = phantom.nucleus if nucleus is None else str(nucleus)
+    reference_ppm = (
+        phantom.spectral_reference_ppm
+        if sequence_reference_ppm is None
+        else float(sequence_reference_ppm)
+    )
+    b0 = np.asarray(phantom.b0_offset_hz(field, effective_nucleus), dtype=float)
+    b0 = np.broadcast_to(b0, phantom.shape).ravel()
+    reference_shift_hz = float(
+        ppm_to_hz(
+            phantom.spectral_reference_ppm - reference_ppm, field, effective_nucleus
+        )
+    )
+    pool_shifts = phantom.pool_shift_offsets_hz(field, effective_nucleus)
+    frequencies = np.empty((len(phantom.pools), b0.size), dtype=np.float64)
+    for index, pool in enumerate(phantom.pools):
+        frequencies[index] = (
+            b0
+            + pool.get_frequency_offset(field, effective_nucleus)
+            + reference_shift_hz
+        )
+        if pool_shifts is not None:
+            frequencies[index] += pool_shifts[index].ravel()
+    return frequencies
+
+
+def estimate_dynamic_timestep_error(
+    program: SequenceProgram,
+    phantom,
+    simulation_timestep_s: float | None,
+    *,
+    field_strength_t: float | None = None,
+    nucleus: str | None = None,
+    sequence_reference_ppm: float | None = None,
+    reference_timestep_s: float | None = None,
+    voxel_indices=None,
+    max_voxels: int = DEFAULT_DYNAMIC_TIMESTEP_ERROR_MAX_VOXELS,
+    max_reference_intervals: int = DEFAULT_TIMESTEP_ERROR_INTERVAL_BUDGET,
+    max_rf_checkpoints: int = 256,
+    spoiler_mode: str = "ideal",
+    spin_sampling=None,
+    simulator=None,
+    cancel_callback=None,
+) -> TimestepErrorEstimate:
+    """Estimate the RF time-step error of a dynamic phantom run.
+
+    The dynamic kernel of ``simulator`` runs the sequence on a voxel subset
+    (``voxel_indices`` or :func:`dynamic_timestep_error_voxels`) at
+    ``simulation_timestep_s`` and at ``reference_timestep_s`` (default: a
+    quarter of the step), with the phantom's conversion, inflow, washout,
+    Tx and B0 maps. Each voxel keeps its full-phantom result because voxels
+    do not couple. The error of a pool in a voxel is ``|M(step) -
+    M(reference)|`` relative to that pool's peak ``|M|`` there (at least
+    ``DYNAMIC_TIMESTEP_ERROR_PEAK_FLOOR`` of the pool's largest peak), at
+    RF-end checkpoints and the end of the checked part. A small pool such as
+    lactate thus reports its own relative error. The estimate is the largest
+    over voxels and pools; the integrator is second order, so it is about
+    6 % below the error against the converged solution.
+
+    ADC events are dropped. When the reference needs more than
+    ``max_reference_intervals`` RF intervals, only the sequence up to the
+    first RF event beyond that budget is checked (``status="truncated"``);
+    errors that build up over a long RF train are then underestimated.
+    """
+
+    start = perf_counter()
+    step, reference, skip = _timestep_error_steps(
+        program, simulation_timestep_s, reference_timestep_s
+    )
+    _check_interval_budget(max_reference_intervals)
+    if voxel_indices is None:
+        voxels = dynamic_timestep_error_voxels(
+            phantom,
+            field_strength_t=field_strength_t,
+            nucleus=nucleus,
+            sequence_reference_ppm=sequence_reference_ppm,
+            max_voxels=max_voxels,
+        )
+    else:
+        voxels = np.unique(np.asarray(voxel_indices, dtype=np.int64).ravel())
+    if skip is not None:
+        return _skipped_timestep_error(
+            skip, program, step, reference, start, "dynamic_kernel"
+        )
+
+    checked, truncated = _timestep_error_program(
+        program, reference, int(max_reference_intervals)
+    )
+    checkpoints = np.union1d(
+        default_probe_checkpoints(checked, max_rf_checkpoints=max_rf_checkpoints),
+        (0.0,),
+    )
+    if simulator is None:
+        from ..simulator import BlochSimulator
+
+        simulator = BlochSimulator(use_parallel=False)
+    options = dict(
+        field_strength_t=field_strength_t,
+        nucleus=nucleus,
+        sequence_reference_ppm=sequence_reference_ppm,
+        checkpoints_s=checkpoints,
+        spoiler_mode=spoiler_mode,
+        cancel_callback=cancel_callback,
+        _voxel_indices=voxels,
+    )
+    if spin_sampling is not None:
+        options["spin_sampling"] = spin_sampling
+    candidate, gold = (
+        simulator.simulate_dynamic_sequence(
+            checked, phantom, simulation_timestep_s=timestep_s, **options
+        )
+        for timestep_s in (step, reference)
+    )
+    # (checkpoint, pool, voxel, xyz)
+    gold_states = np.asarray(gold.checkpoint_pool_magnetization, dtype=np.float64)
+    differences = np.linalg.norm(
+        np.asarray(candidate.checkpoint_pool_magnetization, dtype=np.float64)
+        - gold_states,
+        axis=-1,
+    )
+    peaks = np.linalg.norm(gold_states, axis=-1).max(axis=0)
+    scales = np.maximum(
+        peaks, DYNAMIC_TIMESTEP_ERROR_PEAK_FLOOR * peaks.max(axis=1, keepdims=True)
+    )
+    errors = np.divide(
+        differences,
+        scales[None],
+        out=np.zeros_like(differences),
+        where=scales[None] > 0,
+    )
+    worst_checkpoint, worst_pool, worst_voxel = np.unravel_index(
+        int(np.argmax(errors)), errors.shape
+    )
+    voxel = int(voxels[worst_voxel])
+    frequency = timestep_error_frequencies(
+        phantom,
+        field_strength_t=field_strength_t,
+        nucleus=nucleus,
+        sequence_reference_ppm=sequence_reference_ppm,
+    )[worst_pool, voxel]
+    metadata = gold.metadata
+    intervals = metadata.get("compiled_interval_count", metadata.get("n_intervals"))
+    return TimestepErrorEstimate(
+        status="truncated" if truncated else "checked",
+        simulation_timestep_s=step,
+        reference_timestep_s=reference,
+        max_vector_error=float(errors[worst_checkpoint, worst_pool, worst_voxel]),
+        worst_time_s=float(np.asarray(gold.checkpoint_times_s)[worst_checkpoint]),
+        worst_probe={
+            "voxel_index": voxel,
+            "position_m": [
+                float(value) for value in np.asarray(phantom.positions)[voxel]
+            ],
+            "pool": phantom.pools[worst_pool].name,
+            "frequency_offset_hz": float(frequency),
+            "peak_magnetization": float(peaks[worst_pool, worst_voxel]),
+        },
+        probe_count=int(voxels.size),
+        checked_duration_s=float(checked.duration_s),
+        sequence_duration_s=float(program.duration_s),
+        reference_interval_count=int(intervals or 0),
+        runtime_s=perf_counter() - start,
+        source="dynamic_kernel",
     )
 
 
@@ -628,39 +938,18 @@ def timestep_error_inputs(
     groups = []
     positions = []
     if isinstance(phantom, DynamicSpectralPhantom):
-        field = phantom.field_strength if field_strength_t is None else field_strength_t
-        field = float(field)
-        effective_nucleus = phantom.nucleus if nucleus is None else str(nucleus)
-        reference_ppm = (
-            phantom.spectral_reference_ppm
-            if sequence_reference_ppm is None
-            else float(sequence_reference_ppm)
-        )
-        from ..units import ppm_to_hz
-
         active = np.flatnonzero(np.asarray(phantom.mask).ravel())
         positions.append(np.asarray(phantom.positions, dtype=np.float64)[active])
-        b0 = np.asarray(phantom.b0_offset_hz(field, effective_nucleus), dtype=float)
-        b0 = b0.ravel()[active]
-        reference_shift_hz = float(
-            ppm_to_hz(
-                phantom.spectral_reference_ppm - reference_ppm,
-                field,
-                effective_nucleus,
-            )
-        )
-        pool_shifts = phantom.pool_shift_offsets_hz(field, effective_nucleus)
-        for index, pool in enumerate(phantom.pools):
-            frequencies = (
-                b0
-                + pool.get_frequency_offset(field, effective_nucleus)
-                + reference_shift_hz
-            )
-            if pool_shifts is not None:
-                frequencies = frequencies + pool_shifts[index].ravel()[active]
+        frequencies = timestep_error_frequencies(
+            phantom,
+            field_strength_t=field_strength_t,
+            nucleus=nucleus,
+            sequence_reference_ppm=sequence_reference_ppm,
+        )[:, active]
+        for pool, pool_frequencies in zip(phantom.pools, frequencies):
             groups.append(
                 (
-                    frequencies,
+                    pool_frequencies,
                     np.full(active.size, float(pool.t1)),
                     np.full(active.size, float(pool.t2)),
                 )

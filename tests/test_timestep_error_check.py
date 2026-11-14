@@ -388,6 +388,7 @@ def test_failed_check_keeps_the_result_and_is_reported(monkeypatch):
 
     assert result.metadata["timestep_error"] == {
         "status": "failed",
+        "source": "static_probes",
         "error": "RuntimeError: probe run broke",
     }
     message = SequenceSimulationWidget._execution_completion_message(result.metadata)

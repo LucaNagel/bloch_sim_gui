@@ -3664,6 +3664,7 @@ def _simulate_dynamic_sequence_block(
     _active_indices=None,
     _parent_resolved_signal=False,
     _block_result_mode=None,
+    _compact_voxels=False,
     _sequence_compile_s=0.0,
     _execution_plan_build_s=0.0,
     _tx_classification=None,
@@ -6675,11 +6676,20 @@ def _simulate_dynamic_sequence_block(
     result_species_signal = (
         species_signal.sum(axis=0) if _parent_resolved_signal else species_signal
     )
-    final_pool = np.zeros((phantom.n_species, phantom.nvoxels, 3), dtype=real_dtype)
-    final_pool[:, active] = state
-    final_pool = final_pool.reshape((phantom.n_species,) + phantom.shape + (3,))
-    checkpoint_pool = None
-    if checkpoint_states.size:
+    if _compact_voxels:
+        # One output voxel per active index, in index order; nothing else.
+        final_pool = np.array(state, dtype=real_dtype)
+        checkpoint_pool = (
+            np.array(checkpoint_states, dtype=checkpoint_dtype)
+            if checkpoint_states.size
+            else None
+        )
+    else:
+        final_pool = np.zeros((phantom.n_species, phantom.nvoxels, 3), dtype=real_dtype)
+        final_pool[:, active] = state
+        final_pool = final_pool.reshape((phantom.n_species,) + phantom.shape + (3,))
+        checkpoint_pool = None
+    if checkpoint_states.size and not _compact_voxels:
         checkpoint_pool = np.zeros(
             (
                 compiled.checkpoint_times_s.size,
@@ -6958,8 +6968,26 @@ _PRIVATE_BLOCK_OPTIONS = frozenset(
         "_native_spin_major",
         "_native_spin_major_rf_cache",
         "_spin_major_rf_propagator_budget_bytes",
+        "_voxel_indices",
     }
 )
+
+
+def _checked_voxel_indices(values, nvoxels: int) -> np.ndarray:
+    """Return a validated, strictly increasing subset of flat voxel indices."""
+    raw = np.asarray(values)
+    if raw.ndim != 1 or raw.size == 0 or not np.issubdtype(raw.dtype, np.integer):
+        raise ValueError("_voxel_indices must be a non-empty 1-D integer array")
+    indices = np.ascontiguousarray(raw, dtype=np.int64)
+    if (
+        np.any(indices < 0)
+        or np.any(indices >= nvoxels)
+        or np.any(np.diff(indices) <= 0)
+    ):
+        raise ValueError(
+            "_voxel_indices must be strictly increasing flat voxel indices"
+        )
+    return indices
 
 
 def _simulate_dynamic_sequence_single_source(
@@ -7009,11 +7037,21 @@ def _simulate_dynamic_sequence_single_source(
         spin_sampling if spoiler_mode == "gradient" else None
     )
     sampling.validate_phantom_dimensions(phantom.ndim)
-    active = np.flatnonzero(phantom.mask.ravel())
+    # A voxel subset (private, for the time-step check) simulates only those
+    # voxels and returns them along one compact voxel axis in index order.
+    # Voxels do not couple, so each keeps its full-phantom result.
+    voxel_indices = block_options.pop("_voxel_indices", None)
+    compact = voxel_indices is not None
+    if compact:
+        active = _checked_voxel_indices(voxel_indices, phantom.nvoxels)
+    else:
+        active = np.flatnonzero(phantom.mask.ravel())
     if active.size == 0:
         raise ValueError(
             "dynamic phantom has neither initial magnetization nor inflow support"
         )
+    output_voxels = int(active.size) if compact else phantom.nvoxels
+    output_shape = (output_voxels,) if compact else phantom.shape
     if parent_voxel_chunk_size is not None:
         if (
             isinstance(parent_voxel_chunk_size, bool)
@@ -7132,11 +7170,11 @@ def _simulate_dynamic_sequence_single_source(
     # Public outputs remain global. Everything proportional to the expanded
     # subspin count belongs to the current parent-voxel memory block.
     global_output_bytes = (
-        phantom.n_species * phantom.nvoxels * 3 * real_dtype.itemsize
-        + phantom.nvoxels * 3 * real_dtype.itemsize
+        phantom.n_species * output_voxels * 3 * real_dtype.itemsize
+        + output_voxels * 3 * real_dtype.itemsize
         + checkpoint_count
         * (phantom.n_species + 1)
-        * phantom.nvoxels
+        * output_voxels
         * 3
         * effective_checkpoint_dtype.itemsize
         + (phantom.n_species + 1) * n_rx_coils * adc_count * complex_dtype.itemsize
@@ -7252,6 +7290,8 @@ def _simulate_dynamic_sequence_single_source(
         _spin_major_rf_propagator_budget_bytes=spin_major_rf_budget_bytes,
         **block_options,
     )
+    if compact:
+        common_arguments["_compact_voxels"] = True
     if not use_chunking:
         result = _simulate_dynamic_sequence_block(
             program,
@@ -7259,6 +7299,7 @@ def _simulate_dynamic_sequence_single_source(
             progress_callback=progress_callback,
             preview_callback=preview_callback,
             status_callback=status_callback,
+            **({"_active_indices": active} if compact else {}),
             **common_arguments,
         )
         if contrast_kernel_fallback is None:
@@ -7278,12 +7319,10 @@ def _simulate_dynamic_sequence_single_source(
         )
 
     accumulator = _PairwiseArrayAccumulator()
-    final_pool_flat = np.zeros(
-        (phantom.n_species, phantom.nvoxels, 3), dtype=real_dtype
-    )
+    final_pool_flat = np.zeros((phantom.n_species, output_voxels, 3), dtype=real_dtype)
     checkpoint_pool_flat = (
         np.zeros(
-            (checkpoint_count, phantom.n_species, phantom.nvoxels, 3),
+            (checkpoint_count, phantom.n_species, output_voxels, 3),
             dtype=effective_checkpoint_dtype,
         )
         if checkpoint_count
@@ -7332,11 +7371,14 @@ def _simulate_dynamic_sequence_single_source(
             template_result = block.template_result
         for parent_signal in block.parent_species_signal:
             accumulator.add(parent_signal)
-        final_pool_flat[:, block.active_indices] = block.final_pool_active
+        outputs = (
+            np.searchsorted(active, block.active_indices)
+            if compact
+            else block.active_indices
+        )
+        final_pool_flat[:, outputs] = block.final_pool_active
         if checkpoint_pool_flat is not None:
-            checkpoint_pool_flat[:, :, block.active_indices] = (
-                block.checkpoint_pool_active
-            )
+            checkpoint_pool_flat[:, :, outputs] = block.checkpoint_pool_active
         for key, value in block.runtime_stats.items():
             if key.endswith("_bytes"):
                 aggregate_stats[key] = max(aggregate_stats[key], int(value))
@@ -7356,12 +7398,12 @@ def _simulate_dynamic_sequence_single_source(
     if template_result is None:
         raise RuntimeError("dynamic parent-voxel execution produced no result")
     species_signal = accumulator.total()
-    final_pool = final_pool_flat.reshape((phantom.n_species,) + phantom.shape + (3,))
+    final_pool = final_pool_flat.reshape((phantom.n_species,) + output_shape + (3,))
     checkpoint_pool = (
         None
         if checkpoint_pool_flat is None
         else checkpoint_pool_flat.reshape(
-            (checkpoint_count, phantom.n_species) + phantom.shape + (3,)
+            (checkpoint_count, phantom.n_species) + output_shape + (3,)
         )
     )
     metadata = dict(template_result.metadata)
