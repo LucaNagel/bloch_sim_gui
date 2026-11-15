@@ -131,7 +131,7 @@ Without a gradient during RF, there is one position.
 
 The check gets about 10 % of the main run's wall time (50 % for dynamic
 phantoms, below). The budget assumes
-2e-5 s per quarter-step interval and allows at least 1,000 and at most 400,000
+3e-6 s per quarter-step interval and allows at least 1,000 and at most 400,000
 intervals. A longer sequence is checked from its start, and the result is marked
 `truncated`.
 
@@ -152,13 +152,16 @@ Measured on an M3 at 20 µs against 5 µs:
 | SPSP slice (30 mm, two bands) | 1.5–2.1 % |
 | SS-bSSFP (pools at −245/1655 Hz, T1 30 s, T2 1 s) | 52 % |
 
-Cost of the check:
+Cost of the check in the GUI worker (M3, 20 µs):
 
 | Run | Main run | Check |
 | --- | ---: | ---: |
-| FLASH 32×32 | 0.065 s | +0.021 s |
-| SPSP | 0.005 s | +0.006 s |
-| SS-bSSFP, dynamic 8×8×4 (dynamic check, below) | 2.2 s | +1.0 s (47 %) |
+| FLASH 32×32×4, two pools (54 probes) | 0.16 s | +0.018–0.019 s (12 %) |
+| SS-bSSFP, static 8×8×4 (6 probes) | 0.28–0.32 s | +0.022–0.023 s (7–8 %) |
+| SS-bSSFP, dynamic 8×8×4 (dynamic check, below) | 0.27–0.29 s | +0.15–0.16 s (54–55 %) |
+
+One quarter-step interval of the step and reference runs costs 1.2–3.1 µs,
+plus about 0.01 s per check. Before the vectorized compile it was 14–24 µs.
 
 #### Dynamic phantoms
 
@@ -203,30 +206,33 @@ voxels. The estimate uses a 5 µs reference.
 
 | Check | Cost | Checked | Estimate | True / estimate |
 | --- | ---: | ---: | ---: | ---: |
-| Full sequence | 6.7 s (310 %) | 2.43 s | 0.231 | 1.06 |
-| 10 % of the run | 0.21–0.23 s | first 0.07 s | 0.029–0.032 | 7.7–8.4 |
-| GUI, 50 % of the run | 1.01–1.06 s | first 0.36–0.38 s | 0.125–0.129 | 1.90–1.97 |
-| 100 % of the run | 2.08 s | first 0.73 s | 0.197 | 1.25 |
+| Full sequence | 0.66–0.73 s (about 250 %) | 2.43 s | 0.231 | 1.06 |
+| 10 % of the run | 0.06 s | first 0.09 s | 0.040 | 6.2 |
+| GUI, 50 % of the run | 0.15–0.16 s | first 0.45–0.48 s | 0.148–0.154 | 1.59–1.66 |
+| 100 % of the run | 0.27 s | first 0.89–0.90 s | 0.214 | 1.14–1.15 |
+
+The main run takes 0.27–0.29 s.
 
 The true error is 0.246, for lactate at about +1650 Hz at 1.20 s.
 
 On a 16×16×10 phantom with 1968 voxels, the 256 selected voxels give 0.220,
 against 0.248 over all voxels (factor 1.13).
 
-The cost hardly depends on the voxel count. It is a fixed Python cost per RF
-interval: compiling the RF intervals and evaluating the inflow curves. One
-quarter-step interval of the step and reference runs costs 37–42 µs, and
-`TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL` assumes 4e-5 s. A long dynamic
-sequence is therefore checked only from its start. The result is then marked
-`truncated`, and the GUI names the checked duration.
+The cost hardly depends on the voxel count. One quarter-step interval of the
+step and reference runs costs about 3.7 µs, plus about 0.02 s per check
+(voxel selection and setup). `TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL`
+assumes 4e-6 s. Before the vectorized compile and plan build, the interval
+cost 37–42 µs. A long dynamic sequence is checked only from its start. The
+result is then marked `truncated`, and the GUI names the checked duration.
 
 In hyperpolarized bSSFP, the time-step error builds up over the pulse train.
 A truncated check is therefore a lower bound. With the probe check's 10 %
-share it underestimates the full error about eight times. Dynamic phantoms
+share it underestimates the full error six to eight times. Dynamic phantoms
 therefore get their own share, `TIMESTEP_ERROR_DYNAMIC_RUNTIME_FRACTION = 0.5`:
 the check adds about half the main run and comes within a factor of two
-(1.90–1.97 in three GUI runs). The margin is small. Where the main run is fast
-compared with the per-interval cost, less of the sequence is checked.
+(1.59–1.66 in three GUI runs). Where the main run is fast compared with the
+per-interval cost, less of the sequence is checked. For very short runs the
+fixed 0.02 s dominates, so a 10 % share actually takes about 20 %.
 
 ### Static and dynamic kernel agreement
 

@@ -253,6 +253,30 @@ class TimeCurve:
             return value, value
         return self.value_at(start_s), self.value_at(end_s)
 
+    def interval_values_array(self, start_s, end_s) -> np.ndarray:
+        """Vectorized ``interval_values``: one ``(start, end)`` row per interval.
+
+        Gives the same numbers as calling ``interval_values`` per interval,
+        without the Python loop over every simulation interval.
+        """
+        start = np.asarray(start_s, dtype=float).reshape(-1)
+        end = np.asarray(end_s, dtype=float).reshape(-1)
+        if start.shape != end.shape:
+            raise ValueError("time curve interval starts and ends must match")
+        if np.any(end < start):
+            raise ValueError("time curve interval end must not precede its start")
+        result = np.column_stack((self.values_at(start), self.values_at(end)))
+        midpoint = (start + end) / 2.0
+        if self.interpolation == "step":
+            positive = end > start
+            middle = self.values_at(midpoint[positive])
+            result[positive, 0] = middle
+            result[positive, 1] = middle
+        if self.outside == "zero":
+            outside = (midpoint < self.times_s[0]) | (midpoint > self.times_s[-1])
+            result[outside] = 0.0
+        return result
+
     def integral(self, start_s: float, end_s: float) -> float:
         """Integrate the piecewise curve exactly over an arbitrary interval."""
         start_s = float(start_s)
@@ -279,6 +303,46 @@ class TimeCurve:
                     0.5 * (self.value_at(left) + self.value_at(right)) * (right - left)
                 )
         return float(total)
+
+    def integrals(self, start_s, end_s) -> np.ndarray:
+        """Vectorized ``integral``: one value per ``(start, end)`` pair.
+
+        Intervals without a curve knot strictly inside are one segment and
+        are evaluated in NumPy with the scalar arithmetic; the rare others,
+        and reversed bounds, fall back to ``integral``.
+        """
+        start = np.asarray(start_s, dtype=float).reshape(-1)
+        end = np.asarray(end_s, dtype=float).reshape(-1)
+        if start.shape != end.shape:
+            raise ValueError("time curve interval starts and ends must match")
+        if not (np.all(np.isfinite(start)) and np.all(np.isfinite(end))):
+            raise ValueError("time curve integration bounds must be finite")
+        times = np.asarray(self.times_s, dtype=float)
+        next_knot = np.searchsorted(times, start, side="right")
+        has_inner_knot = (next_knot < times.size) & (
+            times[np.minimum(next_knot, times.size - 1)] < end
+        )
+        scalar = has_inner_knot | (end < start)
+        single = ~scalar
+        left = start[single]
+        right = end[single]
+        width = right - left
+        if self.interpolation == "step":
+            segment = self.values_at((left + right) / 2.0) * width
+        else:
+            segment = 0.5 * (self.values_at(left) + self.values_at(right)) * width
+        if self.outside == "zero":
+            midpoint = (left + right) / 2.0
+            outside = (midpoint < times[0]) | (midpoint > times[-1])
+            segment = np.where(outside, 0.0, segment)
+        # ``integral`` starts its sum at +0.0 and returns 0.0 for empty bounds.
+        segment = 0.0 + segment
+        segment[width == 0.0] = 0.0
+        result = np.empty(start.shape, dtype=float)
+        result[single] = segment
+        for index in np.flatnonzero(scalar).tolist():
+            result[index] = self.integral(start[index], end[index])
+        return result
 
     def breakpoints_s(self, duration_s: float) -> Tuple[float, ...]:
         """Return curve knots lying on the requested simulation timeline."""
@@ -2900,6 +2964,31 @@ def _prepare_rf_rotation(rf_hz, duration):
     )
 
 
+def _prepare_rf_rotations(rf_inputs):
+    """Vectorized ``_prepare_rf_rotation`` over rows of (real Hz, imag Hz, s).
+
+    Returns one coefficient tuple, or ``None`` for a zero rotation, per row,
+    with the same numbers as the scalar function.
+    """
+    rf_inputs = np.asarray(rf_inputs, dtype=np.float64).reshape(-1, 3)
+    nx = -2 * np.pi * rf_inputs[:, 0] * rf_inputs[:, 2]
+    ny = 2 * np.pi * rf_inputs[:, 1] * rf_inputs[:, 2]
+    angle = np.hypot(nx, ny)
+    rotating = angle != 0
+    rows = np.zeros((angle.size, 5), dtype=np.float64)
+    nonzero = angle[rotating]
+    cosine = np.cos(nonzero)
+    rows[rotating, 0] = nx[rotating] / nonzero
+    rows[rotating, 1] = ny[rotating] / nonzero
+    rows[rotating, 2] = cosine
+    rows[rotating, 3] = np.sin(nonzero)
+    rows[rotating, 4] = 1.0 - cosine
+    return [
+        tuple(row) if active else None
+        for row, active in zip(rows.tolist(), rotating.tolist())
+    ]
+
+
 _SPIN_MAJOR_SLICE_INTERVALS = 16384
 _SPIN_MAJOR_SLICE_ADC_VALUES = 4096
 # With progress reporting the first slice holds about 1/64 of the intervals
@@ -2908,6 +2997,7 @@ _SPIN_MAJOR_PROGRESS_LEAD_DIVISOR = 64
 _SPIN_MAJOR_PROGRESS_DIVISOR = 16
 _SPIN_MAJOR_WORK_BLOCKS = 64
 _SPIN_MAJOR_RF_CACHE_ENTRIES = 65536
+_RF_CACHE_MISSING = object()
 # Conservative working-set terms of one slice: per-thread coefficient slots
 # and tile state, interval tables, and per-block ADC accumulators. Each pool
 # beyond two adds coefficient slot fields and tile state; delayed inflow adds
@@ -3415,6 +3505,26 @@ def _spin_major_rf_slice(plan, propagators, first_interval, end_interval):
     }
 
 
+def _unique_rows(rows):
+    """Return ``np.unique(rows, axis=0, return_inverse=True)`` for float rows.
+
+    The unique rows come in the same lexicographic order and compare with
+    the same float equality, but a lexsort of the columns avoids NumPy's slow
+    structured-row sort. The inverse is returned flat.
+    """
+    rows = np.ascontiguousarray(rows, dtype=np.float64)
+    if rows.shape[0] == 0:
+        return rows.copy(), np.zeros(0, dtype=np.int64)
+    order = np.lexsort(rows.T[::-1])
+    ordered = rows[order]
+    first_of_run = np.empty(order.size, dtype=bool)
+    first_of_run[0] = True
+    np.any(ordered[1:] != ordered[:-1], axis=1, out=first_of_run[1:])
+    inverse = np.empty(order.size, dtype=np.int64)
+    inverse[order] = np.cumsum(first_of_run) - 1
+    return ordered[first_of_run], inverse
+
+
 def _spin_major_plan_slice(
     execution_plan,
     native_rf_hz,
@@ -3447,7 +3557,7 @@ def _spin_major_plan_slice(
     if relaxation_rows is not None:
         group_columns.append(relaxation_rows[interval_slice].astype(np.float64))
     group_keys = np.column_stack(group_columns)
-    unique_groups, interval_group = np.unique(group_keys, axis=0, return_inverse=True)
+    unique_groups, interval_group = _unique_rows(group_keys)
 
     rf_values = native_rf_hz[interval_slice]
     interval_rf = np.full(interval_count, -1, dtype=np.int32)
@@ -3458,22 +3568,33 @@ def _spin_major_plan_slice(
         rf_keys = np.column_stack(
             (rf_values.real[rf_mask], rf_values.imag[rf_mask], dt[rf_mask])
         )
-        unique_rf, rf_inverse = np.unique(rf_keys, axis=0, return_inverse=True)
+        unique_rf, rf_inverse = _unique_rows(rf_keys)
+        keys = [tuple(row) for row in unique_rf.tolist()]
+        prepared_rows = [rf_cache.get(key, _RF_CACHE_MISSING) for key in keys]
+        missing = [
+            index
+            for index, prepared in enumerate(prepared_rows)
+            if prepared is _RF_CACHE_MISSING
+        ]
+        if missing:
+            # RF-spoiled pulses make most rotations unique, so the missing
+            # ones are prepared together rather than one scalar call each.
+            if len(rf_cache) + len(missing) > _SPIN_MAJOR_RF_CACHE_ENTRIES:
+                rf_cache.clear()
+            for index, prepared in zip(
+                missing, _prepare_rf_rotations(unique_rf[missing])
+            ):
+                prepared_rows[index] = prepared
+                rf_cache[keys[index]] = prepared
         row_by_unique = np.empty(unique_rf.shape[0], dtype=np.int32)
-        for index, (real, imag, duration) in enumerate(unique_rf):
-            key = (float(real), float(imag), float(duration))
-            if key not in rf_cache:
-                if len(rf_cache) >= _SPIN_MAJOR_RF_CACHE_ENTRIES:
-                    rf_cache.clear()
-                rf_cache[key] = _prepare_rf_rotation(complex(key[0], key[1]), key[2])
-            prepared = rf_cache[key]
+        for index, prepared in enumerate(prepared_rows):
             if prepared is None:
                 row_by_unique[index] = -1
             else:
                 row_by_unique[index] = len(rf_rows)
                 rf_rows.append(prepared)
-                rf_input_rows.append((real, imag, duration))
-        interval_rf[rf_mask] = row_by_unique[rf_inverse.reshape(-1)]
+                rf_input_rows.append(keys[index])
+        interval_rf[rf_mask] = row_by_unique[rf_inverse]
     rf_table = np.asarray(rf_rows, dtype=np.float64).reshape(-1, 5)
 
     gradients = execution_plan.gradient_hz_per_m[interval_slice]
@@ -6037,12 +6158,11 @@ def _simulate_dynamic_sequence_block(
 
     contrast_rate_cache = {}
     interval_start = 0.0
-    for interval in range(interval_count):
-        if (
-            not native_full_plan_executed
-            and cancel_callback is not None
-            and cancel_callback()
-        ):
+    # A native plan has already applied every interval and boundary action, so
+    # the Python interval loop only runs for the fallback paths.
+    first_python_interval = interval_count if native_full_plan_executed else 0
+    for interval in range(first_python_interval, interval_count):
+        if cancel_callback is not None and cancel_callback():
             raise RuntimeError("sequence simulation cancelled")
         if (
             native_rf_fused_enabled
@@ -6054,8 +6174,6 @@ def _simulate_dynamic_sequence_block(
             interval_end = float(compiled.interval_end_s[interval])
             process_boundary_actions(interval + 1)
             interval_start = interval_end
-            if native_full_plan_executed:
-                continue
             if progress_callback is not None and (
                 interval % progress_stride == 0 or interval + 1 == interval_count
             ):

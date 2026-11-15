@@ -245,7 +245,6 @@ class SequenceCompiler:
                 interval_half[first:last, 0] = middle - lower
                 interval_half[first:last, 1] = upper - middle
             rf_integrals = np.zeros(dt.size, dtype=np.complex128)
-            gradient_integrals = np.zeros((dt.size, 3), dtype=float)
 
             # Accumulate each event only into intervals it overlaps. Iterating over
             # every event for every interval made full GRE/EPI programs quadratic
@@ -257,16 +256,13 @@ class SequenceCompiler:
                 rf_ranges = self._overlapping_interval_ranges(
                     interval_end, starts, rf_events
                 )
+                frame_cache = {}
                 for event_index, event in enumerate(rf_events):
                     frame = frames.get(event_index)
                     if frame is not None:
-                        for index in range(frame[0], frame[1]):
-                            rf_integrals[index] += self._rf_event_integral(
-                                event,
-                                local_start[index],
-                                local_end[index],
-                                event_start_s=0.0,
-                            )
+                        rf_integrals[frame[0] : frame[1]] += self._rf_frame_integrals(
+                            event, frame[2], frame_cache
+                        )
                         continue
                     first, last = rf_ranges[event_index]
                     for index in range(first, last):
@@ -278,40 +274,19 @@ class SequenceCompiler:
             gradient_ranges = self._overlapping_interval_ranges(
                 interval_end, starts, program.gradient_events
             )
-            for event, (first, last) in zip(program.gradient_events, gradient_ranges):
-                axis_index = "xyz".index(event.axis)
-                local_event_starts = {}
-                for index in range(first, last):
-                    event_index = int(frame_of_interval[index])
-                    if event_index < 0:
-                        event_start, interval_start, interval_stop = (
-                            event.start_s,
-                            starts[index],
-                            interval_end[index],
-                        )
-                    else:
-                        event_start = local_event_starts.get(event_index)
-                        if event_start is None:
-                            event_start = self._pulse_relative_offset(
-                                rf_events[event_index],
-                                frames[event_index][2],
-                                event.start_s,
-                                simulation_timestep_s,
-                                event.raster_s,
-                                tolerance,
-                            )
-                            local_event_starts[event_index] = event_start
-                        interval_start, interval_stop = (
-                            local_start[index],
-                            local_end[index],
-                        )
-                    gradient_integrals[index, axis_index] += self._event_integral(
-                        event_start,
-                        event.raster_s,
-                        event.samples_hz_per_m,
-                        interval_start,
-                        interval_stop,
-                    )
+            gradient_integrals = self._gradient_integrals(
+                program.gradient_events,
+                gradient_ranges,
+                starts,
+                interval_end,
+                frame_of_interval,
+                local_start,
+                local_end,
+                frames,
+                rf_events,
+                simulation_timestep_s,
+                tolerance,
+            )
             rf = rf_integrals / dt
             gradients = gradient_integrals / dt[:, None]
 
@@ -694,20 +669,73 @@ class SequenceCompiler:
             group_anchor = value
         return np.asarray(coalesced, dtype=float)
 
-    @staticmethod
+    @classmethod
+    def _rf_frame_integrals(
+        cls, event: RFEvent, local: np.ndarray, cache: dict
+    ) -> np.ndarray:
+        """Return one pulse's RF integral for each of its pulse-relative intervals.
+
+        Pulses that differ only in their constant phase offset (RF spoiling,
+        phase cycling) share one rasterization: ``cache`` keeps the integrals
+        without that phase per pulse shape and local grid.
+        """
+        key = (
+            event.samples_hz.tobytes(),
+            event.samples_hz.dtype.str,
+            event.raster_s,
+            event.frequency_offset_hz,
+            local.tobytes(),
+        )
+        unphased = cache.get(key)
+        if unphased is None:
+            unphased = np.zeros(local.size - 1, dtype=np.complex128)
+            for index in range(local.size - 1):
+                total = cls._rf_event_integral_unphased(
+                    event, local[index], local[index + 1], event_start_s=0.0
+                )
+                if total is not None:
+                    unphased[index] = total
+            cache[key] = unphased
+        if event.phase_offset_rad != 0.0:
+            return np.exp(1j * event.phase_offset_rad) * unphased
+        return unphased
+
+    @classmethod
     def _rf_event_integral(
-        event: RFEvent, start: float, end: float, event_start_s: float | None = None
+        cls,
+        event: RFEvent,
+        start: float,
+        end: float,
+        event_start_s: float | None = None,
     ):
         """Integrate one RF event over [start, end].
 
         ``event_start_s`` places the event on another time axis, e.g. 0.0 for
         pulse-relative ``start`` and ``end``.
         """
+        total = cls._rf_event_integral_unphased(event, start, end, event_start_s)
+        if total is None:
+            return 0j
+        # The constant phase is applied once, so pulses that differ only in
+        # their phase offset (e.g. RF spoiling) differ by one exact rotation
+        # instead of by the rounding of large phase arguments.
+        if event.phase_offset_rad != 0.0:
+            total = np.exp(1j * event.phase_offset_rad) * total
+        return total
+
+    @staticmethod
+    def _rf_event_integral_unphased(
+        event: RFEvent, start: float, end: float, event_start_s: float | None = None
+    ):
+        """Integrate one RF event over [start, end] without its phase offset.
+
+        Returns ``None`` when the event does not overlap the interval.
+        """
         event_start = event.start_s if event_start_s is None else event_start_s
         overlap_start = max(start, event_start)
         overlap_end = min(end, event_start + event.samples_hz.size * event.raster_s)
         if overlap_start >= overlap_end:
-            return 0j
+            return None
         first = max(0, int(np.floor((overlap_start - event_start) / event.raster_s)))
         last = min(
             event.samples_hz.size - 1,
@@ -722,11 +750,6 @@ class SequenceCompiler:
             )
             phase = 2 * np.pi * event.frequency_offset_hz * (cell_start - event_start)
             total += event.samples_hz[index] * np.exp(1j * phase) * width
-        # The constant phase is applied once, so pulses that differ only in
-        # their phase offset (e.g. RF spoiling) differ by one exact rotation
-        # instead of by the rounding of large phase arguments.
-        if event.phase_offset_rad != 0.0:
-            total = np.exp(1j * event.phase_offset_rad) * total
         return total
 
     @staticmethod
@@ -749,32 +772,145 @@ class SequenceCompiler:
         last = np.searchsorted(interval_start, event_ends, side="left")
         return list(zip(first.tolist(), last.tolist()))
 
-    @staticmethod
-    def _event_integral(
-        event_start: float,
-        raster: float,
-        samples: np.ndarray,
-        start: float,
-        end: float,
-    ):
-        overlap_start = max(start, event_start)
-        event_end = event_start + samples.size * raster
-        overlap_end = min(end, event_end)
-        if overlap_start >= overlap_end:
-            return samples.dtype.type(0)
-        first = max(0, int(np.floor((overlap_start - event_start) / raster)))
-        last = min(
-            samples.size - 1, int(np.ceil((overlap_end - event_start) / raster)) - 1
+    @classmethod
+    def _gradient_integrals(
+        cls,
+        events,
+        ranges,
+        starts,
+        interval_end,
+        frame_of_interval,
+        local_start,
+        local_end,
+        frames,
+        rf_events,
+        simulation_timestep_s,
+        tolerance,
+    ) -> np.ndarray:
+        """Integrate every gradient event over the intervals it overlaps.
+
+        All (event, interval) pairs are handled together in NumPy. Each sum
+        adds the raster cells in the same order as a scalar loop over cells
+        and the pairs reach each interval in event order, so the result is
+        bit-identical to rasterizing one interval at a time.
+        """
+        integrals = np.zeros((starts.size, 3), dtype=float)
+        if not events:
+            return integrals
+        firsts = np.fromiter((first for first, _ in ranges), dtype=np.int64)
+        lasts = np.fromiter((last for _, last in ranges), dtype=np.int64)
+        lengths = np.maximum(lasts - firsts, 0)
+        pair_count = int(lengths.sum())
+        if pair_count == 0:
+            return integrals
+        pair_event = np.repeat(np.arange(len(events), dtype=np.int64), lengths)
+        pair_interval = (
+            np.arange(pair_count, dtype=np.int64)
+            - np.repeat(np.cumsum(lengths) - lengths, lengths)
+            + np.repeat(firsts, lengths)
         )
-        total = samples.dtype.type(0)
-        for index in range(first, last + 1):
-            cell_start = event_start + index * raster
-            cell_end = cell_start + raster
-            width = max(
-                0.0, min(overlap_end, cell_end) - max(overlap_start, cell_start)
+        event_start = np.fromiter((event.start_s for event in events), dtype=float)
+        raster = np.fromiter((event.raster_s for event in events), dtype=float)
+        sample_count = np.fromiter(
+            (event.samples_hz_per_m.size for event in events), dtype=np.int64
+        )
+        sample_offset = np.cumsum(sample_count) - sample_count
+        samples = np.concatenate([event.samples_hz_per_m for event in events])
+        axis = np.fromiter(("xyz".index(event.axis) for event in events), np.int64)
+
+        pair_event_start = event_start[pair_event]
+        pair_start = starts[pair_interval]
+        pair_stop = interval_end[pair_interval]
+        # Intervals inside an RF pulse frame use pulse-relative times.
+        frame_ids = frame_of_interval[pair_interval]
+        in_frame = np.flatnonzero(frame_ids >= 0)
+        if in_frame.size:
+            pair_start[in_frame] = local_start[pair_interval[in_frame]]
+            pair_stop[in_frame] = local_end[pair_interval[in_frame]]
+            keys, inverse = np.unique(
+                np.column_stack((pair_event[in_frame], frame_ids[in_frame])),
+                axis=0,
+                return_inverse=True,
             )
-            total += samples[index] * width
-        return total
+            offsets = np.fromiter(
+                (
+                    cls._pulse_relative_offset(
+                        rf_events[frame_index],
+                        frames[frame_index][2],
+                        events[event_index].start_s,
+                        simulation_timestep_s,
+                        events[event_index].raster_s,
+                        tolerance,
+                    )
+                    for event_index, frame_index in keys.tolist()
+                ),
+                dtype=float,
+                count=keys.shape[0],
+            )
+            pair_event_start[in_frame] = offsets[inverse.reshape(-1)]
+
+        totals = cls._piecewise_integrals(
+            pair_event_start,
+            raster[pair_event],
+            samples,
+            sample_offset[pair_event],
+            sample_count[pair_event],
+            pair_start,
+            pair_stop,
+        )
+        np.add.at(integrals, (pair_interval, axis[pair_event]), totals)
+        return integrals
+
+    @staticmethod
+    def _piecewise_integrals(
+        event_start: np.ndarray,
+        raster: np.ndarray,
+        samples: np.ndarray,
+        sample_offset: np.ndarray,
+        sample_count: np.ndarray,
+        start: np.ndarray,
+        end: np.ndarray,
+    ) -> np.ndarray:
+        """Integrate piecewise-constant events over [start, end], one per row.
+
+        Row ``i`` integrates the event whose samples are
+        ``samples[sample_offset[i]:sample_offset[i] + sample_count[i]]``.
+        Rows with the same number of raster cells share one sequential
+        ``cumsum``, so every row adds its cells left to right like a scalar
+        loop would.
+        """
+        event_end = event_start + sample_count * raster
+        overlap_start = np.maximum(start, event_start)
+        overlap_end = np.minimum(end, event_end)
+        totals = np.zeros(start.shape, dtype=float)
+        valid = overlap_start < overlap_end
+        if not np.any(valid):
+            return totals
+        with np.errstate(invalid="ignore"):
+            first = np.maximum(
+                0, np.floor((overlap_start - event_start) / raster).astype(np.int64)
+            )
+            last = np.minimum(
+                sample_count - 1,
+                np.ceil((overlap_end - event_start) / raster).astype(np.int64) - 1,
+            )
+        cells = np.where(valid, last - first + 1, 0)
+        rows_with_cells = np.flatnonzero(cells > 0)
+        row_cells = cells[rows_with_cells]
+        for count in np.unique(row_cells).tolist():
+            rows = rows_with_cells[row_cells == count]
+            index = first[rows, None] + np.arange(count, dtype=np.int64)
+            row_raster = raster[rows, None]
+            cell_start = event_start[rows, None] + index * row_raster
+            cell_end = cell_start + row_raster
+            width = np.maximum(
+                0.0,
+                np.minimum(overlap_end[rows, None], cell_end)
+                - np.maximum(overlap_start[rows, None], cell_start),
+            )
+            terms = samples[sample_offset[rows, None] + index] * width
+            totals[rows] = np.cumsum(terms, axis=1)[:, -1]
+        return totals
 
     @staticmethod
     def _adc_samples(events: Tuple[ADCEvent, ...]) -> Tuple[np.ndarray, np.ndarray]:

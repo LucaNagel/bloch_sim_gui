@@ -24,6 +24,7 @@ from blochsimulator.kernel_capabilities import (
     KernelFallbackWarning,
 )
 from blochsimulator.sequence.convergence import (
+    DEFAULT_TIMESTEP_ERROR_INTERVAL_BUDGET,
     DYNAMIC_TIMESTEP_ERROR_PEAK_FLOOR,
     _timestep_error_program,
     default_probe_checkpoints,
@@ -379,20 +380,24 @@ def test_gui_checks_dynamic_phantoms_in_the_dynamic_kernel(monkeypatch, kernel):
 
 def test_gui_dynamic_check_budget_and_truncation(monkeypatch):
     budget = SequenceSimulationThread._timestep_error_budget
-    static = budget(5.0)
+    # A main run short enough that neither budget reaches the upper cap.
+    main_s = 0.5
+    static = budget(main_s)
     assert static == int(
-        5.0 * TIMESTEP_ERROR_RUNTIME_FRACTION / TIMESTEP_ERROR_SECONDS_PER_INTERVAL
+        main_s * TIMESTEP_ERROR_RUNTIME_FRACTION / TIMESTEP_ERROR_SECONDS_PER_INTERVAL
     )
     dynamic = budget(
-        5.0,
+        main_s,
         TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL,
         TIMESTEP_ERROR_DYNAMIC_RUNTIME_FRACTION,
     )
     assert dynamic == int(
-        5.0
+        main_s
         * TIMESTEP_ERROR_DYNAMIC_RUNTIME_FRACTION
         / TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL
     )
+    cap = DEFAULT_TIMESTEP_ERROR_INTERVAL_BUDGET
+    assert TIMESTEP_ERROR_MIN_INTERVALS < static < dynamic < cap
     # The dynamic error builds up over long pulse trains, so its check gets a
     # larger share of the run than the probe check.
     assert TIMESTEP_ERROR_DYNAMIC_RUNTIME_FRACTION > TIMESTEP_ERROR_RUNTIME_FRACTION

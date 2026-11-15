@@ -51,18 +51,19 @@ SEQUENCE_TIMESTEP_TOOLTIP = (
 TIMESTEP_ERROR_NOTE_THRESHOLD = 0.01
 # The check gets about this share of the main run's wall time, but at least
 # TIMESTEP_ERROR_MIN_INTERVALS quarter-step RF intervals; longer sequences are
-# checked from their start. One quarter-step interval costs 13-19 us on an M3
-# (mostly the Python compile of the step and reference runs).
+# checked from their start. One quarter-step interval of the step and
+# reference runs costs 1.2-3.1 us on an M3 (SS-bSSFP with 6 probes, FLASH with
+# 54), plus about 0.01 s per check.
 TIMESTEP_ERROR_RUNTIME_FRACTION = 0.1
-TIMESTEP_ERROR_SECONDS_PER_INTERVAL = 2e-5
+TIMESTEP_ERROR_SECONDS_PER_INTERVAL = 3e-6
 TIMESTEP_ERROR_MIN_INTERVALS = 1_000
 # Dynamic phantoms are checked in the dynamic kernel itself, on at most 256
-# voxels. One quarter-step interval of that costs 37-42 us on an M3, almost
-# independent of the voxel count (RF compile and inflow curves per interval).
+# voxels. One quarter-step interval of that costs about 3.7 us on an M3, plus
+# about 0.02 s per check, almost independent of the voxel count.
 # The error of hyperpolarized bSSFP builds up over the pulse train, so a check
-# cut to a tenth of the run sees only its start (SS-bSSFP 8x8x4: about 8x too
+# cut to a tenth of the run sees only its start (SS-bSSFP 8x8x4: 6-8x too
 # low). Half the run brings the estimate within a factor of 2.
-TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL = 4e-5
+TIMESTEP_ERROR_DYNAMIC_SECONDS_PER_INTERVAL = 4e-6
 TIMESTEP_ERROR_DYNAMIC_RUNTIME_FRACTION = 0.5
 
 

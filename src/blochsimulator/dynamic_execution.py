@@ -192,38 +192,37 @@ def build_dynamic_execution_plan(compiled, phantom) -> DynamicExecutionPlan:
         phantom.pyruvate_inflow is not None
         and phantom.pyruvate_inflow.has_spatial_delays
     )
-    sample_times = np.column_stack((interval_start_s, interval_mid_s, interval_end_s))
     source_rate_samples = None
     source_polarization_samples = None
     inflow_curve = phantom.inflow_curve_on_sequence_timeline
     polarization_curve = phantom.inflow_polarization_curve_on_sequence_timeline
     if inflow_curve is not None and not spatial_source_delays:
         source_rate_samples = np.empty((dt_s.size, 4), dtype=np.float64)
-        source_polarization_samples = np.empty_like(source_rate_samples)
-        for index, (start, middle, end) in enumerate(sample_times):
-            source_rate_samples[index, 0:2] = inflow_curve.interval_values(
-                float(start), float(middle)
-            )
-            source_rate_samples[index, 2:4] = inflow_curve.interval_values(
-                float(middle), float(end)
-            )
-            if polarization_curve is None:
-                source_polarization_samples[index] = 1.0
-            else:
-                source_polarization_samples[index, 0:2] = (
-                    polarization_curve.interval_values(float(start), float(middle))
+        source_polarization_samples = np.ones_like(source_rate_samples)
+        # One vectorized evaluation per half step; a scalar call per interval
+        # dominated the plan build of long hyperpolarized sequences.
+        source_rate_samples[:, 0:2] = inflow_curve.interval_values_array(
+            interval_start_s, interval_mid_s
+        )
+        source_rate_samples[:, 2:4] = inflow_curve.interval_values_array(
+            interval_mid_s, interval_end_s
+        )
+        if polarization_curve is not None:
+            source_polarization_samples[:, 0:2] = (
+                polarization_curve.interval_values_array(
+                    interval_start_s, interval_mid_s
                 )
-                source_polarization_samples[index, 2:4] = (
-                    polarization_curve.interval_values(float(middle), float(end))
-                )
+            )
+            source_polarization_samples[:, 2:4] = (
+                polarization_curve.interval_values_array(interval_mid_s, interval_end_s)
+            )
 
     first_dynamic_b0 = np.zeros(dt_s.size, dtype=np.float64)
     second_dynamic_b0 = np.zeros(dt_s.size, dtype=np.float64)
     if phantom.dynamic_b0 is not None:
         curve = phantom.dynamic_b0.offset_curve_hz
-        for index, (start, middle, end) in enumerate(sample_times):
-            first_dynamic_b0[index] = curve.integral(float(start), float(middle))
-            second_dynamic_b0[index] = curve.integral(float(middle), float(end))
+        first_dynamic_b0 = curve.integrals(interval_start_s, interval_mid_s)
+        second_dynamic_b0 = curve.integrals(interval_mid_s, interval_end_s)
 
     action_states, action_kinds, action_payloads = _action_table(compiled)
     segment_starts, segment_ends, segment_kinds = _segments(
