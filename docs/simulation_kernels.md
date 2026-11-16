@@ -75,6 +75,26 @@ settings, projects, and scripts). It runs the same kernel with bit-identical
 results; the result metadata reports `sequence_kernel="production"` and keeps
 the name as passed in `requested_sequence_kernel`.
 
+A private, experimental switch `_static_spin_major=True` on
+`simulate_sequence` and `simulate_spectral_sequence` runs the static object on
+the dynamic spin-major executor instead (module
+`blochsimulator.static_spin_major`). Spectral components become pools of one
+run (at most six per pass, more run in passes), per-voxel T1/T2 become
+relaxation groups (at most 256), and coils, Tx maps, subvoxel spins, crushers
+and checkpoints keep their static semantics. The result is Float64-close, not
+bit-identical: the dynamic kernel splits free precession around the RF
+rotation, so the difference to the production kernel is a time-step error
+(about `5e-4` relative at 20 µs with a 1 µs RF raster, `8e-6` at 1 µs). It
+shrinks only where the RF raster is finer than the step, because constant RF
+samples are not subdivided. With the switch, `progress_callback(done, total)`
+counts plan intervals summed over passes instead of voxels, `chunk_voxels` is
+ignored, and `metadata["progress_unit"]` is `"intervals"`. Anything the
+executor cannot run (strict reference, more than 256 T1/T2 combinations,
+negative equilibrium Mz, a spatially varying chemical shift, a too small
+memory budget) emits `KernelFallbackWarning`, records
+`static_spin_major_fallback_reason` and runs the static kernel. The default
+is unchanged.
+
 ### Dynamic spectral model
 
 The dynamic kernel keeps a separate magnetization vector for every spectral

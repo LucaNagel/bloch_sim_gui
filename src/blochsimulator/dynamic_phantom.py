@@ -876,6 +876,9 @@ class DynamicSpectralPhantom:
     contrast_relaxation: Optional[ContrastRelaxation] = None
     positions: np.ndarray = field(init=False, repr=False)
 
+    # Private adapters (the static spin-major adapter) lower this to one pool.
+    _MIN_POOLS = 2
+
     def __post_init__(self) -> None:
         self.shape = tuple(int(value) for value in self.shape)
         self.fov = tuple(float(value) for value in self.fov)
@@ -891,7 +894,7 @@ class DynamicSpectralPhantom:
             or min(self.fov) <= 0
         ):
             raise ValueError("dynamic phantom FOV requires three positive values")
-        if len(self.pools) < 2:
+        if len(self.pools) < self._MIN_POOLS:
             raise ValueError("the dynamic model requires at least two pools")
         if len({pool.name for pool in self.pools}) != len(self.pools):
             raise ValueError("dynamic pool names must be unique")
@@ -3099,6 +3102,18 @@ def _spin_major_fallback_reason(
     return None
 
 
+class _SpinMajorRequired(RuntimeError):
+    """A phantom that only the spin-major executor can run lost that executor.
+
+    Raised for private adapter phantoms (``requires_spin_major``) before any
+    work, so the caller can fall back to its own solver with ``reason``.
+    """
+
+    def __init__(self, reason):
+        super().__init__(f"spin-major executor unavailable: {reason}")
+        self.reason = str(reason)
+
+
 def _spin_major_slice_limits(
     memory_budget_bytes, n_rx_coils, n_threads, n_pools=2, spatial_inflow=False
 ):
@@ -4171,6 +4186,28 @@ def _simulate_dynamic_sequence_block(
     if pool_b0 is not None:
         static_pool_frequency = static_pool_frequency + pool_b0
     t2 = np.asarray([pool.t2 for pool in phantom.pools], dtype=np.float64)[:, None]
+    # Private per-voxel relaxation groups and equilibrium (the static
+    # spin-major adapter); only the spin-major executor reads them.
+    spin_relaxation_group = None
+    spin_relaxation_groups = None
+    spin_equilibrium = None
+    relaxation_group_map = getattr(phantom, "relaxation_group_map", None)
+    if relaxation_group_map is not None:
+        spin_relaxation_groups = np.ascontiguousarray(
+            phantom.relaxation_groups, dtype=np.float64
+        )
+        spin_relaxation_group = np.ascontiguousarray(
+            np.asarray(relaxation_group_map).ravel()[active], dtype=np.int32
+        )
+        if sampling.enabled:
+            spin_relaxation_group = np.repeat(spin_relaxation_group, spins_per_voxel)
+    spin_equilibrium_map = getattr(phantom, "spin_equilibrium_map", None)
+    if spin_equilibrium_map is not None:
+        spin_equilibrium = np.ascontiguousarray(
+            np.asarray(spin_equilibrium_map, dtype=np.float64).ravel()[active]
+        )
+        if sampling.enabled:
+            spin_equilibrium = np.repeat(spin_equilibrium, spins_per_voxel)
 
     def prepare_transverse_factors(phase_cycles, duration_s):
         if not _parent_resolved_signal or native_transverse_prepare is None:
@@ -4325,6 +4362,12 @@ def _simulate_dynamic_sequence_block(
         sequence_kernel in {"native_serial", "native_parallel"}
         and native_spin_major_fallback_reason is None
     )
+    if getattr(phantom, "requires_spin_major", False) and not native_spin_major_enabled:
+        raise _SpinMajorRequired(
+            native_spin_major_fallback_reason
+            or native_fallback_reason
+            or f"the {sequence_kernel} kernel has no spin-major executor"
+        )
     if (
         contrast_compartment is not None
         and sequence_kernel != "reference"
@@ -4519,8 +4562,11 @@ def _simulate_dynamic_sequence_block(
         if sequence_kernel in {"optimized", "native_serial", "native_parallel"}
         else None
     )
+    # A one-pool static view runs only on the spin-major executor, so the
+    # two-pool interval constants below are never used for it.
+    second_r1 = coefficient_r1[1] if coefficient_r1.size > 1 else coefficient_r1[0]
     longitudinal_regular = (
-        np.abs(coefficient_r1[0] + coefficient_kpl - coefficient_r1[1]) > 1e-12
+        np.abs(coefficient_r1[0] + coefficient_kpl - second_r1) > 1e-12
     )
     regular_mode = (
         1
@@ -4542,9 +4588,7 @@ def _simulate_dynamic_sequence_block(
     zero_passive_conversion = (
         None if passive_conversion is None else np.zeros_like(passive_conversion)
     )
-    inactive_longitudinal_regular = (
-        np.abs(coefficient_r1[0] - coefficient_r1[1]) > 1e-12
-    )
+    inactive_longitudinal_regular = np.abs(coefficient_r1[0] - second_r1) > 1e-12
     inactive_regular_mode = 1 if inactive_longitudinal_regular else -1
     inactive_longitudinal_scratch = (
         (
@@ -5989,11 +6033,12 @@ def _simulate_dynamic_sequence_block(
         interval_limit, adc_limit = native_spin_major_limits
         worker_threads = native_threads if sequence_kernel == "native_parallel" else 1
         native_spin_major_threads = worker_threads
-        conversion = (
-            coefficient_kpl[None]
-            if multi_pool_conversion is None
-            else multi_pool_conversion
-        )
+        if phantom.n_species == 1:
+            conversion = np.zeros((0, n_simulated_spins), dtype=np.float64)
+        elif multi_pool_conversion is None:
+            conversion = coefficient_kpl[None]
+        else:
+            conversion = multi_pool_conversion
         spatial_arguments = {}
         if spatial_inflow_active and source_mode != 2:
 
@@ -6056,6 +6101,11 @@ def _simulate_dynamic_sequence_block(
         if contrast_compartment is not None:
             spin_arguments["relaxation_compartment"] = contrast_compartment
             spin_arguments["relaxation_table"] = contrast_table
+        if spin_relaxation_group is not None:
+            spin_arguments["relaxation_group"] = spin_relaxation_group
+            spin_arguments["relaxation_groups"] = spin_relaxation_groups
+        if spin_equilibrium is not None:
+            spin_arguments["spin_equilibrium"] = spin_equilibrium
         checkpoint_actions = execution_plan.action_kinds == ACTION_CHECKPOINT
         staged_checkpoints = checkpoint_states.dtype != np.dtype(np.float64) and bool(
             np.any(checkpoint_actions)
@@ -7323,6 +7373,11 @@ def _simulate_dynamic_sequence_single_source(
         ):
             spin_major_unplanned_reason = "memory budget is too small"
         spin_major_planned = spin_major_unplanned_reason is None
+    if getattr(phantom, "requires_spin_major", False) and not spin_major_planned:
+        raise _SpinMajorRequired(
+            spin_major_unplanned_reason
+            or f"the {sequence_kernel} kernel has no spin-major executor"
+        )
     contrast_kernel_fallback = None
     if (
         phantom.contrast_relaxation is not None

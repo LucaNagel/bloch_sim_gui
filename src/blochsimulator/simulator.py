@@ -1399,6 +1399,45 @@ class BlochSimulator:
             explicit_limit_bytes=self.memory_limit_bytes,
         )
 
+    def _run_static_spin_major(self, program, components, *, kernel, **kwargs):
+        """Run static components on the spin-major executor, or warn.
+
+        Returns ``(outputs, metadata)``. After a fallback ``outputs`` is None,
+        a ``KernelFallbackWarning`` names the public method's caller, and
+        ``metadata`` holds ``static_spin_major_fallback_reason``.
+        """
+        import warnings
+
+        from .kernel_capabilities import KernelFallbackWarning
+        from .static_spin_major import (
+            StaticSpinMajorFallback,
+            run_static_components,
+        )
+
+        try:
+            return run_static_components(
+                program,
+                components,
+                kernel=kernel,
+                use_parallel=self.use_parallel,
+                num_threads=self.num_threads,
+                memory_budget_bytes=self._memory_budget().limit_bytes,
+                **kwargs,
+            )
+        except StaticSpinMajorFallback as exc:
+            reason = exc.reason
+        # Frames: this helper, the public method, its caller.
+        warnings.warn(
+            "the static spin-major adapter fell back to the static "
+            f"{kernel} kernel: {reason}",
+            KernelFallbackWarning,
+            stacklevel=3,
+        )
+        return None, {
+            "static_spin_major": False,
+            "static_spin_major_fallback_reason": reason,
+        }
+
     def _check_standard_simulation_memory(
         self, ntime: int, npos: int, nfreq: int, mode: int, *, output_stride: int = 1
     ) -> None:
@@ -2053,6 +2092,7 @@ class BlochSimulator:
         spin_sampling=None,
         spoiler_mode: str = "ideal",
         checkpoint_dtype=None,
+        _static_spin_major: bool = False,
     ):
         """Simulate independent Lorentzian spectral components and sum signals.
 
@@ -2064,6 +2104,15 @@ class BlochSimulator:
         ``progress_callback(done, total)`` reports completed active voxels
         across all components after each chunk. Voxels shared by components
         count once per component, matching the independent simulation work.
+
+        The private switch ``_static_spin_major=True`` runs all components as
+        pools of one spin-major run (passes of at most six pools), with
+        float64-close results. Progress then counts plan intervals summed
+        over passes, and the preview reports the summed signal of finished
+        passes plus the running one. If the executor cannot run the object,
+        a ``KernelFallbackWarning`` is emitted, the reason is stored in
+        ``metadata["static_spin_major_fallback_reason"]``, and the static
+        kernel runs.
         """
         from .sequence import SequenceSimulationResult
         from .spectral_phantom import SpectralPhantom
@@ -2088,6 +2137,33 @@ class BlochSimulator:
         )
         if not components:
             raise ValueError("spectral phantom has no active components")
+        static_outputs = None
+        static_metadata = {}
+        if _static_spin_major:
+            static_outputs, static_metadata = self._run_static_spin_major(
+                program,
+                components,
+                kernel=canonical_kernel_name(
+                    "sequence",
+                    (
+                        self.sequence_kernel
+                        if sequence_kernel is None
+                        else sequence_kernel
+                    ),
+                ),
+                signal_weighting=signal_weighting,
+                checkpoints_s=checkpoints_s,
+                simulation_timestep_s=simulation_timestep_s,
+                spin_sampling=spin_sampling,
+                spoiler_mode=spoiler_mode,
+                checkpoint_dtype=(
+                    np.float64 if checkpoint_dtype is None else checkpoint_dtype
+                ),
+                progress_callback=progress_callback,
+                preview_callback=preview_callback,
+                cancel_callback=cancel_callback,
+                status_callback=status_callback,
+            )
 
         total_voxels = sum(component.n_active for _, component in components)
         completed_voxels = 0
@@ -2137,8 +2213,16 @@ class BlochSimulator:
                 checkpoints_s=checkpoints_s,
                 chunk_voxels=chunk_voxels,
                 signal_weighting=signal_weighting,
-                progress_callback=(component_progress if progress_callback else None),
-                preview_callback=(component_preview if preview_callback else None),
+                progress_callback=(
+                    component_progress
+                    if progress_callback and static_outputs is None
+                    else None
+                ),
+                preview_callback=(
+                    component_preview
+                    if preview_callback and static_outputs is None
+                    else None
+                ),
                 cancel_callback=cancel_callback,
                 status_callback=component_status,
                 simulation_timestep_s=simulation_timestep_s,
@@ -2146,6 +2230,11 @@ class BlochSimulator:
                 spin_sampling=spin_sampling,
                 spoiler_mode=spoiler_mode,
                 checkpoint_dtype=checkpoint_dtype,
+                _static_spin_major_output=(
+                    None
+                    if static_outputs is None
+                    else (static_outputs[component_index], static_metadata)
+                ),
             )
             if first_result is None:
                 first_result = result
@@ -2194,6 +2283,7 @@ class BlochSimulator:
                 where=denominator[None, ...] > 0,
             )
         metadata = dict(first_result.metadata)
+        metadata.update(static_metadata)
         metadata.update(
             {
                 "spectral_phantom": True,
@@ -2429,6 +2519,8 @@ class BlochSimulator:
         spoiler_mode: str = "ideal",
         checkpoint_dtype=None,
         equilibrium_mz=None,
+        _static_spin_major: bool = False,
+        _static_spin_major_output=None,
     ):
         """Simulate an event-based sequence on a heterogeneous 1D/2D/3D object.
 
@@ -2458,6 +2550,16 @@ class BlochSimulator:
         starting with ``(0, total)`` after compilation. Without explicit
         ``chunk_voxels`` the first chunk holds about 1/64 of the voxels so
         an early run rate is available.
+
+        The private switch ``_static_spin_major=True`` runs the object as a
+        one-pool phantom on the float64 spin-major executor (results
+        float64-close to the static kernel; ``chunk_voxels`` is ignored).
+        Progress then counts plan intervals instead of voxels, and the
+        preview reports the signal of the finished intervals. If the
+        executor cannot run the object, a ``KernelFallbackWarning`` is
+        emitted, the reason is stored in
+        ``metadata["static_spin_major_fallback_reason"]``, and the static
+        kernel runs.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -2563,6 +2665,29 @@ class BlochSimulator:
                 # Thermal recovery keeps the historical native expression.
                 equilibrium_active = None
         longitudinal_equilibrium = "thermal" if equilibrium_active is None else "custom"
+        static_output = None
+        static_metadata = {}
+        if _static_spin_major_output is not None:
+            # One component of a spectral spin-major run.
+            static_output, static_metadata = _static_spin_major_output
+        elif _static_spin_major:
+            static_outputs, static_metadata = self._run_static_spin_major(
+                program,
+                [(str(getattr(phantom, "name", "static")), phantom)],
+                kernel=selected_kernel,
+                signal_weighting=signal_weighting,
+                equilibrium_mz=equilibrium_mz,
+                checkpoints_s=checkpoints_s,
+                simulation_timestep_s=simulation_timestep_s,
+                spin_sampling=spin_sampling,
+                spoiler_mode=spoiler_mode,
+                checkpoint_dtype=checkpoint_dtype,
+                progress_callback=progress_callback,
+                preview_callback=preview_callback,
+                cancel_callback=cancel_callback,
+                status_callback=status_callback,
+            )
+            static_output = None if static_outputs is None else static_outputs[0]
 
         default_chunking = chunk_voxels is None
         if chunk_voxels is None:
@@ -2607,20 +2732,22 @@ class BlochSimulator:
                 + chunk_voxels * 4
                 + min(chunk_voxels, 64) * compiled.n_intervals * 2 * 8
             )
-        enforce_memory_budget(
-            persistent_bytes + working_bytes,
-            self._memory_budget(),
-            description=(
-                f"Streaming sequence with {compiled.n_intervals:,} intervals, "
-                f"{n_active:,} active voxels, {n_simulated_spins:,} spins, "
-                f"{n_adc:,} ADC samples, and "
-                f"{n_checkpoints:,} checkpoints"
-            ),
-            suggestions=(
-                "remove checkpoints, reduce object resolution or ADC samples, "
-                "or choose a smaller voxel chunk"
-            ),
-        )
+        # A spin-major run has already checked its own budget.
+        if static_output is None:
+            enforce_memory_budget(
+                persistent_bytes + working_bytes,
+                self._memory_budget(),
+                description=(
+                    f"Streaming sequence with {compiled.n_intervals:,} intervals, "
+                    f"{n_active:,} active voxels, {n_simulated_spins:,} spins, "
+                    f"{n_adc:,} ADC samples, and "
+                    f"{n_checkpoints:,} checkpoints"
+                ),
+                suggestions=(
+                    "remove checkpoints, reduce object resolution or ADC samples, "
+                    "or choose a smaller voxel chunk"
+                ),
+            )
 
         native_selected_kernel = "optimized"
         numerical_contract = "legacy-fast-math"
@@ -2643,11 +2770,25 @@ class BlochSimulator:
                 "kernel; rebuild the extensions"
             ) from exc
 
-        coil_signal = np.zeros((n_rx_coils, n_adc), dtype=np.complex128)
-        final_active = np.empty((n_active, 3), dtype=np.float64)
-        checkpoints_active = np.empty(
-            (n_checkpoints, n_active, 3), dtype=checkpoint_dtype
-        )
+        if static_output is None:
+            coil_signal = np.zeros((n_rx_coils, n_adc), dtype=np.complex128)
+            final_active = np.empty((n_active, 3), dtype=np.float64)
+            checkpoints_active = np.empty(
+                (n_checkpoints, n_active, 3), dtype=checkpoint_dtype
+            )
+        else:
+            coil_signal = np.asarray(static_output.signal, dtype=np.complex128)
+            final_active = static_output.final_active
+            checkpoints_active = static_output.checkpoints_active
+            if (
+                coil_signal.shape != (n_rx_coils, n_adc)
+                or final_active.shape != (n_active, 3)
+                or checkpoints_active.shape != (n_checkpoints, n_active, 3)
+            ):
+                raise RuntimeError(
+                    "the spin-major adapter returned outputs that do not match "
+                    "the compiled static sequence"
+                )
         positions = np.ascontiguousarray(props["positions"], dtype=np.float64)
         t1 = np.ascontiguousarray(props["t1"], dtype=np.float64)
         t2 = np.ascontiguousarray(props["t2"], dtype=np.float64)
@@ -2671,17 +2812,22 @@ class BlochSimulator:
             else np.zeros(0, dtype=np.int32)
         )
 
-        chunk_bounds = sequence_chunk_bounds(
-            n_active, chunk_voxels, leading_chunk=default_chunking
+        # A spin-major run has already produced every output.
+        chunk_bounds = (
+            sequence_chunk_bounds(
+                n_active, chunk_voxels, leading_chunk=default_chunking
+            )
+            if static_output is None
+            else []
         )
         chunks = len(chunk_bounds)
-        if status_callback is not None:
+        if status_callback is not None and static_output is None:
             status_callback(
                 f"Starting {compiled.n_intervals * n_simulated_spins:,} "
                 f"spin-interval "
                 f"updates in {chunks:,} chunk(s) on {native_threads} thread(s)."
             )
-        if progress_callback is not None:
+        if progress_callback is not None and static_output is None:
             # Start the measured run rate after compilation and allocation.
             # Progress counts active voxels because chunks differ in size.
             progress_callback(0, n_active)
@@ -2906,6 +3052,7 @@ class BlochSimulator:
             sequence_waveforms=sequence_waveforms,
             physical_field_maps=physical_field_maps,
         )
+        result.metadata.update(static_metadata)
         self.last_result = result.to_dict()
         self.last_result["phantom"] = phantom
         self.last_result["program"] = program
