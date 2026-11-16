@@ -130,7 +130,7 @@ def test_fallback_summary_covers_each_replaced_path():
         }
     )
     assert replaced == (
-        "requested the native_parallel kernel, ran optimized: "
+        "requested the native_parallel kernel, ran numpy: "
         "strict native extension is unavailable"
     )
     slower = dynamic_kernel_fallback(
@@ -141,8 +141,9 @@ def test_fallback_summary_covers_each_replaced_path():
             "native_spin_major_fallback_reason": "dynamic B0 is unsupported",
         }
     )
+    # Metadata written before the renaming is reported under the public names.
     assert slower == (
-        "the native_parallel kernel ran without its spin-major executor: "
+        "the production kernel ran without its spin-major executor: "
         "dynamic B0 is unsupported"
     )
     contrast = dynamic_kernel_fallback(
@@ -154,6 +155,6 @@ def test_fallback_summary_covers_each_replaced_path():
         }
     )
     assert contrast == (
-        "requested the native_parallel kernel, ran reference: contrast relaxation "
+        "requested the production kernel, ran reference: contrast relaxation "
         "needs the spin-major executor (memory budget is too small)"
     )

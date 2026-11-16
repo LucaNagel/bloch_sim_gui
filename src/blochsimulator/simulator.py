@@ -23,7 +23,7 @@ from .memory import (
     enforce_sequence_memory,
     resolve_memory_budget,
 )
-from .kernel_capabilities import DYNAMIC_KERNEL_NAMES, SEQUENCE_KERNEL_NAMES
+from .kernel_capabilities import canonical_kernel_name
 
 RF_PULSE_TYPE_OPTIONS = (
     "Rectangle",
@@ -1341,8 +1341,8 @@ class BlochSimulator:
         verbose: bool = False,
         memory_limit_bytes: Optional[int] = None,
         memory_policy: Optional[MemoryPolicy] = None,
-        sequence_kernel: str = "optimized",
-        dynamic_sequence_kernel: str = "optimized",
+        sequence_kernel: str = "production",
+        dynamic_sequence_kernel: str = "numpy",
     ):
         """
         Initialize the Bloch simulator.
@@ -1362,28 +1362,31 @@ class BlochSimulator:
         memory_policy : MemoryPolicy, optional
             Reserve-based or fixed-limit RAM policy. The process-wide GUI policy
             is used when omitted.
-        sequence_kernel : {"optimized", "strict_reference"}
+        sequence_kernel : {"production", "strict_reference"}
             Native kernel used by event-based sequence simulations.
             ``strict_reference`` selects the separately compiled no-fast-math
-            reference extension for numerical comparisons.
-        dynamic_sequence_kernel : {"optimized", "native_parallel", "native_serial", "reference"}
+            extension that checks the production kernel. The old name
+            ``"optimized"`` is an alias of ``"production"``.
+        dynamic_sequence_kernel : {"numpy", "production", "reference"}
             Kernel used specifically for dynamic spectral sequence simulations.
+            ``"production"`` is the native kernel (old names
+            ``"native_parallel"`` and, with one thread, ``"native_serial"``);
+            ``"numpy"`` is the NumPy validation path (old name ``"optimized"``).
         """
         self.use_parallel = use_parallel
         self.num_threads = resolve_num_threads(num_threads)
         self.verbose = verbose
         self.memory_limit_bytes = memory_limit_bytes
         self.memory_policy = memory_policy
-        if sequence_kernel not in SEQUENCE_KERNEL_NAMES:
-            raise ValueError(
-                "sequence_kernel must be 'optimized' or 'strict_reference'"
-            )
+        for parameter, family, name in (
+            ("sequence_kernel", "sequence", sequence_kernel),
+            ("dynamic_sequence_kernel", "dynamic", dynamic_sequence_kernel),
+        ):
+            try:
+                canonical_kernel_name(family, name)
+            except ValueError as error:
+                raise ValueError(f"{parameter}: {error}") from None
         self.sequence_kernel = sequence_kernel
-        if dynamic_sequence_kernel not in DYNAMIC_KERNEL_NAMES:
-            raise ValueError(
-                "dynamic_sequence_kernel must be 'optimized', 'native_parallel', "
-                "'native_serial', or 'reference'"
-            )
         self.dynamic_sequence_kernel = dynamic_sequence_kernel
         self.last_result = None
 
@@ -2438,8 +2441,9 @@ class BlochSimulator:
         physical voxel volume of a 3D phantom. ``simulation_timestep_s`` sets
         the maximum compiler interval while RF is active; event boundaries and
         ADC observation times are always retained exactly. ``sequence_kernel``
-        overrides the simulator's ``"optimized"`` or ``"strict_reference"`` kernel
-        selection for this call. ``spin_sampling`` controls deterministic
+        overrides the simulator's ``"production"`` or ``"strict_reference"`` kernel
+        selection for this call (the old name ``"optimized"`` still selects
+        ``"production"``). ``spin_sampling`` controls deterministic
         intravoxel position sampling in gradient-waveform mode.
         ``spoiler_mode='ideal'`` always uses one spin per voxel and applies
         declared transverse crushers, while ``'gradient'`` derives spoiling
@@ -2503,13 +2507,10 @@ class BlochSimulator:
         spins_per_voxel = sampling.spins_per_voxel
         n_simulated_spins = n_active * spins_per_voxel
         native_threads = self.num_threads if self.use_parallel else 1
-        selected_kernel = (
+        requested_kernel = (
             self.sequence_kernel if sequence_kernel is None else sequence_kernel
         )
-        if selected_kernel not in SEQUENCE_KERNEL_NAMES:
-            raise ValueError(
-                "sequence_kernel must be 'optimized' or 'strict_reference'"
-            )
+        selected_kernel = canonical_kernel_name("sequence", requested_kernel)
         if n_active == 0:
             raise ValueError("phantom has no active voxels")
         if signal_weighting not in {"voxel", "voxel_volume"}:
@@ -2621,7 +2622,7 @@ class BlochSimulator:
             ),
         )
 
-        native_selected_kernel = selected_kernel
+        native_selected_kernel = "optimized"
         numerical_contract = "legacy-fast-math"
         try:
             if selected_kernel == "strict_reference":
@@ -2851,7 +2852,7 @@ class BlochSimulator:
                 "simulation_timestep_s": simulation_timestep_s,
                 "signal_weighting": signal_weighting,
                 "sequence_kernel": selected_kernel,
-                "requested_sequence_kernel": selected_kernel,
+                "requested_sequence_kernel": str(requested_kernel),
                 "native_sequence_kernel": native_selected_kernel,
                 "effective_threads": native_threads,
                 "numerical_contract": numerical_contract,

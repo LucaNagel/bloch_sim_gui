@@ -15,8 +15,8 @@ import time
 import numpy as np
 
 from blochsimulator import BlochSimulator
-from blochsimulator.kernel_capabilities import DYNAMIC_KERNEL_NAMES
 from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
+from blochsimulator.kernel_capabilities import internal_dynamic_kernel
 from blochsimulator.project_io import load_project
 from blochsimulator.sequence import SequenceProgram, load_pulseq
 from blochsimulator.spectral_phantom import ChemicalSpecies
@@ -27,10 +27,11 @@ DEFAULT_RELATIVE_TOLERANCE = 1.0e-10
 DEFAULT_ABSOLUTE_TOLERANCE = 1.0e-12
 SIGNIFICANT_MAGNITUDE_FRACTION = 1.0e-3
 LOW_SIGNAL_MAGNITUDE_FRACTION = 1.0e-4
-REFERENCE_KERNEL = "optimized"
-CANDIDATE_KERNELS = tuple(
-    name for name in DYNAMIC_KERNEL_NAMES if name != REFERENCE_KERNEL
-)
+REFERENCE_KERNEL = "numpy"
+# "native_serial" and "native_parallel" are aliases of "production" that pick
+# the serial or the parallel compiled path; the script compares both.
+CANDIDATE_KERNELS = ("native_parallel", "native_serial", "production", "reference")
+NATIVE_KERNELS = {"native_serial", "native_parallel", "production"}
 DEFAULT_CANDIDATES = ("native_parallel",)
 
 
@@ -352,7 +353,7 @@ def compare_kernels(
 
     def run(kernel, *, timestep=simulation_timestep_s, **extra):
         simulator = BlochSimulator(
-            use_parallel=kernel == "native_parallel",
+            use_parallel=kernel in {"native_parallel", "production"},
             dynamic_sequence_kernel=kernel,
         )
         start = time.perf_counter()
@@ -394,7 +395,7 @@ def compare_kernels(
     variants = [(name, name, {}) for name in candidates]
     if native_variants:
         for name in candidates:
-            if name in {"native_serial", "native_parallel"}:
+            if name in NATIVE_KERNELS:
                 variants.extend(
                     (
                         (name + "_previous", name, {"_native_spin_major": False}),
@@ -420,8 +421,13 @@ def compare_kernels(
                 + signal_nrmse_gate * metric["reference_rms"]
             ):
                 failures.append(metric_name + ".nrmse")
-        actual = candidate.metadata.get("sequence_kernel")
-        backend_match = actual == kernel
+        # The internal path tells the serial and the parallel production
+        # paths apart; the public name is the same for both.
+        actual = candidate.metadata.get("dynamic_kernel_path") or (
+            candidate.metadata.get("sequence_kernel")
+        )
+        actual_matches_request = actual == internal_dynamic_kernel(kernel)
+        backend_match = actual_matches_request
         spin_major = bool(candidate.metadata.get("native_spin_major_enabled"))
         if label.endswith("_stepwise"):
             backend_match = backend_match and spin_major
@@ -440,7 +446,7 @@ def compare_kernels(
             "requested_kernel": kernel,
             "actual_kernel": actual,
             "requested_backend_executed": backend_match,
-            "fallback_used": bool(fallback_reason or actual != kernel),
+            "fallback_used": bool(fallback_reason or not actual_matches_request),
             "fallback_reason": fallback_reason,
             "metadata": candidate.metadata,
             "metrics": metrics,

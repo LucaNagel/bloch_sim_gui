@@ -742,7 +742,8 @@ def test_optimized_dynamic_kernel_is_bitwise_equal_to_reference(with_drivers, kp
         **kwargs,
     )
 
-    assert optimized.metadata["sequence_kernel"] == "optimized"
+    assert optimized.metadata["sequence_kernel"] == "numpy"
+    assert optimized.metadata["dynamic_kernel_path"] == "optimized"
     for name in (
         "signal",
         "species_signal",
@@ -822,7 +823,8 @@ def test_native_serial_dynamic_pilot_is_bitwise_equal(kpl):
         program, phantom, sequence_kernel="native_serial", **kwargs
     )
 
-    assert native.metadata["sequence_kernel"] == "native_serial"
+    assert native.metadata["sequence_kernel"] == "production"
+    assert native.metadata["dynamic_kernel_path"] == "native_serial"
     assert native.metadata["native_fallback_reason"] is None
     assert native.metadata["native_rf_block_enabled"] is True
     assert native.metadata["native_rf_threads"] == 1
@@ -847,7 +849,8 @@ def test_configured_dynamic_kernel_is_used_without_call_override():
     )
 
     assert result.metadata["requested_sequence_kernel"] == "native_serial"
-    assert result.metadata["sequence_kernel"] == "native_serial"
+    assert result.metadata["sequence_kernel"] == "production"
+    assert result.metadata["dynamic_kernel_path"] == "native_serial"
 
 
 @pytest.mark.parametrize("num_threads", [1, 2, 4, 8])
@@ -983,7 +986,8 @@ def test_native_rf_blocks_support_constant_and_spatial_tx(
     )
 
     assert optimized.metadata["tx_sensitivity"] == classification
-    assert native.metadata["sequence_kernel"] == "native_parallel"
+    assert native.metadata["sequence_kernel"] == "production"
+    assert native.metadata["dynamic_kernel_path"] == "native_parallel"
     assert native.metadata["tx_sensitivity"] == classification
     assert native.metadata["native_rf_block_enabled"] is True
     assert native.metadata["native_rf_fused_block_enabled"] is fused
@@ -1048,7 +1052,8 @@ def test_native_dynamic_kernel_keeps_rf_fast_path_with_driver(driver, kernel):
     )
 
     assert native.metadata["requested_sequence_kernel"] == kernel
-    assert native.metadata["sequence_kernel"] == kernel
+    assert native.metadata["sequence_kernel"] == "production"
+    assert native.metadata["dynamic_kernel_path"] == kernel
     assert native.metadata["native_fallback_reason"] is None
     assert native.metadata["native_rf_block_enabled"] is True
     assert native.metadata["native_hybrid"] is False
@@ -1092,7 +1097,8 @@ def test_native_inflow_with_spatial_tx_uses_complete_native_plan():
     )
 
     assert native.metadata["requested_sequence_kernel"] == "native_parallel"
-    assert native.metadata["sequence_kernel"] == "native_parallel"
+    assert native.metadata["sequence_kernel"] == "production"
+    assert native.metadata["dynamic_kernel_path"] == "native_parallel"
     assert native.metadata["tx_sensitivity"] == "spatial"
     assert native.metadata["native_hybrid"] is False
     assert native.metadata["native_rf_block_enabled"] is True
@@ -1155,7 +1161,8 @@ def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
         program, phantom, sequence_kernel="native_parallel", **kwargs
     )
 
-    assert native.metadata["sequence_kernel"] == "native_parallel"
+    assert native.metadata["sequence_kernel"] == "production"
+    assert native.metadata["dynamic_kernel_path"] == "native_parallel"
     assert native.metadata["native_parallel_threads"] == num_threads
     assert native.metadata["native_rf_block_enabled"] is True
     assert native.metadata["native_rf_threads"] == num_threads

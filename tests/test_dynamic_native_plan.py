@@ -556,7 +556,9 @@ def test_native_multi_pool_initial_adc_uses_safe_optimized_fallback():
     )
 
     assert requested_native.metadata["requested_sequence_kernel"] == "native_serial"
-    assert requested_native.metadata["sequence_kernel"] == "optimized"
+    assert requested_native.metadata["requested_dynamic_kernel_path"] == "native_serial"
+    assert requested_native.metadata["sequence_kernel"] == "numpy"
+    assert requested_native.metadata["dynamic_kernel_path"] == "optimized"
     assert requested_native.metadata["native_full_plan_enabled"] is False
     assert "initial-time ADC" in requested_native.metadata["native_fallback_reason"]
     for name in (

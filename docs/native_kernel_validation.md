@@ -208,12 +208,14 @@ From the project root, with the built native extensions available:
 python scripts/validate_dynamic_precision.py \
   sequences/sequences/bssfp_3d_spectral_selective_skinner.seq \
   --phantom "phantoms/phantoms/Pyruvate to lactate with inflow.npz" \
-  --timestep-us 10 --candidate native_parallel \
+  --timestep-us 10 --candidate production \
   --compare-native-variants --refined-timestep-us 5 \
   --output-json /tmp/dynamic_kernel_validation.json
 ```
 
-This command uses an unpartitioned optimized NumPy reference and also runs
-its refined reference in NumPy. For quick diagnostic runs,
+This command uses an unpartitioned `numpy` reference (formerly `optimized`) and
+also runs its refined reference in NumPy. The candidates `native_parallel` and
+`native_serial` remain accepted and select the multi- or single-thread
+production path. For quick diagnostic runs,
 `--max-adc-events` selects an explicit acquisition prefix. The full-object
 comparison above uses separate processes to measure peak RSS per variant.

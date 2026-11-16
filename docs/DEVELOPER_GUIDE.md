@@ -815,9 +815,13 @@ loaders, the GUI tooltips, and `benchmark_kernels.py` consume that registry;
 extend it before adding a new label or dispatch branch. `GUI_KERNEL_NAMES` in
 the same module lists the subset offered by the settings dialog, with the GUI
 default first; the dialog's combo-box constants must match it. Stored settings
-outside that subset resolve to the GUI default, and
-`ui/default_settings.py:load_kernel_settings` moves the former Optimized NumPy
-dynamic default once (`sequence/kernel_settings_revision`). The remaining
+outside that subset resolve to the GUI default. Old names (`optimized`,
+`native_parallel`, `native_serial`) are aliases in `KERNEL_ALIASES`;
+`canonical_kernel_name` maps them to the public names `production`,
+`strict_reference`, `numpy`, and `reference`, and `internal_dynamic_kernel`
+maps a dynamic name to its internal path. `SEQUENCE_KERNEL_NAMES` and
+`DYNAMIC_KERNEL_NAMES` iterate only the public names but accept the aliases in
+`in` tests, so `benchmark_kernels.py` keeps working unchanged. The remaining
 kernels stay available from Python for benchmarks and validation.
 
 Run the Qt-safe project test entry point before release changes:

@@ -597,7 +597,8 @@ def test_mouse_solver_bladder_signal_is_t1_attenuated_and_kernels_agree():
     # The native kernels apply the washout themselves instead of falling back.
     for name in ("native_serial", "native_parallel", "interval_major"):
         native = results[name].metadata
-        assert native["sequence_kernel"] == runs[name][0]
+        assert native["dynamic_kernel_path"] == runs[name][0]
+        assert native["sequence_kernel"] == "production"
         assert native["native_fallback_reason"] is None
     for name in ("native_serial", "native_parallel"):
         assert results[name].metadata["native_spin_major_enabled"] is True

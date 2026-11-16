@@ -26,6 +26,7 @@ from benchmarks.benchmark_kernels import (
     DEFAULT_KERNEL_SUBVOXEL_SPINS,
     DYNAMIC_KERNELS,
     SEQUENCE_KERNELS,
+    _ran_requested_kernel,
     build_parser as build_kernel_parser,
     print_kernel_descriptions,
 )
@@ -333,6 +334,31 @@ def test_kernel_benchmark_defaults_cover_both_kernel_families():
     assert tuple(args.kernel_flash_matrix) == DEFAULT_KERNEL_FLASH_MATRIX == (16, 16)
     assert (
         tuple(args.kernel_subvoxel_spins) == DEFAULT_KERNEL_SUBVOXEL_SPINS == (1, 1, 9)
+    )
+
+
+def test_kernel_benchmark_accepts_public_names_for_old_requests():
+    # Results report the public name; an old request name is not a fallback.
+    assert _ran_requested_kernel(
+        "sequence", "optimized", {"sequence_kernel": "production"}
+    )
+    assert not _ran_requested_kernel(
+        "sequence", "optimized", {"sequence_kernel": "strict_reference"}
+    )
+    production = {"sequence_kernel": "production"}
+    assert _ran_requested_kernel(
+        "dynamic",
+        "native_serial",
+        {**production, "dynamic_kernel_path": "native_serial"},
+    )
+    assert not _ran_requested_kernel(
+        "dynamic",
+        "native_parallel",
+        {"sequence_kernel": "numpy", "dynamic_kernel_path": "optimized"},
+    )
+    # Results written before the renaming carry the old name only.
+    assert _ran_requested_kernel(
+        "dynamic", "native_parallel", {"sequence_kernel": "native_parallel"}
     )
 
 

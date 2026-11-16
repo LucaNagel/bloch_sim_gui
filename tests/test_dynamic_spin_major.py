@@ -214,7 +214,8 @@ def test_stale_spin_major_extension_uses_previous_native_driver(monkeypatch):
 
     monkeypatch.setattr(extension, "API_VERSION", 1)
     result = _run(_phantom(), _program())
-    assert result.metadata["sequence_kernel"] == "native_serial"
+    assert result.metadata["sequence_kernel"] == "production"
+    assert result.metadata["dynamic_kernel_path"] == "native_serial"
     assert not result.metadata["native_spin_major_enabled"]
     assert (
         result.metadata["native_spin_major_fallback_reason"]

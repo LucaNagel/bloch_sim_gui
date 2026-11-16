@@ -24,10 +24,20 @@ from .dynamic_execution import (
     build_dynamic_execution_plan,
 )
 from .kernel_capabilities import (
-    DYNAMIC_KERNEL_NAMES,
     SPIN_MAJOR_DISABLED_REASON,
     KernelFallbackWarning,
     dynamic_kernel_fallback,
+    internal_dynamic_kernel,
+    public_dynamic_kernel,
+)
+
+# Internal dynamic path names; the public names map onto them in
+# kernel_capabilities (production -> native_parallel, numpy -> optimized).
+_INTERNAL_DYNAMIC_KERNELS = (
+    "optimized",
+    "native_parallel",
+    "native_serial",
+    "reference",
 )
 
 
@@ -3040,7 +3050,7 @@ def _spin_major_kernel():
         from .dynamic_spin_major_cy import API_VERSION, TILE_SPINS, run_spin_major_chunk
     except (ImportError, OSError):
         return None
-    if API_VERSION != 7:
+    if API_VERSION != 9:
         return None
     return run_spin_major_chunk, int(TILE_SPINS)
 
@@ -3840,7 +3850,7 @@ def _simulate_dynamic_sequence_block(
     conversion_start_s = phantom.conversion_start_on_sequence_timeline_s
     if sequence_kernel is None:
         sequence_kernel = "optimized"
-    if sequence_kernel not in DYNAMIC_KERNEL_NAMES:
+    if sequence_kernel not in _INTERNAL_DYNAMIC_KERNELS:
         raise ValueError(
             "sequence_kernel must be 'optimized', 'reference', 'native_serial', "
             "or 'native_parallel'"
@@ -7899,6 +7909,34 @@ def _check_equilibrium_target(phantom) -> None:
 
 
 def _run_dynamic_sequence(program, phantom: DynamicSpectralPhantom, kwargs):
+    """Run a dynamic sequence under its public kernel name.
+
+    The public name (or an old alias) selects the internal path. The result
+    reports the public name in ``sequence_kernel``, the name as passed in
+    ``requested_sequence_kernel``, and the internal paths in
+    ``dynamic_kernel_path`` and ``requested_dynamic_kernel_path``.
+    """
+    requested = kwargs.get("sequence_kernel")
+    if requested is None:
+        requested = "numpy"
+    internal = internal_dynamic_kernel(requested)
+    result = _run_dynamic_sequence_passes(
+        program, phantom, {**kwargs, "sequence_kernel": internal}
+    )
+    metadata = result.metadata
+    path = metadata.get("sequence_kernel")
+    metadata["dynamic_kernel_path"] = path
+    metadata["sequence_kernel"] = public_dynamic_kernel(path)
+    metadata["requested_sequence_kernel"] = str(requested)
+    metadata["requested_dynamic_kernel_path"] = internal
+    if metadata.get("contrast_kernel_fallback_from"):
+        metadata["contrast_kernel_fallback_from"] = public_dynamic_kernel(
+            metadata["contrast_kernel_fallback_from"]
+        )
+    return result
+
+
+def _run_dynamic_sequence_passes(program, phantom: DynamicSpectralPhantom, kwargs):
     """Run the superposed passes of a dynamic sequence; see the public entry."""
     # Attributes may change after construction, so check again before running.
     _check_equilibrium_target(phantom)

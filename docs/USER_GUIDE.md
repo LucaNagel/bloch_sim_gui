@@ -416,9 +416,10 @@ The run time is stored as `simulation_wall_time_s` in the dataset attributes.
 
 ## 9. Performance and kernels
 
-Keep the defaults (**Sequence Bloch kernel → Optimized**, **Dynamic spectral
-kernel → Native automatic**). The *strict reference* and NumPy kernels are for
-validation, not speed.
+Keep the defaults (**Sequence Bloch kernel → Production**, **Dynamic spectral
+kernel → Production**). The *strict reference* kernel is for validation, not
+speed. Older names (`optimized`, `native_parallel`, `native_serial`) still work
+in Python and in saved settings and run the same code.
 
 What actually drives runtime:
 

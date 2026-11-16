@@ -349,7 +349,7 @@ def test_spin_major_slice_limits_scale_with_pools_and_inflow():
 
 
 def test_kernel_capabilities_report_spin_major_extensions():
-    native = detect_kernel_capabilities()["dynamic"]["native_parallel"]
+    native = detect_kernel_capabilities()["dynamic"]["production"]
 
     assert native.details["spin_major"]
     assert native.details["spin_major_multi_pool"]
@@ -423,7 +423,8 @@ def test_native_kernels_apply_voxel_washout_like_the_reference(
 
     _assert_spin_major(spin_major)
     for result in (interval_major, spin_major):
-        assert result.metadata["sequence_kernel"] == kernel
+        assert result.metadata["sequence_kernel"] == "production"
+        assert result.metadata["dynamic_kernel_path"] == kernel
         assert result.metadata["native_fallback_reason"] is None
     assert interval_major.metadata["native_full_plan_enabled"] is (n_pools > 2)
     _assert_close(spin_major, reference, 1e-10)

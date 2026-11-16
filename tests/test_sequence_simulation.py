@@ -798,7 +798,8 @@ def test_optimized_sequence_kernel_matches_strict_reference(relaxation_model):
         sequence_kernel="strict_reference",
     )
 
-    assert optimized.metadata["sequence_kernel"] == "optimized"
+    # "optimized" is the old name of "production" and stays accepted.
+    assert optimized.metadata["sequence_kernel"] == "production"
     assert optimized.metadata["requested_sequence_kernel"] == "optimized"
     assert optimized.metadata["effective_threads"] == 2
     assert optimized.metadata["numerical_contract"] == "legacy-fast-math"

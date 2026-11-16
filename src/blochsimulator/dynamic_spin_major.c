@@ -31,7 +31,8 @@
 
 /* Per-spin coefficient fields of one cache slot for np pools: one complex
  * transverse factor per pool, the precursor decay and source weights, three
- * fields per product, then the same for concentration. 8 * np fields. */
+ * fields per product, then the same for concentration. 8 * np fields, then
+ * the two washout factors and the longitudinal decay of every product. */
 static inline int field_fac_real(int pool) { return 2 * pool; }
 static inline int field_fac_imag(int pool) { return 2 * pool + 1; }
 static inline int field_ea(int np) { return 2 * np; }
@@ -54,19 +55,27 @@ static inline int field_kj1c(int np, int j) { return 5 * np + 5 + 3 * j; }
  * source weights (Strang splitting around each half step). */
 static inline int field_washout(int np) { return 8 * np; }
 static inline int field_washout_gain(int np) { return 8 * np + 1; }
+static inline int field_eb(int np, int j) { return 8 * np + 2 + j; }
 
 static inline size_t slot_doubles(int np) {
-    return (size_t)(8 * np + 2) * DSM_TILE;
+    return (size_t)(9 * np + 1) * DSM_TILE;
 }
+
+/* Relaxation constants of one group half step for one set of pool rates. */
+typedef struct {
+    double r1[DSM_MAX_POOLS];
+    double eb[DSM_MAX_PRODUCTS];
+    double f0b[DSM_MAX_PRODUCTS];
+    double f1b[DSM_MAX_PRODUCTS];
+    double e2[DSM_MAX_POOLS];
+} dsm_relax;
 
 typedef struct {
     double half;
     int conversion;
     const double *relaxation; /* (compartments, 2) row, or NULL */
-    double eb[DSM_MAX_PRODUCTS];
-    double f0b[DSM_MAX_PRODUCTS];
-    double f1b[DSM_MAX_PRODUCTS];
-    double e2[DSM_MAX_POOLS];
+    dsm_relax base;           /* pool constants */
+    const dsm_relax *spin_groups; /* per relaxation group, or NULL */
     double f0bc;
     double f1bc;
 } dsm_group;
@@ -115,6 +124,8 @@ typedef struct {
     int32_t washout_compartment[DSM_TILE]; /* -1 outside source compartments */
     int washout_sources;                   /* any valid spin in a compartment */
     int32_t relaxation_compartment[DSM_TILE]; /* -1 without contrast */
+    int32_t relaxation_group[DSM_TILE];       /* -1 for pool constants */
+    double equilibrium[DSM_TILE];
     dsm_curve_state curve[2];
 } dsm_tile;
 
@@ -185,7 +196,25 @@ static void equal_rate_convolution(double rate, double h, double *j0,
     }
 }
 
-static void prepare_group(const dsm_chunk *c, int32_t index, dsm_group *g) {
+/* Pool rates r1 and transverse times t2 at stride ``stride``. */
+static void prepare_relax(int np, double h, const double *r1, const double *t2,
+                          int stride, dsm_relax *r) {
+    for (int pool = 0; pool < np; pool++) {
+        r->r1[pool] = r1[stride * pool];
+    }
+    for (int j = 0; j < np - 1; j++) {
+        r->eb[j] = exp(-r->r1[j + 1] * h);
+        decay_convolution(r->r1[j + 1], h, &r->f0b[j], &r->f1b[j]);
+    }
+    for (int pool = 0; pool < np; pool++) {
+        r->e2[pool] = exp(-h / t2[stride * pool]);
+    }
+}
+
+/* ``spin_groups`` holds n_relaxation_groups entries for this group, or is
+ * NULL without relaxation groups. */
+static void prepare_group(const dsm_chunk *c, int32_t index, dsm_group *g,
+                          dsm_relax *spin_groups) {
     double h = c->group_half_s[index];
     g->half = h;
     g->conversion = c->group_conversion[index] != 0;
@@ -194,12 +223,14 @@ static void prepare_group(const dsm_chunk *c, int32_t index, dsm_group *g) {
         g->relaxation = c->relaxation_table + (int64_t)c->group_relaxation[index] *
                                                   c->relaxation_compartments * 2;
     }
-    for (int j = 0; j < c->npools - 1; j++) {
-        g->eb[j] = exp(-c->r1[j + 1] * h);
-        decay_convolution(c->r1[j + 1], h, &g->f0b[j], &g->f1b[j]);
-    }
-    for (int pool = 0; pool < c->npools; pool++) {
-        g->e2[pool] = exp(-h / c->t2_s[pool]);
+    prepare_relax(c->npools, h, c->r1, c->t2_s, 1, &g->base);
+    g->spin_groups = spin_groups;
+    if (spin_groups != NULL) {
+        for (int32_t r = 0; r < c->n_relaxation_groups; r++) {
+            const double *row =
+                c->relaxation_groups + 2 * (int64_t)r * c->npools;
+            prepare_relax(c->npools, h, row, row + 1, 2, &spin_groups[r]);
+        }
     }
     decay_convolution(0.0, h, &g->f0bc, &g->f1bc);
 }
@@ -225,6 +256,13 @@ static void fill_slot(const dsm_chunk *c, const dsm_group *g,
                                     : 1.0;
         slot[field_washout(np) * DSM_TILE + s] = qh;
         slot[field_washout_gain(np) * DSM_TILE + s] = qg;
+        const dsm_relax *r = &g->base;
+        if (g->spin_groups != NULL && t->relaxation_group[s] >= 0) {
+            r = g->spin_groups + t->relaxation_group[s];
+        }
+        for (int j = 0; j < nproducts; j++) {
+            slot[field_eb(np, j) * DSM_TILE + s] = r->eb[j];
+        }
         double dr1 = 0.0;
         double e2_contrast = 1.0;
         if (g->relaxation != NULL && t->relaxation_compartment[s] >= 0) {
@@ -234,7 +272,7 @@ static void fill_slot(const dsm_chunk *c, const dsm_group *g,
         }
         for (int pool = 0; pool < np; pool++) {
             double angle = -DSM_TWO_PI * (t->fs[pool][s] * h);
-            double e2 = g->e2[pool] * qh;
+            double e2 = r->e2[pool] * qh;
             if (pool == 0) {
                 e2 = e2 * e2_contrast;
             }
@@ -242,15 +280,15 @@ static void fill_slot(const dsm_chunk *c, const dsm_group *g,
             slot[field_fac_imag(pool) * DSM_TILE + s] = e2 * sin(angle);
         }
 
-        double a = c->r1[0] + ksum + dr1;
+        double a = r->r1[0] + ksum + dr1;
         double ea = exp(-a * h);
         slot[field_ea(np) * DSM_TILE + s] = ea * qh;
         for (int j = 0; j < nproducts; j++) {
-            double difference = a - c->r1[j + 1];
+            double difference = a - r->r1[j + 1];
             slot[field_kt(np, j) * DSM_TILE + s] =
                 (fabs(difference) > 1e-12
-                     ? k[j] * ((g->eb[j] - ea) / difference)
-                     : (k[j] * h) * g->eb[j]) *
+                     ? k[j] * ((r->eb[j] - ea) / difference)
+                     : (k[j] * h) * r->eb[j]) *
                 qh;
         }
         if (c->has_sources) {
@@ -259,13 +297,13 @@ static void fill_slot(const dsm_chunk *c, const dsm_group *g,
             slot[field_f0a(np) * DSM_TILE + s] = f0a * qg;
             slot[field_f1a(np) * DSM_TILE + s] = f1a * qg;
             for (int j = 0; j < nproducts; j++) {
-                double difference = a - c->r1[j + 1];
+                double difference = a - r->r1[j + 1];
                 double j0, j1;
                 if (fabs(difference * h) > 1e-7) {
-                    j0 = (g->f0b[j] - f0a) / difference;
-                    j1 = (g->f1b[j] - f1a) / difference;
+                    j0 = (r->f0b[j] - f0a) / difference;
+                    j1 = (r->f1b[j] - f1a) / difference;
                 } else {
-                    equal_rate_convolution(0.5 * (a + c->r1[j + 1]), h, &j0, &j1);
+                    equal_rate_convolution(0.5 * (a + r->r1[j + 1]), h, &j0, &j1);
                 }
                 slot[field_kj0(np, j) * DSM_TILE + s] = k[j] * j0 * qg;
                 slot[field_kj1(np, j) * DSM_TILE + s] = k[j] * j1 * qg;
@@ -391,7 +429,10 @@ static inline void longitudinal_half(const dsm_chunk *c, const dsm_group *g,
     const int nproducts = np - 1;
     const double equilibrium = c->equilibrium;
     const int track_concentration = c->track_concentration;
-    const int coupled = track_concentration && equilibrium != 0.0;
+    const int spin_equilibrium = c->spin_equilibrium != NULL;
+    const int coupled =
+        track_concentration && (equilibrium != 0.0 || spin_equilibrium);
+    const double *DSM_RESTRICT eq = t->equilibrium;
     const int with_source = source != NULL || spatial != NULL;
     const int with_concentration_source =
         with_source && track_concentration && c->concentration_sources;
@@ -406,7 +447,7 @@ static inline void longitudinal_half(const dsm_chunk *c, const dsm_group *g,
             double *DSM_RESTRICT z = t->z[pool];
             const double *DSM_RESTRICT cz = t->c[pool];
             for (int s = 0; s < DSM_TILE; s++) {
-                z[s] = z[s] - equilibrium * cz[s];
+                z[s] = z[s] - eq[s] * cz[s];
             }
         }
     }
@@ -420,18 +461,18 @@ static inline void longitudinal_half(const dsm_chunk *c, const dsm_group *g,
     }
     for (int j = 0; j < nproducts; j++) {
         const double *DSM_RESTRICT kt = slot + field_kt(np, j) * DSM_TILE;
-        const double eb = g->eb[j];
+        const double *DSM_RESTRICT eb = slot + field_eb(np, j) * DSM_TILE;
         double *DSM_RESTRICT z = t->z[j + 1];
         if (loss) {
             for (int s = 0; s < DSM_TILE; s++) {
                 double transfer = kt[s] * precursor[s];
-                double l = z[s] * (eb * qh[s]);
+                double l = z[s] * (eb[s] * qh[s]);
                 z[s] = l + transfer;
             }
         } else {
             for (int s = 0; s < DSM_TILE; s++) {
                 double transfer = kt[s] * precursor[s];
-                double l = z[s] * eb;
+                double l = z[s] * eb[s];
                 z[s] = l + transfer;
             }
         }
@@ -445,9 +486,21 @@ static inline void longitudinal_half(const dsm_chunk *c, const dsm_group *g,
         } else {
             const double e0 = source[0];
             const double de = source[1];
-            for (int s = 0; s < DSM_TILE; s++) {
-                start_values[s] = t->d[s] * e0;
-                slope_values[s] = t->d[s] * de;
+            if (spin_equilibrium) {
+                /* The row's excess uses ``equilibrium``; shift it to the
+                 * spin's equilibrium with the row's concentration source. */
+                const double c0 = source[2];
+                const double dc = source[3];
+                for (int s = 0; s < DSM_TILE; s++) {
+                    const double shift = equilibrium - eq[s];
+                    start_values[s] = t->d[s] * (e0 + shift * c0);
+                    slope_values[s] = t->d[s] * (de + shift * dc);
+                }
+            } else {
+                for (int s = 0; s < DSM_TILE; s++) {
+                    start_values[s] = t->d[s] * e0;
+                    slope_values[s] = t->d[s] * de;
+                }
             }
         }
         const double *DSM_RESTRICT f0a = slot + field_f0a(np) * DSM_TILE;
@@ -525,7 +578,7 @@ static inline void longitudinal_half(const dsm_chunk *c, const dsm_group *g,
                 double *DSM_RESTRICT z = t->z[pool];
                 const double *DSM_RESTRICT cz = t->c[pool];
                 for (int s = 0; s < DSM_TILE; s++) {
-                    z[s] = z[s] + equilibrium * cz[s];
+                    z[s] = z[s] + eq[s] * cz[s];
                 }
             }
         }
@@ -743,7 +796,7 @@ static void fill_spatial_sources(const dsm_context *x, dsm_tile *t, int32_t i,
                                  double h, dsm_source *out) {
     const dsm_chunk *c = x->c;
     const double *time = c->interval_time_s + 3 * (int64_t)i;
-    const double equilibrium = c->equilibrium;
+    const double *equilibrium = t->equilibrium;
     const int mode = c->spatial_mode;
     double rate[3][DSM_TILE];
     double polarization[3][DSM_TILE];
@@ -776,8 +829,8 @@ static void fill_spatial_sources(const dsm_context *x, dsm_tile *t, int32_t i,
                     ce = 0.0;
                 }
             }
-            const double precursor_start = source_start - equilibrium * cs;
-            const double precursor_end = source_end - equilibrium * ce;
+            const double precursor_start = source_start - equilibrium[s] * cs;
+            const double precursor_end = source_end - equilibrium[s] * ce;
             o->start[s] = precursor_start;
             o->slope[s] = (precursor_end - precursor_start) / h;
             o->cstart[s] = cs;
@@ -796,6 +849,8 @@ static void load_tile(const dsm_chunk *c, int64_t first, int valid,
     for (int s = 0; s < DSM_TILE; s++) {
         t->washout_compartment[s] = -1;
         t->relaxation_compartment[s] = -1;
+        t->relaxation_group[s] = -1;
+        t->equilibrium[s] = c->equilibrium;
     }
     for (int s = 0; s < valid; s++) {
         int64_t spin = first + s;
@@ -830,6 +885,12 @@ static void load_tile(const dsm_chunk *c, int64_t first, int valid,
         }
         if (c->relaxation_compartment != NULL) {
             t->relaxation_compartment[s] = c->relaxation_compartment[spin];
+        }
+        if (c->relaxation_group != NULL) {
+            t->relaxation_group[s] = c->relaxation_group[spin];
+        }
+        if (c->spin_equilibrium != NULL) {
+            t->equilibrium[s] = c->spin_equilibrium[spin];
         }
         if (c->spatial_sources) {
             t->delay[s] = c->arrival_delay_s[spin];
@@ -1082,7 +1143,7 @@ int32_t dsm_propagator_columns(int32_t track_concentration, int32_t has_sources,
 int32_t dsm_propagator_values(int32_t npools, int32_t track_concentration,
                               int32_t has_sources,
                               int32_t concentration_sources) {
-    if (npools < 2 || npools > DSM_MAX_POOLS) {
+    if (npools < 1 || npools > DSM_MAX_POOLS) {
         return 0;
     }
     const dsm_layout l = propagator_layout(
@@ -1430,6 +1491,9 @@ static int segment_spatial_weights(const dsm_context *x, dsm_tile *t,
     }
     const double nodes[DSM_SOURCE_NODES] = {time_first[0], time_middle[1],
                                             time_last[2]};
+    /* With a per-spin equilibrium the concentration source columns already
+     * carry the excess shift (longitudinal_half), so the weights keep the
+     * global equilibrium like the global source rows. */
     const double equilibrium = c->equilibrium;
     const int mode = c->spatial_mode;
     double rate_first, rate_last, polarization_first = 0.0,
@@ -1582,7 +1646,9 @@ static int validate(const dsm_chunk *c) {
         c->n_blocks < 1 || c->n_intervals < 0 || c->n_groups < 1) {
         return -1;
     }
-    if (c->npools < 2 || c->npools > DSM_MAX_POOLS || c->conversion == NULL) {
+    /* One pool is a lone precursor without products and conversion maps. */
+    if (c->npools < 1 || c->npools > DSM_MAX_POOLS ||
+        (c->npools > 1 && c->conversion == NULL)) {
         return -1;
     }
     for (int pool = 0; pool < c->npools; pool++) {
@@ -1681,6 +1747,37 @@ static int validate(const dsm_chunk *c) {
         for (int64_t value = 0; value < values; value++) {
             if (!(c->relaxation_table[value] >= 0.0) ||
                 !isfinite(c->relaxation_table[value])) {
+                return -1;
+            }
+        }
+    }
+    if (c->relaxation_group != NULL) {
+        if (c->n_relaxation_groups < 1 || c->relaxation_groups == NULL ||
+            c->washout_compartment != NULL) {
+            return -1;
+        }
+        for (int64_t spin = 0; spin < c->nspins; spin++) {
+            if (c->relaxation_group[spin] < -1 ||
+                c->relaxation_group[spin] >= c->n_relaxation_groups) {
+                return -1;
+            }
+        }
+        const int64_t rows = (int64_t)c->n_relaxation_groups * c->npools;
+        for (int64_t row = 0; row < rows; row++) {
+            const double rate = c->relaxation_groups[2 * row];
+            const double t2 = c->relaxation_groups[2 * row + 1];
+            if (!isfinite(rate) || !(t2 > 0.0)) {
+                return -1;
+            }
+        }
+    }
+    if (c->spin_equilibrium != NULL) {
+        if (!c->track_concentration || c->washout_compartment != NULL) {
+            return -1;
+        }
+        for (int64_t spin = 0; spin < c->nspins; spin++) {
+            if (!(c->spin_equilibrium[spin] >= 0.0) ||
+                !isfinite(c->spin_equilibrium[spin])) {
                 return -1;
             }
         }
@@ -1890,6 +1987,11 @@ int dsm_run_chunk(const dsm_chunk *c) {
     dsm_context context;
     memset(&context, 0, sizeof(context));
     dsm_group *groups = malloc(sizeof(dsm_group) * (size_t)c->n_groups);
+    const int relax_groups = c->relaxation_group != NULL;
+    dsm_relax *spin_groups =
+        relax_groups ? malloc(sizeof(dsm_relax) * (size_t)c->n_groups *
+                              (size_t)c->n_relaxation_groups)
+                     : NULL;
     int32_t *group_slot = malloc(sizeof(int32_t) * (size_t)c->n_groups);
     int32_t *slot_of = malloc(sizeof(int32_t) * (size_t)c->n_intervals);
     uint8_t *miss = malloc((size_t)c->n_intervals);
@@ -1913,7 +2015,8 @@ int dsm_run_chunk(const dsm_chunk *c) {
     double build_seconds = 0.0;
     int64_t stepwise_tiles = 0;
     int status = 0;
-    if (groups == NULL || group_slot == NULL || slot_of == NULL ||
+    if (groups == NULL || (relax_groups && spin_groups == NULL) ||
+        group_slot == NULL || slot_of == NULL ||
         miss == NULL || tiles == NULL || sources == NULL ||
         thread_buffers == NULL || (block_doubles > 0 && adc_blocks == NULL) ||
         (builds && column_tiles == NULL) || (cached && build_buffers == NULL)) {
@@ -1927,7 +2030,10 @@ int dsm_run_chunk(const dsm_chunk *c) {
         }
     }
     for (int32_t g = 0; g < c->n_groups; g++) {
-        prepare_group(c, g, &groups[g]);
+        prepare_group(c, g, &groups[g],
+                      relax_groups ? spin_groups + (size_t)g *
+                                                       c->n_relaxation_groups
+                                   : NULL);
     }
     plan_slots(c, group_slot, slot_of, miss);
     context.c = c;
@@ -2000,6 +2106,7 @@ cleanup:
     free_curve_table(&context.curves[0]);
     free_curve_table(&context.curves[1]);
     free(groups);
+    free(spin_groups);
     free(group_slot);
     free(slot_of);
     free(miss);

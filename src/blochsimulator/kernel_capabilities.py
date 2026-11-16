@@ -13,21 +13,99 @@ from importlib import import_module
 from typing import Mapping
 
 
-SEQUENCE_KERNEL_NAMES = ("optimized", "strict_reference")
-DYNAMIC_KERNEL_NAMES = (
-    "optimized",
-    "native_parallel",
-    "native_serial",
-    "reference",
+# Older names stay readable (projects, settings, scripts, benchmarks). They
+# run exactly the path they ran before; results carry the public name.
+KERNEL_ALIASES = {
+    "sequence": {"optimized": "production"},
+    "dynamic": {
+        "native_parallel": "production",
+        "native_serial": "production",
+        "optimized": "numpy",
+    },
+}
+
+
+class _KernelNames(tuple):
+    """Public kernel names; ``in`` also accepts the family's old aliases.
+
+    Iteration and indexing yield only the public names. Membership tests
+    accept the old names too, so scripts that check ``name in ...`` before
+    passing an old name keep working.
+    """
+
+    def __new__(cls, names, aliases):
+        self = super().__new__(cls, names)
+        self._aliases = frozenset(aliases)
+        return self
+
+    def __contains__(self, name) -> bool:
+        return tuple.__contains__(self, name) or name in self._aliases
+
+
+# Public kernel names: one production kernel and one reference per family.
+# The static strict_reference is a no-fast-math check of the production
+# kernel; the physical static reference is sequence.reference (no kernel name).
+SEQUENCE_KERNEL_NAMES = _KernelNames(
+    ("production", "strict_reference"), KERNEL_ALIASES["sequence"]
 )
+DYNAMIC_KERNEL_NAMES = _KernelNames(
+    ("production", "numpy", "reference"), KERNEL_ALIASES["dynamic"]
+)
+# The dynamic production kernel with one thread is the former native_serial.
+_DYNAMIC_INTERNAL = {
+    "production": "native_parallel",
+    "native_parallel": "native_parallel",
+    "native_serial": "native_serial",
+    "numpy": "optimized",
+    "optimized": "optimized",
+    "reference": "reference",
+}
+_DYNAMIC_PUBLIC = {
+    "native_parallel": "production",
+    "native_serial": "production",
+    "optimized": "numpy",
+    "reference": "reference",
+}
 # The settings dialog offers only these choices; the first one is the default.
 # The remaining kernels stay available from Python for benchmarks and validation.
-GUI_SEQUENCE_KERNEL_NAMES = ("optimized", "strict_reference")
-GUI_DYNAMIC_KERNEL_NAMES = ("native_parallel", "optimized")
+GUI_SEQUENCE_KERNEL_NAMES = ("production", "strict_reference")
+GUI_DYNAMIC_KERNEL_NAMES = ("production",)
 GUI_KERNEL_NAMES = {
     "sequence": GUI_SEQUENCE_KERNEL_NAMES,
     "dynamic": GUI_DYNAMIC_KERNEL_NAMES,
 }
+_FAMILY_NAMES = {"sequence": SEQUENCE_KERNEL_NAMES, "dynamic": DYNAMIC_KERNEL_NAMES}
+
+
+def canonical_kernel_name(family: str, name: str) -> str:
+    """Return the public kernel name for a name or one of its old aliases.
+
+    Raises ``ValueError`` for an unknown family or name.
+    """
+    if family not in _FAMILY_NAMES:
+        raise ValueError("kernel family must be 'sequence' or 'dynamic'")
+    name = str(name)
+    name = KERNEL_ALIASES[family].get(name, name)
+    if name not in _FAMILY_NAMES[family]:
+        accepted = (*_FAMILY_NAMES[family], *KERNEL_ALIASES[family])
+        raise ValueError(
+            f"{family} kernel must be one of "
+            + ", ".join(repr(item) for item in accepted)
+        )
+    return name
+
+
+def internal_dynamic_kernel(name: str) -> str:
+    """Return the internal dynamic path name for a public name or alias."""
+    canonical_kernel_name("dynamic", name)
+    return _DYNAMIC_INTERNAL[str(name)]
+
+
+def public_dynamic_kernel(internal: str | None) -> str | None:
+    """Return the public name of an internal dynamic path name."""
+    return None if internal is None else _DYNAMIC_PUBLIC.get(internal, internal)
+
+
 # Reason recorded when the spin-major executor is switched off on purpose.
 SPIN_MAJOR_DISABLED_REASON = "disabled by request"
 
@@ -48,9 +126,11 @@ def dynamic_kernel_fallback(metadata: Mapping | None) -> str | None:
     executor that was switched off on purpose is not a fallback.
     """
     metadata = dict(metadata or {})
-    actual = metadata.get("sequence_kernel")
+    # Results written before the renaming carry the internal path names.
+    actual = public_dynamic_kernel(metadata.get("sequence_kernel"))
     contrast_from = metadata.get("contrast_kernel_fallback_from")
     if contrast_from:
+        contrast_from = public_dynamic_kernel(contrast_from)
         reason = metadata.get("contrast_kernel_fallback_reason")
         return (
             f"requested the {contrast_from} kernel, ran {actual}: contrast "
@@ -58,12 +138,16 @@ def dynamic_kernel_fallback(metadata: Mapping | None) -> str | None:
             + (f" ({reason})" if reason else "")
         )
     requested = metadata.get("requested_sequence_kernel") or actual
-    if requested != actual:
+    try:
+        requested_public = canonical_kernel_name("dynamic", requested)
+    except ValueError:
+        requested_public = requested
+    if requested_public != actual:
         reason = metadata.get("native_fallback_reason") or "no reason recorded"
         return f"requested the {requested} kernel, ran {actual}: {reason}"
     reason = metadata.get("native_spin_major_fallback_reason")
     if (
-        actual in {"native_serial", "native_parallel"}
+        actual == "production"
         and not metadata.get("native_spin_major_enabled")
         and reason
         and reason != SPIN_MAJOR_DISABLED_REASON
@@ -126,7 +210,7 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
         "blochsimulator.dynamic_spin_major_cy",
         ("run_spin_major_chunk", "propagator_values", "propagator_columns"),
     )
-    spin_available = spin_available and getattr(spin_module, "API_VERSION", None) == 7
+    spin_available = spin_available and getattr(spin_module, "API_VERSION", None) == 9
     dynamic_details = {
         "spin_major": spin_available,
         "spin_major_spatial_tx": bool(
@@ -162,9 +246,9 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
     }
 
     sequence = {
-        "optimized": KernelCapability(
+        "production": KernelCapability(
             "sequence",
-            "optimized",
+            "production",
             legacy_available,
             reason=legacy_reason,
             numerical_contract="legacy-fast-math",
@@ -178,29 +262,20 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
         ),
     }
     dynamic = {
-        "optimized": KernelCapability(
+        "production": KernelCapability(
             "dynamic",
-            "optimized",
+            "production",
+            dynamic_available,
+            fallback_supported=True,
+            reason=dynamic_reason,
+            numerical_contract="float64-close",
+            details=dynamic_details,
+        ),
+        "numpy": KernelCapability(
+            "dynamic",
+            "numpy",
             True,
             numerical_contract="bitwise",
-        ),
-        "native_parallel": KernelCapability(
-            "dynamic",
-            "native_parallel",
-            dynamic_available,
-            fallback_supported=True,
-            reason=dynamic_reason,
-            numerical_contract="float64-close",
-            details=dynamic_details,
-        ),
-        "native_serial": KernelCapability(
-            "dynamic",
-            "native_serial",
-            dynamic_available,
-            fallback_supported=True,
-            reason=dynamic_reason,
-            numerical_contract="float64-close",
-            details=dynamic_details,
         ),
         "reference": KernelCapability(
             "dynamic",
@@ -223,14 +298,18 @@ def kernel_capability_metadata() -> dict[str, dict[str, dict]]:
 def resolve_kernel_request(family: str, requested: str) -> str:
     """Resolve a persisted GUI choice without hiding supported CPU fallback.
 
-    Choices that the settings dialog no longer offers, unknown names, and
-    unavailable kernels without a CPU fallback resolve to the GUI default.
+    Old names resolve to their public name. Choices that the settings dialog
+    no longer offers, unknown names, and unavailable kernels without a CPU
+    fallback resolve to the GUI default.
     """
     family = str(family)
-    requested = str(requested)
     capabilities = detect_kernel_capabilities()
     if family not in capabilities:
         raise ValueError("kernel family must be 'sequence' or 'dynamic'")
+    try:
+        requested = canonical_kernel_name(family, requested)
+    except ValueError:
+        return GUI_KERNEL_NAMES[family][0]
     capability = capabilities[family].get(requested)
     if (
         requested in GUI_KERNEL_NAMES[family]

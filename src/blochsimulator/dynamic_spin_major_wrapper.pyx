@@ -8,6 +8,8 @@ also when they differ only by a constant RF phase. Inflow with per-spin
 arrival delays is evaluated from the delayed time curves inside the executor.
 Voxel washout applies a per-spin loss and precomputed compartment gains.
 Contrast agents add per-spin, piecewise-constant pool-0 relaxation rates.
+Constant relaxation groups and a per-spin equilibrium replace the pool
+constants per spin.
 """
 
 import numpy as np
@@ -88,6 +90,10 @@ cdef extern from "dynamic_spin_major.h":
         const int32_t *group_relaxation
         int32_t n_relaxation
         const double *relaxation_table
+        const int32_t *relaxation_group
+        int32_t n_relaxation_groups
+        const double *relaxation_groups
+        const double *spin_equilibrium
         int64_t n_actions
         const int64_t *action_offsets
         const int8_t *action_kinds
@@ -120,7 +126,7 @@ cdef extern from "dynamic_spin_major.h":
 
 TILE_SPINS = DSM_TILE
 MAX_POOLS = DSM_MAX_POOLS
-API_VERSION = 7
+API_VERSION = 9
 SPATIAL_TX_SUPPORTED = True
 MULTI_POOL_SUPPORTED = True
 SPATIAL_INFLOW_SUPPORTED = True
@@ -128,6 +134,8 @@ RF_CACHE_MULTI_POOL_SUPPORTED = True
 RF_CACHE_PHASE_SUPPORTED = True
 WASHOUT_SUPPORTED = True
 CONTRAST_RELAXATION_SUPPORTED = True
+SINGLE_POOL_SUPPORTED = True
+SPIN_RELAXATION_SUPPORTED = True
 
 cdef double _empty_storage[8]
 
@@ -184,8 +192,8 @@ cdef object _curve(dsm_curve *target, object curve, str name):
 def propagator_values(int npools, bint track_concentration, bint has_sources,
                       bint concentration_sources):
     """Return the doubles per spin of one cached RF propagator entry."""
-    if npools < 2 or npools > DSM_MAX_POOLS:
-        raise ValueError(f"spin-major executor supports 2 to {DSM_MAX_POOLS} pools")
+    if npools < 1 or npools > DSM_MAX_POOLS:
+        raise ValueError(f"spin-major executor supports 1 to {DSM_MAX_POOLS} pools")
     return int(dsm_propagator_values(
         npools, track_concentration, has_sources, concentration_sources))
 
@@ -254,11 +262,15 @@ def run_spin_major_chunk(
         washout_table=None,
         relaxation_compartment=None,
         group_relaxation=None,
-        relaxation_table=None):
+        relaxation_table=None,
+        relaxation_group=None,
+        relaxation_groups=None,
+        spin_equilibrium=None):
     """Advance ``state`` through one plan slice and add unscaled ADC sums.
 
     Pool 0 is the precursor; ``conversion`` has shape ``(npools - 1, nspins)``
-    and holds the per-spin precursor-to-product rates. ``r1``, ``t2_s`` and
+    and holds the per-spin precursor-to-product rates; a single pool passes
+    shape ``(0, nspins)``. ``r1``, ``t2_s`` and
     ``pool_offset_hz`` have one entry per pool. ``adc_signal`` has shape
     ``(npools, ncoils, payload_count)`` and receives
     ``sum(transverse * rx * weight)`` per pool for payloads
@@ -284,6 +296,13 @@ def run_spin_major_chunk(
     ``relaxation_table[group_relaxation[g], compartment]`` (dR1, dR2 in 1/s)
     to the pool-0 relaxation rates of every interval of group ``g``;
     ``group_relaxation`` is -1 for groups without contrast.
+
+    ``relaxation_group`` (int32 per spin, -1 for the pool constants) selects
+    ``relaxation_groups[group, pool]`` (R1 in 1/s, T2 in s), which replaces
+    ``r1`` and ``t2_s`` for every pool of that spin; contrast increments still
+    add to pool 0. ``spin_equilibrium`` (per spin) replaces ``equilibrium``
+    and needs tracked concentration; source rows and segment weights stay
+    computed with ``equilibrium``. Neither combines with washout sources.
 
     The optional segment arrays replace intervals ``[first, end)`` by the
     propagator entry ``propagators[entry]`` with shape
@@ -315,8 +334,8 @@ def run_spin_major_chunk(
             rf_table.shape[0] >= 2**31 or gradient_table.shape[0] >= 2**31 or
             source_table.shape[0] >= 2**31):
         raise ValueError("plan slice is too large for 32-bit table indices")
-    if npools < 2 or npools > DSM_MAX_POOLS:
-        raise ValueError(f"spin-major executor supports 2 to {DSM_MAX_POOLS} pools")
+    if npools < 1 or npools > DSM_MAX_POOLS:
+        raise ValueError(f"spin-major executor supports 1 to {DSM_MAX_POOLS} pools")
     r1 = np.asarray(r1, dtype=np.float64)
     t2_s = np.asarray(t2_s, dtype=np.float64)
     pool_offset_hz = np.asarray(pool_offset_hz, dtype=np.float64)
@@ -465,6 +484,24 @@ def run_spin_major_chunk(
             relaxation_table, np.float64, (None, None, 2), "relaxation_table")
         chunk.group_relaxation = <const int32_t *>_data(
             group_relaxation, np.int32, (n_groups,), "group_relaxation")
+
+    chunk.relaxation_group = NULL
+    chunk.n_relaxation_groups = 0
+    chunk.relaxation_groups = NULL
+    if relaxation_group is not None:
+        if relaxation_groups is None:
+            raise ValueError("relaxation groups need a group table")
+        if relaxation_groups.ndim != 3 or relaxation_groups.shape[0] >= 2**31:
+            raise ValueError("relaxation_groups must have three dimensions")
+        chunk.relaxation_group = <const int32_t *>_data(
+            relaxation_group, np.int32, (nspins,), "relaxation_group")
+        chunk.n_relaxation_groups = <int32_t>relaxation_groups.shape[0]
+        chunk.relaxation_groups = <const double *>_data(
+            relaxation_groups, np.float64, (None, npools, 2), "relaxation_groups")
+    chunk.spin_equilibrium = (
+        NULL if spin_equilibrium is None else
+        <const double *>_data(
+            spin_equilibrium, np.float64, (nspins,), "spin_equilibrium"))
 
     chunk.n_actions = action_kinds.shape[0]
     chunk.action_offsets = <const int64_t *>_data(

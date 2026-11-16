@@ -19,8 +19,10 @@ from .sequence.acquisition import (  # noqa: F401
 )
 from .kernel_capabilities import (  # noqa: F401
     DYNAMIC_KERNEL_NAMES,
+    KERNEL_ALIASES,
     SEQUENCE_KERNEL_NAMES,
     KernelFallbackWarning,
+    canonical_kernel_name,
     detect_kernel_capabilities,
     dynamic_kernel_fallback,
     kernel_capability_metadata,

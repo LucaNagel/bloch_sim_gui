@@ -52,38 +52,34 @@ class SettingsDialog(QDialog):
         ("Custom free-memory reserve", "custom_reserve"),
         ("Fixed simulation limit", "fixed_limit"),
     )
-    # Offered kernels must match GUI_KERNEL_NAMES in kernel_capabilities.py.
-    # Other kernels remain available from Python for benchmarks and validation.
-    SEQUENCE_KERNELS = (("Optimized (recommended)", "optimized"),)
+    # Offered kernels must match GUI_*_KERNEL_NAMES in kernel_capabilities.py.
+    # Other kernels (dynamic "numpy" and "reference") remain available from
+    # Python for benchmarks and validation.
+    SEQUENCE_KERNELS = (("Production (recommended)", "production"),)
     SEQUENCE_KERNEL_EXTRAS = (("Strict reference (validation)", "strict_reference"),)
-    DYNAMIC_SEQUENCE_KERNELS = (("Native automatic (recommended)", "native_parallel"),)
-    DYNAMIC_SEQUENCE_KERNEL_EXTRAS = (
-        ("Optimized NumPy (compatibility and validation)", "optimized"),
-    )
+    DYNAMIC_SEQUENCE_KERNELS = (("Production (recommended)", "production"),)
+    DYNAMIC_SEQUENCE_KERNEL_EXTRAS = ()
     SEQUENCE_KERNEL_TOOLTIPS = {
-        "optimized": (
+        "production": (
             "Recommended for ordinary Bloch simulations. Uses native streaming "
             "propagation and mathematically equivalent fast paths for RF-free "
             "intervals and uniform relaxation."
         ),
         "strict_reference": (
             "Validation option. Uses a separately compiled Float64 reference "
-            "kernel without fast-math or floating-point contraction, so optimized "
-            "results can be checked against a strict numerical baseline. It is "
-            "slower and not intended as a speed setting."
+            "kernel without fast-math or floating-point contraction, so production "
+            "results can be checked for fast-math effects. It is slower and not "
+            "intended as a speed setting. The physical reference for static "
+            "simulations is the Python Gold reference used by the validation tests."
         ),
     }
     DYNAMIC_SEQUENCE_KERNEL_TOOLTIPS = {
-        "native_parallel": (
+        "production": (
             "Recommended for dynamic spectral simulations. Uses a compiled complete "
             "plan for supported two-pool and multi-pool models, including spatial "
             "transmit sensitivity and inflow, and automatically enables multiple CPU "
-            "workers. Unsupported cases fall back safely to Optimized NumPy."
-        ),
-        "optimized": (
-            "Compatibility and validation option. Uses optimized NumPy, supports the "
-            "complete model including additional pools, and serves as the automatic "
-            "fallback of Native automatic. It is much slower for large objects."
+            "workers. Unsupported cases fall back safely to the compiled "
+            "interval-wise path or to NumPy."
         ),
     }
     SEQUENCE_TIMESTEP_PRESETS = SEQUENCE_TIMESTEP_PRESETS
@@ -159,8 +155,8 @@ class SettingsDialog(QDialog):
         parent=None,
         initial_tab: str = "general",
         sequence_live_progress_enabled: bool = True,
-        sequence_kernel: str = "optimized",
-        dynamic_sequence_kernel: str = "native_parallel",
+        sequence_kernel: str = "production",
+        dynamic_sequence_kernel: str = "production",
         sequence_timestep_preset: str = DEFAULT_SEQUENCE_TIMESTEP_PRESET,
         sequence_timestep_us: float = DEFAULT_SEQUENCE_TIMESTEP_US,
         sequence_spoiler_mode: str = "ideal",
@@ -398,9 +394,9 @@ class SettingsDialog(QDialog):
         kernel_index = self.sequence_kernel_combo.findData(sequence_kernel)
         self.sequence_kernel_combo.setCurrentIndex(max(0, kernel_index))
         self.sequence_kernel_combo.setToolTip(
-            "Choose the implementation for ordinary Bloch propagation. Optimized "
+            "Choose the implementation for ordinary Bloch propagation. Production "
             "is recommended for simulations; Strict reference is a slower Float64 "
-            "baseline for numerical validation. Hover over an option for details."
+            "check that fast-math changes nothing. Hover over an option for details."
         )
         simulation_form.addRow("Sequence Bloch kernel:", self.sequence_kernel_combo)
 
@@ -425,10 +421,10 @@ class SettingsDialog(QDialog):
         )
         self.dynamic_sequence_kernel_combo.setCurrentIndex(max(0, dynamic_kernel_index))
         self.dynamic_sequence_kernel_combo.setToolTip(
-            "Choose the implementation for dynamic spectral simulation. Native "
-            "automatic is recommended and falls back to Optimized NumPy for "
-            "unsupported models. Optimized NumPy remains available for compatibility "
-            "checks and validation. Hover over an option for details."
+            "Choose the implementation for dynamic spectral simulation. Production "
+            "uses the compiled kernels and falls back safely for unsupported "
+            "models. The NumPy and reference paths remain available from Python "
+            "for validation. Hover over an option for details."
         )
         simulation_form.addRow(
             "Dynamic spectral kernel:", self.dynamic_sequence_kernel_combo

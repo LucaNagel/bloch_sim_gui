@@ -287,7 +287,7 @@ crusher indices that are not strictly increasing. Unchecked, such an index
 would leave ADC samples at zero or checkpoint rows uninitialized. The compiler
 always produces valid indices, so the check only guards direct calls. Counts
 above the C `int` range are rejected the same way. If the grouped T1/T2
-relaxation tables cannot be allocated, the optimized kernel falls back to
+relaxation tables cannot be allocated, the production kernel falls back to
 per-spin exponentials without reporting it; the run is slower but uses the same
 expressions.
 
@@ -1021,7 +1021,7 @@ Chunk boundaries are also the cancellation and progress-reporting boundaries.
 The coupled dynamic solver has reference, allocation-reusing NumPy, strict
 native serial, and strict native OpenMP execution paths.  The native extension
 uses separate non-fast-math compiler flags and consumes NumPy-prepared
-coefficients so the optimized CPU outputs remain bit-identical.  Its principal
+coefficients so the NumPy (`numpy`) CPU outputs remain bit-identical.  Its principal
 RF-intensive speed-up comes from applying one Rodrigues rotation directly to
 the complete contiguous two-pool voxel block, avoiding repeated NumPy state
 synchronization and temporary arrays.  ADC sums retain their original voxel

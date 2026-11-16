@@ -161,12 +161,9 @@ def load_kernel_settings(settings) -> tuple[str, str]:
     dynamic_kernel = str(
         settings.value("sequence/dynamic_kernel", GUI_KERNEL_NAMES["dynamic"][0])
     )
-    try:
-        revision = int(settings.value("sequence/kernel_settings_revision", 1))
-    except (TypeError, ValueError):
-        revision = 1
-    if revision < KERNEL_SETTINGS_REVISION and dynamic_kernel == "optimized":
-        dynamic_kernel = GUI_KERNEL_NAMES["dynamic"][0]
+    # Old names resolve to their public names. The dynamic NumPy path
+    # ("optimized", now "numpy") is no longer offered in the GUI, so every
+    # saved NumPy choice, of any settings revision, resolves to the default.
     return (
         resolve_kernel_request("sequence", sequence_kernel),
         resolve_kernel_request("dynamic", dynamic_kernel),

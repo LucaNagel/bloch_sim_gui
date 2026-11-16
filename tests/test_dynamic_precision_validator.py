@@ -64,7 +64,7 @@ def test_validator_rejects_errors_hidden_by_combined_signal(monkeypatch, fault):
             self.kernel = dynamic_sequence_kernel
 
         def simulate_dynamic_sequence(self, *args, **kwargs):
-            return reference if self.kernel == "optimized" else candidate
+            return reference if self.kernel == "numpy" else candidate
 
     monkeypatch.setattr(validator, "BlochSimulator", ControlledSimulator)
     report = validator.compare_kernels(

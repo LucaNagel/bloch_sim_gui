@@ -411,7 +411,8 @@ def test_rf_cache_carries_voxel_washout_loss_and_steps_source_tiles(
     )
     cached = _run(phantom, program, kernel, **kwargs)
 
-    assert cached.metadata["sequence_kernel"] == kernel
+    assert cached.metadata["sequence_kernel"] == "production"
+    assert cached.metadata["dynamic_kernel_path"] == kernel
     assert _rf_cache(cached, "enabled") is True
     assert _rf_cache(cached, "applications") > REPETITIONS // 2
     # Only the tile holding the source voxels steps through the pulses.

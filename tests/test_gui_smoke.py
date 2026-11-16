@@ -497,24 +497,24 @@ def test_settings_dialog_returns_selected_values(tmp_path):
     )
     assert dialog.interface_style() == "dark"
     assert dialog.sequence_live_progress_enabled()
-    assert dialog.sequence_kernel() == "optimized"
+    assert dialog.sequence_kernel() == "production"
     assert dialog.sequence_kernel_combo.findData("reference") == -1
+    assert dialog.sequence_kernel_combo.findData("optimized") == -1
     dialog.sequence_kernel_combo.setCurrentIndex(
         dialog.sequence_kernel_combo.findData("strict_reference")
     )
     assert dialog.sequence_kernel() == "strict_reference"
-    assert dialog.dynamic_sequence_kernel() == "native_parallel"
-    for kernel in ("native_serial", "reference", "metal_hybrid"):
+    assert dialog.dynamic_sequence_kernel() == "production"
+    for kernel in (
+        "native_serial",
+        "native_parallel",
+        "numpy",
+        "optimized",
+        "reference",
+        "metal_hybrid",
+    ):
         assert dialog.dynamic_sequence_kernel_combo.findData(kernel) == -1
-    dialog.dynamic_sequence_kernel_combo.setCurrentIndex(
-        dialog.dynamic_sequence_kernel_combo.findData("optimized")
-    )
-    assert dialog.dynamic_sequence_kernel() == "optimized"
     assert not any(spin.isEnabled() for spin in dialog.subvoxel_spin_count_spins)
-    dialog.dynamic_sequence_kernel_combo.setCurrentIndex(
-        dialog.dynamic_sequence_kernel_combo.findData("native_parallel")
-    )
-    assert dialog.dynamic_sequence_kernel() == "native_parallel"
     assert dialog.sequence_timestep_preset() == "very_fast"
     assert dialog.sequence_timestep_us() == pytest.approx(20.0)
     assert not dialog.sequence_timestep_us_spin.isEnabled()
@@ -672,39 +672,25 @@ def test_settings_dialog_groups_kernel_extras_and_has_english_tooltips(tmp_path)
 
     sequence = dialog.sequence_kernel_combo
     assert offered(sequence) == GUI_KERNEL_NAMES["sequence"]
-    sequence_optimized = sequence.findData("optimized")
+    sequence_production = sequence.findData("production")
     sequence_strict_reference = sequence.findData("strict_reference")
-    assert sequence.itemText(sequence_optimized) == "Optimized (recommended)"
+    assert sequence.itemText(sequence_production) == "Production (recommended)"
     assert (
         sequence.itemText(sequence_strict_reference) == "Strict reference (validation)"
     )
-    assert sequence_strict_reference > sequence_optimized + 1
+    assert sequence_strict_reference > sequence_production + 1
     assert "ordinary Bloch simulations" in sequence.itemData(
-        sequence_optimized, Qt.ToolTipRole
+        sequence_production, Qt.ToolTipRole
     )
-    assert "strict numerical baseline" in sequence.itemData(
-        sequence_strict_reference, Qt.ToolTipRole
-    )
+    strict_tooltip = sequence.itemData(sequence_strict_reference, Qt.ToolTipRole)
+    assert "fast-math" in strict_tooltip
+    assert "Gold reference" in strict_tooltip
 
     dynamic = dialog.dynamic_sequence_kernel_combo
     assert offered(dynamic) == GUI_KERNEL_NAMES["dynamic"]
-    expected_labels = {
-        "native_parallel": "Native automatic (recommended)",
-        "optimized": "Optimized NumPy (compatibility and validation)",
-    }
-    indices = {kernel: dynamic.findData(kernel) for kernel in expected_labels}
-    assert indices["optimized"] > indices["native_parallel"] + 1
-    for kernel, label in expected_labels.items():
-        index = indices[kernel]
-        assert dynamic.itemText(index) == label
-        assert dynamic.itemData(index, Qt.ToolTipRole)
-
-    assert "multiple CPU workers" in dynamic.itemData(
-        indices["native_parallel"], Qt.ToolTipRole
-    )
-    assert "automatic fallback" in dynamic.itemData(
-        indices["optimized"], Qt.ToolTipRole
-    )
+    production = dynamic.findData("production")
+    assert dynamic.itemText(production) == "Production (recommended)"
+    assert "multiple CPU workers" in dynamic.itemData(production, Qt.ToolTipRole)
 
 
 def test_memory_limit_uses_warning_instead_of_generic_error():
@@ -2478,7 +2464,8 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
     assert window._get_export_directory() == export_directory
     assert export_directory.is_dir()
     assert window._load_sequence_kernel() == "strict_reference"
-    assert window._load_dynamic_sequence_kernel() == "native_parallel"
+    # Old settings names resolve to the public names.
+    assert window._load_dynamic_sequence_kernel() == "production"
     assert window._load_sequence_timestep_preset() == "fast"
     assert window._load_sequence_timestep_us() == pytest.approx(10.0)
     assert window._load_sequence_spoiler_mode() == "gradient"
@@ -2496,19 +2483,23 @@ def test_configured_export_directory_is_used(tmp_path, monkeypatch):
     assert sequence_export_dialog.call_args.kwargs["directory"] == export_directory
 
     window.app_settings.setValue("sequence/kernel", "invalid")
-    assert window._load_sequence_kernel() == "optimized"
-    window.app_settings.setValue("sequence/kernel", "reference")
-    assert window._load_sequence_kernel() == "optimized"
+    assert window._load_sequence_kernel() == "production"
+    for old in ("reference", "optimized"):
+        window.app_settings.setValue("sequence/kernel", old)
+        assert window._load_sequence_kernel() == "production"
     window.app_settings.setValue("sequence/dynamic_kernel", "invalid")
-    assert window._load_dynamic_sequence_kernel() == "native_parallel"
+    assert window._load_dynamic_sequence_kernel() == "production"
     for removed in ("native_serial", "reference", "metal_hybrid"):
         window.app_settings.setValue("sequence/dynamic_kernel", removed)
-        assert window._load_dynamic_sequence_kernel() == "native_parallel"
-    # Settings saved before revision 2 stored Optimized NumPy as the old default.
+        assert window._load_dynamic_sequence_kernel() == "production"
+    # The NumPy path is no longer offered in the GUI; saved NumPy choices of
+    # every settings revision move to the default.
     window.app_settings.setValue("sequence/dynamic_kernel", "optimized")
-    assert window._load_dynamic_sequence_kernel() == "native_parallel"
+    assert window._load_dynamic_sequence_kernel() == "production"
     window.app_settings.setValue("sequence/kernel_settings_revision", 2)
-    assert window._load_dynamic_sequence_kernel() == "optimized"
+    assert window._load_dynamic_sequence_kernel() == "production"
+    window.app_settings.setValue("sequence/dynamic_kernel", "numpy")
+    assert window._load_dynamic_sequence_kernel() == "production"
     window.app_settings.setValue("sequence/spoiler_mode", "invalid")
     assert window._load_sequence_spoiler_mode() == "ideal"
 
@@ -2526,7 +2517,7 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
     dialog.sequence_timing_visible.return_value = False
     dialog.sequence_live_progress_enabled.return_value = False
     dialog.sequence_kernel.return_value = "strict_reference"
-    dialog.dynamic_sequence_kernel.return_value = "optimized"
+    dialog.dynamic_sequence_kernel.return_value = "production"
     dialog.sequence_timestep_preset.return_value = "fast"
     dialog.sequence_timestep_us.return_value = 10.0
     dialog.sequence_spoiler_mode.return_value = "gradient"
@@ -2582,17 +2573,17 @@ def test_simulation_settings_are_persisted_and_applied(tmp_path):
         float(window.app_settings.value("defaults/sequence_reference_ppm/C13")) == 175.5
     )
     assert window.app_settings.value("sequence/kernel") == "strict_reference"
-    assert window.app_settings.value("sequence/dynamic_kernel") == "optimized"
+    assert window.app_settings.value("sequence/dynamic_kernel") == "production"
     assert int(window.app_settings.value("sequence/kernel_settings_revision")) == 2
-    assert window._load_dynamic_sequence_kernel() == "optimized"
+    assert window._load_dynamic_sequence_kernel() == "production"
     assert window.simulator.sequence_kernel == "strict_reference"
-    assert window.simulator.dynamic_sequence_kernel == "optimized"
+    assert window.simulator.dynamic_sequence_kernel == "production"
     assert window.simulator.num_threads == 2
     window.sequence_simulation_widget.set_sequence_timestep_us.assert_called_once_with(
         10.0
     )
     window.sequence_simulation_widget.set_dynamic_sequence_kernel.assert_called_once_with(
-        "optimized"
+        "production"
     )
     window.sequence_simulation_widget.set_spoiler_configuration.assert_called_once_with(
         "gradient", (3, 5, 11), "stratified", auto_adjust=False
@@ -2626,8 +2617,8 @@ def test_changing_only_spoiler_settings_preserves_active_sequence_parameters(
     dialog.tooltips_enabled.return_value = True
     dialog.interface_style.return_value = "light"
     dialog.sequence_live_progress_enabled.return_value = True
-    dialog.sequence_kernel.return_value = "optimized"
-    dialog.dynamic_sequence_kernel.return_value = "optimized"
+    dialog.sequence_kernel.return_value = "production"
+    dialog.dynamic_sequence_kernel.return_value = "production"
     dialog.sequence_timestep_preset.return_value = "balanced"
     dialog.sequence_timestep_us.return_value = 5.0
     dialog.sequence_spoiler_mode.return_value = "gradient"

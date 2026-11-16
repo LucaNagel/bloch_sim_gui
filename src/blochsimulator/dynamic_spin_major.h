@@ -9,7 +9,9 @@
  *
  * Pool 0 is the precursor (pyruvate); every other pool is a product fed by a
  * per-spin precursor-to-product rate. Contrast agents add per-spin,
- * piecewise-constant relaxation rates to pool 0. Inflow either follows global source
+ * piecewise-constant relaxation rates to pool 0; constant relaxation groups
+ * and a per-spin equilibrium replace the pool constants per spin. Inflow
+ * either follows global source
  * rows or, with per-spin arrival delays, delayed time curves evaluated per
  * spin from the plan's interval times.
  */
@@ -62,7 +64,8 @@ typedef struct {
     const double *positions_m;   /* (nspins, 3) */
     const double *b0_hz;         /* (nspins,) */
     const double *pool_b0_hz;    /* (npools, nspins) extra shifts, or NULL */
-    const double *conversion;    /* (npools - 1, nspins) precursor->product */
+    const double *conversion;    /* (npools - 1, nspins) precursor->product;
+                                    NULL allowed with one pool */
     const double *delivery;      /* (nspins,), NULL without sources */
     const double *rx;            /* (ncoils, nspins) complex */
     const double *weights;       /* (nspins,) */
@@ -133,6 +136,22 @@ typedef struct {
     int32_t n_relaxation;
     /* (n_relaxation, compartments, 2): dR1, dR2 in 1/s. */
     const double *relaxation_table;
+
+    /* Constant relaxation groups, separate from the time-dependent contrast
+     * table above. A spin of group r relaxes every pool p with
+     * relaxation_groups[r, p] = (R1 in 1/s, T2 in s) instead of the pool
+     * constants r1[p] and t2_s[p]; group -1 keeps the pool constants. Contrast
+     * increments still add to pool 0. NULL without groups. */
+    const int32_t *relaxation_group;       /* (nspins,), -1 for pool constants */
+    int32_t n_relaxation_groups;
+    const double *relaxation_groups;       /* (n_relaxation_groups, npools, 2) */
+
+    /* Per-spin equilibrium polarization replacing ``equilibrium``, or NULL.
+     * Needs tracked concentration. Global source rows and basis weights stay
+     * computed with ``equilibrium``; the executor adds the difference per
+     * spin. Not combined with washout source compartments, whose gains are
+     * precomputed with the pool constants and ``equilibrium``. */
+    const double *spin_equilibrium;        /* (nspins,) */
 
     /* Boundary actions at state index interval + 1 (CSR layout). */
     int64_t n_actions;

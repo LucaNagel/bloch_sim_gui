@@ -64,6 +64,7 @@ from ..kernel_capabilities import (
     DYNAMIC_KERNEL_NAMES,
     SEQUENCE_KERNEL_NAMES,
     SPIN_MAJOR_DISABLED_REASON,
+    canonical_kernel_name,
 )
 from ..default_phantoms import (
     DEFAULT_COMPOUNDS,
@@ -1470,7 +1471,9 @@ class SequenceSimulationThread(QThread):
             )
             checker = BlochSimulator(
                 use_parallel=False,
-                sequence_kernel=getattr(self.simulator, "sequence_kernel", "optimized"),
+                sequence_kernel=getattr(
+                    self.simulator, "sequence_kernel", "production"
+                ),
             )
             estimate = estimate_timestep_error(
                 self.program,
@@ -1494,7 +1497,7 @@ class SequenceSimulationThread(QThread):
             checker = BlochSimulator(
                 use_parallel=False,
                 dynamic_sequence_kernel=getattr(
-                    self.simulator, "dynamic_sequence_kernel", "optimized"
+                    self.simulator, "dynamic_sequence_kernel", "numpy"
                 ),
             )
             estimate = estimate_dynamic_timestep_error(
@@ -17375,17 +17378,23 @@ class SequenceSimulationWidget(QWidget):
 
     def set_sequence_kernel(self, kernel):
         """Apply the persistent sequence-kernel setting to future runs."""
-        if kernel not in SEQUENCE_KERNEL_NAMES:
+        try:
+            canonical_kernel_name("sequence", kernel)
+        except ValueError:
             raise ValueError(
-                "sequence kernel must be 'optimized', 'reference', or "
-                "'strict_reference'"
-            )
+                "sequence kernel must be one of " + ", ".join(SEQUENCE_KERNEL_NAMES)
+            ) from None
         self.simulator.sequence_kernel = kernel
 
     def set_dynamic_sequence_kernel(self, kernel):
         """Apply the dynamic two-pool kernel setting to future runs."""
-        if kernel not in DYNAMIC_KERNEL_NAMES:
-            raise ValueError("unsupported dynamic sequence kernel")
+        try:
+            canonical_kernel_name("dynamic", kernel)
+        except ValueError:
+            raise ValueError(
+                "dynamic sequence kernel must be one of "
+                + ", ".join(DYNAMIC_KERNEL_NAMES)
+            ) from None
         self.simulator.dynamic_sequence_kernel = kernel
 
     def set_sequence_timestep_us(self, value):
@@ -17907,11 +17916,14 @@ class SequenceSimulationWidget(QWidget):
         """Return a readable summary of the requested and actual backend."""
         metadata = dict(metadata or {})
         kernel_labels = {
+            "production": "Production",
+            "numpy": "NumPy",
+            "reference": "Reference",
+            "strict_reference": "Strict reference",
+            # Results written before the renaming carry the old names.
             "optimized": "Optimized CPU",
             "native_parallel": "Native automatic",
             "native_serial": "Native serial",
-            "reference": "Reference",
-            "strict_reference": "Strict reference",
         }
         contract_labels = {
             "bitwise": "bitwise contract",
@@ -17968,7 +17980,8 @@ class SequenceSimulationWidget(QWidget):
         spin_major_reason = metadata.get("native_spin_major_fallback_reason")
         if (
             not fallback_used
-            and actual in {"native_serial", "native_parallel"}
+            and (metadata.get("dynamic_kernel_path") or actual)
+            in {"native_serial", "native_parallel"}
             and not metadata.get("native_spin_major_enabled")
             and spin_major_reason
             and spin_major_reason != SPIN_MAJOR_DISABLED_REASON

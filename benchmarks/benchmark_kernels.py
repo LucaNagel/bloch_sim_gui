@@ -50,6 +50,8 @@ from blochsimulator.dynamic_phantom import DynamicSpectralPhantom
 from blochsimulator.kernel_capabilities import (
     DYNAMIC_KERNEL_NAMES,
     SEQUENCE_KERNEL_NAMES,
+    canonical_kernel_name,
+    internal_dynamic_kernel,
 )
 
 try:
@@ -325,6 +327,7 @@ def _kernel_record(
     )
     metadata = dict(result.metadata)
     actual_kernel = str(metadata.get("sequence_kernel", kernel))
+    ran_requested = _ran_requested_kernel(family, kernel, metadata)
     fallback_reason = metadata.get("native_fallback_reason")
     record.update(_kernel_similarity(reference_result, result))
     record.update(
@@ -345,11 +348,11 @@ def _kernel_record(
                 if simulation_time_s > 0
                 else float("inf")
             ),
-            "fallback_used": bool(actual_kernel != kernel or fallback_reason),
+            "fallback_used": bool(not ran_requested or fallback_reason),
             "fallback_reason": (
                 None if fallback_reason is None else str(fallback_reason)
             ),
-            "performance_result_is_requested_kernel": bool(actual_kernel == kernel),
+            "performance_result_is_requested_kernel": ran_requested,
             "profile": args.profile,
             "timestep_us": args.timestep_us,
             "requested_threads": args.threads,
@@ -368,6 +371,24 @@ def _kernel_record(
         }
     )
     return record
+
+
+def _ran_requested_kernel(family: str, kernel: str, metadata) -> bool:
+    """Return whether a run used the requested kernel, also for old names.
+
+    Results report the public kernel name; dynamic results also report the
+    internal path, which still tells native_serial from native_parallel.
+    """
+    path = metadata.get("dynamic_kernel_path") if family == "dynamic" else None
+    if path is not None:
+        return str(path) == internal_dynamic_kernel(kernel)
+    actual = str(metadata.get("sequence_kernel", kernel))
+    try:
+        return canonical_kernel_name(family, actual) == canonical_kernel_name(
+            family, kernel
+        )
+    except ValueError:
+        return actual == kernel
 
 
 def _print_kernel_result(record) -> None:

@@ -581,9 +581,10 @@ def test_sequence_workspace_is_lazy_and_initializes_on_selection(tmp_path):
         window.sequence_simulation_widget.simulator.sequence_kernel
         == "strict_reference"
     )
+    # The stored old name native_parallel resolves to its public name.
     assert (
         window.sequence_simulation_widget.simulator.dynamic_sequence_kernel
-        == "native_parallel"
+        == "production"
     )
     assert window.sequence_simulation_widget.simulator.num_threads == 2
     assert window.sequence_simulation_widget.spoiler_mode == "gradient"
