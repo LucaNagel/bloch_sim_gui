@@ -3017,6 +3017,9 @@ _SPIN_MAJOR_POOL_THREAD_BYTES = 160 * 1024
 _SPIN_MAJOR_INTERVAL_BYTES = 256
 _SPIN_MAJOR_SPATIAL_INTERVAL_BYTES = 32
 _SPIN_MAJOR_MAX_POOLS = 6
+# Float16/float32 checkpoints are written by the executor into a bounded
+# float64 staging buffer and converted on storage, slice by slice.
+_SPIN_MAJOR_CHECKPOINT_STAGING_BYTES = 32 * 1024**2
 # Repeated RF segments run as cached per-spin affine propagators. Entries are
 # planned per block, kept across slices, and evicted in LRU order.
 _SPIN_MAJOR_RF_PROPAGATOR_ENTRIES = 8
@@ -3061,7 +3064,6 @@ def _spin_major_fallback_reason(
     available,
     phantom,
     real_dtype,
-    checkpoint_dtype,
     spatial_tx,
     execution_plan,
 ):
@@ -3069,7 +3071,9 @@ def _spin_major_fallback_reason(
 
     The executor covers float64 plans of two to six pools with per-spin B0 and
     conversion-rate maps, including inflow with per-spin arrival delays.
-    Everything else keeps the existing native paths.
+    Checkpoints of any supported dtype are staged in float64 and converted on
+    storage; actions at state zero (ADC, checkpoint) run before the executor
+    on the initial state. Everything else keeps the existing native paths.
     """
     if not requested:
         return SPIN_MAJOR_DISABLED_REASON
@@ -3077,10 +3081,8 @@ def _spin_major_fallback_reason(
         return "extension is unavailable"
     if phantom.n_species > _SPIN_MAJOR_MAX_POOLS:
         return "more than six pools are unsupported"
-    if np.dtype(real_dtype) != np.dtype(np.float64) or np.dtype(
-        checkpoint_dtype
-    ) != np.dtype(np.float64):
-        return "requires float64 state and checkpoints"
+    if np.dtype(real_dtype) != np.dtype(np.float64):
+        return "requires float64 state"
     if phantom.dynamic_b0 is not None:
         return "dynamic B0 is unsupported"
     if spatial_tx:
@@ -3094,9 +3096,6 @@ def _spin_major_fallback_reason(
         return "the plan has no intervals"
     if not np.all(execution_plan.dt_s > 0.0):
         return "the plan has empty intervals"
-    adc_actions = execution_plan.action_kinds == ACTION_ADC
-    if np.any(execution_plan.action_state_indices[adc_actions] == 0):
-        return "ADC at sequence time zero"
     return None
 
 
@@ -3139,20 +3138,27 @@ def _spin_major_slice_end(
     interval_limit,
     segment_first=None,
     segment_end=None,
+    checkpoint_states=None,
+    checkpoint_limit=None,
 ):
-    """Return a slice end that bounds both interval and ADC counts.
+    """Return a slice end that bounds interval, ADC, and staged checkpoint counts.
 
     Cached RF segments are never split: the end moves before a segment it
     would cut, or past it when the slice starts there. Segments have no inner
     actions, so the interval limit can be exceeded by one segment length and
-    the ADC limit only by ADC values at one state, which no slice splits.
+    the ADC (or checkpoint) limit only by values at one state, which no slice
+    splits.
     """
     end_interval = min(interval_count, first_interval + interval_limit)
-    adc_index = int(np.searchsorted(adc_states, first_interval + 1, side="left"))
-    if adc_index + adc_limit < adc_states.size:
-        # The interval ending at state s is s - 1; stop before it.
-        limit_state = int(adc_states[adc_index + adc_limit])
-        end_interval = min(end_interval, max(first_interval + 1, limit_state - 1))
+    bounded_actions = [(adc_states, adc_limit)]
+    if checkpoint_states is not None:
+        bounded_actions.append((checkpoint_states, checkpoint_limit))
+    for action_states, action_limit in bounded_actions:
+        index = int(np.searchsorted(action_states, first_interval + 1, side="left"))
+        if index + action_limit < action_states.size:
+            # The interval ending at state s is s - 1; stop before it.
+            limit_state = int(action_states[index + action_limit])
+            end_interval = min(end_interval, max(first_interval + 1, limit_state - 1))
     if segment_first is not None and segment_first.size:
         index = int(np.searchsorted(segment_first, end_interval, side="right")) - 1
         if index >= 0 and segment_first[index] < end_interval < segment_end[index]:
@@ -4298,7 +4304,6 @@ def _simulate_dynamic_sequence_block(
             available=native_spin_major_chunk is not None,
             phantom=phantom,
             real_dtype=real_dtype,
-            checkpoint_dtype=checkpoint_dtype,
             spatial_tx=spatial_tx_active,
             execution_plan=execution_plan,
         )
@@ -4444,6 +4449,10 @@ def _simulate_dynamic_sequence_block(
                                     * parent_signal_weights,
                                     axis=1,
                                 )
+                            if signal_parent_rows != parent_active_count:
+                                # A spin-major block keeps one row; an ADC at
+                                # state zero is reduced over its parents here.
+                                received = np.sum(received, keepdims=True)
                             species_signal[:, pool, payload] = (
                                 received * signal_scale * demodulation
                             )
@@ -4454,6 +4463,8 @@ def _simulate_dynamic_sequence_block(
                                 * parent_signal_weights[None, :, :],
                                 axis=2,
                             )
+                            if signal_parent_rows != parent_active_count:
+                                received = np.sum(received, axis=1, keepdims=True)
                             species_signal[:, pool, :, payload] = (
                                 received.T * signal_scale * demodulation
                             )
@@ -4664,10 +4675,13 @@ def _simulate_dynamic_sequence_block(
             == 0
         )
     )
+    # The spin-major executor covers multi-pool plans, including an ADC at
+    # state zero; only without it does the NumPy path take over.
     if (
         phantom.n_species > 2
         and sequence_kernel in {"native_serial", "native_parallel"}
         and not native_full_plan_enabled
+        and not native_spin_major_enabled
     ):
         native_fallback_reason = (
             "the multi-pool native plan is unavailable for this precision, "
@@ -6019,9 +6033,7 @@ def _simulate_dynamic_sequence_block(
             transverse_state=transverse_state,
             state=state,
             concentration_state=concentration_state,
-            checkpoint_states=checkpoint_states,
             action_kinds=execution_plan.action_kinds,
-            action_payloads=execution_plan.action_payload_indices,
             r1=np.ascontiguousarray(coefficient_r1, dtype=np.float64),
             t2_s=np.ascontiguousarray(t2[:, 0], dtype=np.float64),
             pool_offset_hz=np.ascontiguousarray(pool_offsets, dtype=np.float64),
@@ -6044,6 +6056,32 @@ def _simulate_dynamic_sequence_block(
         if contrast_compartment is not None:
             spin_arguments["relaxation_compartment"] = contrast_compartment
             spin_arguments["relaxation_table"] = contrast_table
+        checkpoint_actions = execution_plan.action_kinds == ACTION_CHECKPOINT
+        staged_checkpoints = checkpoint_states.dtype != np.dtype(np.float64) and bool(
+            np.any(checkpoint_actions)
+        )
+        checkpoint_bound = {}
+        if staged_checkpoints:
+            # The executor writes float64 checkpoints by payload. Each slice
+            # gets slice-local payloads into a bounded float64 buffer, which
+            # is converted into the requested dtype after the slice, exactly
+            # as the interval paths store their float64 state.
+            action_payloads = execution_plan.action_payload_indices.copy()
+            checkpoint_bytes = phantom.n_species * n_simulated_spins * 3 * 8
+            staging_bytes = _SPIN_MAJOR_CHECKPOINT_STAGING_BYTES
+            if memory_budget_bytes is not None:
+                staging_bytes = min(staging_bytes, int(memory_budget_bytes) // 16)
+            checkpoint_bound = dict(
+                checkpoint_states=execution_plan.action_state_indices[
+                    checkpoint_actions
+                ],
+                checkpoint_limit=max(1, staging_bytes // max(1, checkpoint_bytes)),
+            )
+            staging = np.empty((0, phantom.n_species, n_simulated_spins, 3))
+        else:
+            action_payloads = execution_plan.action_payload_indices
+            spin_arguments["checkpoint_states"] = checkpoint_states
+        spin_arguments["action_payloads"] = action_payloads
         rf_cache = {}
         table_started = perf_counter()
         rf_plan, propagators = plan_rf_propagators(source_mode, equilibrium)
@@ -6070,7 +6108,8 @@ def _simulate_dynamic_sequence_block(
                 adc_states,
                 adc_limit,
                 slice_interval_limit,
-                *(() if rf_plan is None else (rf_plan.first, rf_plan.end)),
+                *((None, None) if rf_plan is None else (rf_plan.first, rf_plan.end)),
+                **checkpoint_bound,
             )
             segments = (
                 {}
@@ -6103,6 +6142,24 @@ def _simulate_dynamic_sequence_block(
                 )
             adc_first = tables.pop("adc_first_payload")
             adc_count = tables.pop("adc_count")
+            if staged_checkpoints:
+                actions = slice(
+                    int(tables["action_offsets"][0]),
+                    int(tables["action_offsets"][-1]),
+                )
+                slice_checkpoints = checkpoint_actions[actions]
+                stored = execution_plan.action_payload_indices[actions][
+                    slice_checkpoints
+                ]
+                stored_payloads = np.unique(stored)
+                action_payloads[actions][slice_checkpoints] = np.searchsorted(
+                    stored_payloads, stored
+                )
+                if staging.shape[0] < stored_payloads.size:
+                    staging = np.empty(
+                        (stored_payloads.size, phantom.n_species, n_simulated_spins, 3)
+                    )
+                spin_arguments["checkpoint_states"] = staging[: stored_payloads.size]
             adc_signal = np.zeros(
                 (phantom.n_species, n_rx_coils, adc_count), dtype=np.complex128
             )
@@ -6118,6 +6175,8 @@ def _simulate_dynamic_sequence_block(
             build_seconds += chunk_build_seconds
             stepwise_tiles += chunk_stepwise_tiles
             native_spin_major_kernel_s += perf_counter() - kernel_started
+            if staged_checkpoints and stored_payloads.size:
+                checkpoint_states[stored_payloads] = staging[: stored_payloads.size]
             if adc_count:
                 payloads = slice(adc_first, adc_first + adc_count)
                 received = adc_signal * signal_scale * adc_demodulation[payloads]
@@ -7245,7 +7304,6 @@ def _simulate_dynamic_sequence_single_source(
             available=_spin_major_kernel() is not None,
             phantom=phantom,
             real_dtype=real_dtype,
-            checkpoint_dtype=effective_checkpoint_dtype,
             spatial_tx=global_tx_classification == "spatial",
             execution_plan=execution_plan,
         )

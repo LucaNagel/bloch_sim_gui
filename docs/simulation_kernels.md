@@ -158,7 +158,9 @@ fallback. It is part of the complete native plan both without inflow and with
 all existing two-pool source modes, including spatial arrival delays. To retain the established
 bitwise result for sequences that sample the unadvanced initial state, an ADC
 event exactly at time zero also stays on that interval path. Later ADC events
-remain part of the complete native plan. The completion status reports the
+remain part of the complete native plan. The spin-major executor takes such a
+sample, like any action at time zero, from the initial state before it starts
+and is not left for it. The completion status reports the
 requested and actually used path, effective CPU thread count, numerical
 contract, complete-plan model, and any fallback reason. Experimental CPU/GPU
 results remain explicitly labelled. The same machine-readable fields are

@@ -1,8 +1,11 @@
+import warnings
+
 import numpy as np
 import pytest
 
 from blochsimulator import BlochSimulator
 from blochsimulator import dynamic_phantom as dynamic_module
+from blochsimulator.kernel_capabilities import KernelFallbackWarning
 from blochsimulator.dynamic_phantom import (
     DynamicB0,
     DynamicSpectralPhantom,
@@ -407,7 +410,6 @@ def test_spin_major_runs_models_it_used_to_refuse(case):
     "case, reason",
     [
         ("dynamic_b0", "dynamic B0 is unsupported"),
-        ("float32_checkpoints", "requires float64 state and checkpoints"),
         ("tiny_budget", "memory budget is too small"),
     ],
 )
@@ -424,8 +426,6 @@ def test_spin_major_falls_back_for_unsupported_models(case, reason):
         phantom.tx_sensitivity_map = np.linspace(0.8, 1.1, phantom.nvoxels).reshape(
             phantom.shape
         ) * np.exp(0.2j)
-    elif case == "float32_checkpoints":
-        kwargs["checkpoint_dtype"] = np.float32
     else:
         kwargs["memory_budget_bytes"] = 1
 
@@ -434,6 +434,97 @@ def test_spin_major_falls_back_for_unsupported_models(case, reason):
     assert result.metadata["native_spin_major_enabled"] is False
     assert result.metadata["native_spin_major_chunks"] == 0
     assert result.metadata["native_spin_major_fallback_reason"] == reason
+
+
+def _time_zero_program():
+    events = list(_program().events)
+    events[-1] = ADCEvent(0.0, 12, 2 * RASTER, phase_offset_rad=0.29)
+    return SequenceProgram(
+        tuple(events), _program().duration_s, metadata=_program().metadata
+    )
+
+
+def _run_without_fallback(phantom, program, kernel="native_serial", **kwargs):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", KernelFallbackWarning)
+        return _run(phantom, program, kernel, **kwargs)
+
+
+# Checkpoints at every raster step, including time zero and the end.
+_ALL_CHECKPOINTS = tuple(np.arange(26) * RASTER)
+
+
+@pytest.mark.parametrize("kernel", ["native_serial", "native_parallel"])
+@pytest.mark.parametrize("checkpoint_dtype", [None, np.float32, np.float16])
+@pytest.mark.parametrize("case", ["coils", "subvoxel_chunks"])
+def test_spin_major_runs_time_zero_adc_and_small_checkpoint_dtypes(
+    kernel, checkpoint_dtype, case
+):
+    phantom = _phantom(inflow="polarized", tracked=True)
+    kwargs = {"checkpoints_s": _ALL_CHECKPOINTS}
+    if checkpoint_dtype is not None:
+        kwargs["checkpoint_dtype"] = checkpoint_dtype
+    if kernel == "native_parallel":
+        kwargs.update(use_parallel=True, num_threads=2)
+    if case == "coils":
+        grid = np.linspace(0.0, 1.0, phantom.nvoxels).reshape(phantom.shape)
+        phantom.rx_sensitivity_maps = np.stack(
+            (np.ones(phantom.shape), (0.5 + grid) * np.exp(0.3j * grid))
+        )
+    else:
+        kwargs.update(
+            spoiler_mode="gradient",
+            spin_sampling=SpinSampling((2, 1, 1)),
+            parent_voxel_chunk_size=2,
+        )
+    program = _time_zero_program()
+
+    spin_major = _run_without_fallback(phantom, program, kernel, **kwargs)
+    previous = _run(phantom, program, kernel, _native_spin_major=False, **kwargs)
+
+    assert spin_major.metadata["native_spin_major_enabled"] is True
+    assert spin_major.metadata["native_spin_major_chunks"] > 0
+    assert spin_major.metadata["native_spin_major_fallback_reason"] is None
+    expected_dtype = np.dtype(checkpoint_dtype or np.float64)
+    assert spin_major.checkpoint_magnetization.dtype == expected_dtype
+    assert spin_major.signal.shape == previous.signal.shape
+    # Small checkpoint dtypes are rounded from the same Float64 state.
+    _assert_close(spin_major, previous)
+
+
+def test_spin_major_checkpoint_staging_does_not_change_results(monkeypatch):
+    phantom = _phantom(inflow="polarized", tracked=True)
+    program = _time_zero_program()
+    kwargs = {"checkpoints_s": _ALL_CHECKPOINTS, "checkpoint_dtype": np.float32}
+    large = _run_without_fallback(phantom, program, **kwargs)
+    monkeypatch.setattr(dynamic_module, "_SPIN_MAJOR_CHECKPOINT_STAGING_BYTES", 1)
+    small = _run_without_fallback(phantom, program, **kwargs)
+
+    assert (
+        small.metadata["native_spin_major_chunks"]
+        > large.metadata["native_spin_major_chunks"]
+    )
+    _assert_equal(small, large)
+
+
+@pytest.mark.parametrize("checkpoint_dtype", [np.float32, np.float16])
+def test_spin_major_small_checkpoints_are_rounded_float64_checkpoints(
+    checkpoint_dtype,
+):
+    phantom = _phantom(inflow="polarized", tracked=True)
+    program = _time_zero_program()
+    kwargs = {"checkpoints_s": _ALL_CHECKPOINTS}
+    full = _run_without_fallback(phantom, program, **kwargs)
+    rounded = _run_without_fallback(
+        phantom, program, checkpoint_dtype=checkpoint_dtype, **kwargs
+    )
+
+    pools = full.checkpoint_pool_magnetization.astype(checkpoint_dtype)
+    np.testing.assert_array_equal(rounded.checkpoint_pool_magnetization, pools)
+    # The total is summed from the stored pool checkpoints, as before.
+    np.testing.assert_array_equal(rounded.checkpoint_magnetization, pools.sum(axis=1))
+    for name in OUTPUTS[:4]:
+        np.testing.assert_array_equal(getattr(rounded, name), getattr(full, name))
 
 
 def test_optimized_kernel_does_not_report_spin_major_fallback():

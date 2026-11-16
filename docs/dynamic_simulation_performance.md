@@ -21,8 +21,11 @@ plan slices, including spatial complex Tx, receive coils, subvoxel spins, and
 existing inflow/concentration modes. Repeated RF segments may use cached
 affine propagators. Cache keys use exact interval inputs; source samples
 must fit their basis within a relative tolerance of $10^{-12}$, and internal
-boundary actions force stepwise execution. Dynamic B0, spatial inflow delays,
-additional pools, and smaller checkpoint dtypes use the previous paths.
+boundary actions force stepwise execution. Dynamic B0 and more than six pools
+use the previous paths. Float16/float32 checkpoints are computed in Float64
+and converted on storage, slice by slice through a bounded staging buffer, so
+the GUI animation replay stays on the spin-major executor. ADC samples and
+checkpoints at time zero are taken from the initial state before it starts.
 `BLOCHSIM_DYNAMIC_SPIN_MAJOR=0` selects the previous driver;
 `BLOCHSIM_DYNAMIC_SPIN_MAJOR_RF_CACHE=0` disables only the propagator cache.
 Result metadata reports the actual `native_spin_major_` coverage and fallback.

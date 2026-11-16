@@ -741,8 +741,13 @@ Repeated RF segments can use simulation-local affine propagators, keyed by
 exact interval inputs. Source samples must fit the source basis within a
 relative tolerance of $10^{-12}$; other occurrences remain stepwise.
 Cached segments containing internal ADC, crusher, or checkpoint actions are
-ineligible. Dynamic B0, spatial inflow delays, additional pools, and smaller
-checkpoint dtypes retain the established execution paths.
+ineligible. Dynamic B0 and more than six pools retain the established
+execution paths. Float16/float32 checkpoints are written into a bounded
+Float64 staging buffer with slice-local payloads (slices are also cut by
+checkpoint count) and converted on storage, exactly as the interval paths
+store their Float64 state. Actions at state index zero (ADC, checkpoint) run
+in Python on the initial state before the executor starts; a block that keeps
+one reduced signal row sums that ADC sample over its parents.
 
 Use `BLOCHSIM_DYNAMIC_SPIN_MAJOR=0` to compare the previous native driver and
 `BLOCHSIM_DYNAMIC_SPIN_MAJOR_RF_CACHE=0` to compare uncached spin-major
@@ -791,7 +796,8 @@ errors fatal.
 An ADC action at state index zero intentionally disables the complete-plan
 driver. It samples the unadvanced initial state through the established
 interval path so the existing bitwise contract is retained; this is a
-compatibility gate, not an unsupported acquisition event.
+compatibility gate, not an unsupported acquisition event. The spin-major
+executor is not affected: it starts after the state-zero actions.
 
 The outer dynamic driver may stream the object by parent voxel, but never by
 subspin or by time. It compiles the sequence and execution plan once, keeps all

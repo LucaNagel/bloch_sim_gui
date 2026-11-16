@@ -74,6 +74,9 @@ def test_native_run_and_deliberate_switch_do_not_warn():
         warnings.simplefilter("error", KernelFallbackWarning)
         native = _run("native_serial")
         disabled = _run("native_serial", _native_spin_major=False)
+        # Small checkpoint dtypes are staged in Float64 inside spin-major.
+        small = _run("native_serial", checkpoint_dtype=np.float32)
+    assert small.metadata["native_spin_major_enabled"]
     assert native.metadata["native_spin_major_enabled"]
     assert not disabled.metadata["native_spin_major_enabled"]
     assert dynamic_kernel_fallback(disabled.metadata) is None
@@ -81,8 +84,9 @@ def test_native_run_and_deliberate_switch_do_not_warn():
 
 def test_lost_spin_major_executor_warns_at_the_call_site():
     pytest.importorskip("blochsimulator.dynamic_spin_major_cy")
-    with pytest.warns(KernelFallbackWarning, match="float64") as caught:
-        result = _run("native_serial", checkpoint_dtype=np.float32)
+    # A memory budget below one spin tile still forces the interval path.
+    with pytest.warns(KernelFallbackWarning, match="memory budget") as caught:
+        result = _run("native_serial", memory_budget_bytes=1)
     assert not result.metadata["native_spin_major_enabled"]
     assert "spin-major" in str(caught[0].message)
 
@@ -92,14 +96,14 @@ def test_lost_spin_major_executor_warns_at_the_call_site():
             _phantom(),
             sequence_kernel="native_serial",
             simulation_timestep_s=RASTER,
-            checkpoint_dtype=np.float32,
+            memory_budget_bytes=1,
         )
     assert caught[0].filename == __file__
 
     # The reference and NumPy kernels have no faster path to lose.
     with warnings.catch_warnings():
         warnings.simplefilter("error", KernelFallbackWarning)
-        _run("optimized", checkpoint_dtype=np.float32)
+        _run("optimized", memory_budget_bytes=1)
 
 
 def test_fallback_can_be_turned_into_an_error():
@@ -107,7 +111,7 @@ def test_fallback_can_be_turned_into_an_error():
     with warnings.catch_warnings():
         warnings.simplefilter("error", KernelFallbackWarning)
         with pytest.raises(KernelFallbackWarning):
-            _run("native_serial", checkpoint_dtype=np.float32)
+            _run("native_serial", memory_budget_bytes=1)
 
 
 def test_fallback_summary_covers_each_replaced_path():

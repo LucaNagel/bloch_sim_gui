@@ -527,7 +527,7 @@ def test_native_multi_pool_plan_without_inflow():
         )
 
 
-def test_native_multi_pool_initial_adc_uses_safe_optimized_fallback():
+def test_native_multi_pool_initial_adc_runs_spin_major_or_numpy():
     shape = (1, 1, 1)
     phantom = DynamicSpectralPhantom(
         shape=shape,
@@ -552,9 +552,21 @@ def test_native_multi_pool_initial_adc_uses_safe_optimized_fallback():
         program, phantom, sequence_kernel="optimized", simulation_timestep_s=raster
     )
     requested_native = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="native_serial",
+        simulation_timestep_s=raster,
+        # Without the spin-major executor the interval paths keep this gate.
+        _native_spin_major=False,
+    )
+    spin_major = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
         program, phantom, sequence_kernel="native_serial", simulation_timestep_s=raster
     )
 
+    # The spin-major executor takes the state-zero ADC sample itself.
+    assert spin_major.metadata["sequence_kernel"] == "production"
+    assert spin_major.metadata["native_spin_major_enabled"] is True
+    assert spin_major.metadata["native_fallback_reason"] is None
     assert requested_native.metadata["requested_sequence_kernel"] == "native_serial"
     assert requested_native.metadata["requested_dynamic_kernel_path"] == "native_serial"
     assert requested_native.metadata["sequence_kernel"] == "numpy"
@@ -568,6 +580,13 @@ def test_native_multi_pool_initial_adc_uses_safe_optimized_fallback():
         "final_pool_magnetization",
     ):
         assert np.array_equal(getattr(requested_native, name), getattr(reference, name))
+        np.testing.assert_allclose(
+            getattr(spin_major, name),
+            getattr(reference, name),
+            rtol=1e-12,
+            atol=1e-12,
+            err_msg=name,
+        )
 
 
 @pytest.mark.parametrize(

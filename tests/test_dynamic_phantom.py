@@ -820,9 +820,18 @@ def test_native_serial_dynamic_pilot_is_bitwise_equal(kpl):
         program, phantom, sequence_kernel="optimized", **kwargs
     )
     native = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="native_serial",
+        # The interval RF-block path keeps the bitwise contract.
+        _native_spin_major=False,
+        **kwargs,
+    )
+    spin_major = simulator.simulate_dynamic_sequence(
         program, phantom, sequence_kernel="native_serial", **kwargs
     )
 
+    assert spin_major.metadata["native_spin_major_enabled"] is True
     assert native.metadata["sequence_kernel"] == "production"
     assert native.metadata["dynamic_kernel_path"] == "native_serial"
     assert native.metadata["native_fallback_reason"] is None
@@ -838,6 +847,13 @@ def test_native_serial_dynamic_pilot_is_bitwise_equal(kpl):
     ):
         assert np.array_equal(getattr(native, name), getattr(reference, name))
         assert np.array_equal(getattr(native, name), getattr(optimized, name))
+        np.testing.assert_allclose(
+            getattr(spin_major, name),
+            getattr(reference, name),
+            rtol=1e-12,
+            atol=1e-12,
+            err_msg=name,
+        )
 
 
 def test_configured_dynamic_kernel_is_used_without_call_override():
@@ -1158,9 +1174,18 @@ def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
         program, phantom, sequence_kernel="reference", **kwargs
     )
     native = simulator.simulate_dynamic_sequence(
+        program,
+        phantom,
+        sequence_kernel="native_parallel",
+        # The interval RF-block path keeps the bitwise contract.
+        _native_spin_major=False,
+        **kwargs,
+    )
+    spin_major = simulator.simulate_dynamic_sequence(
         program, phantom, sequence_kernel="native_parallel", **kwargs
     )
 
+    assert spin_major.metadata["native_spin_major_enabled"] is True
     assert native.metadata["sequence_kernel"] == "production"
     assert native.metadata["dynamic_kernel_path"] == "native_parallel"
     assert native.metadata["native_parallel_threads"] == num_threads
@@ -1175,6 +1200,13 @@ def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
         "checkpoint_pool_magnetization",
     ):
         assert np.array_equal(getattr(native, name), getattr(reference, name))
+        np.testing.assert_allclose(
+            getattr(spin_major, name),
+            getattr(reference, name),
+            rtol=1e-12,
+            atol=1e-12,
+            err_msg=name,
+        )
 
 
 @pytest.mark.parametrize("num_threads", [1, 4])
