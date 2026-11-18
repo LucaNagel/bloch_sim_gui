@@ -39,6 +39,9 @@ def qt_application():
     gc.disable()
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     _QT_APPLICATION = QApplication.instance() or QApplication([])
+    from blochsimulator.ui.widgets import install_decimal_point_locale
+
+    install_decimal_point_locale(_QT_APPLICATION)
     app = _QT_APPLICATION
     yield app
     if os.environ.get(BATCHED_PYTEST_ENV):
