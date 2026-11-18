@@ -102,6 +102,7 @@ from .widgets import (
     CheckableComboBox,
     CollapsibleSection,
     SegmentedButtons,
+    install_decimal_point_locale,
     install_input_feedback,
     install_spin_box_wheel_guard,
 )
@@ -10919,6 +10920,7 @@ def main():
     # Qt requires this attribute to be enabled before QApplication is created.
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
+    install_decimal_point_locale(app)
     install_spin_box_wheel_guard(app)
 
     system_style_name = _remember_system_style(app)

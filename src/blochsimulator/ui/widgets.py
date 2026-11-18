@@ -1,5 +1,5 @@
-from PyQt5.QtCore import QEvent, QObject, QPointF, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QPalette, QWheelEvent
+from PyQt5.QtCore import QEvent, QLocale, QObject, QPointF, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QDoubleValidator, QKeyEvent, QPalette, QWheelEvent
 from PyQt5.QtWidgets import (
     QAbstractButton,
     QAbstractScrollArea,
@@ -138,6 +138,64 @@ class SpinBoxWheelGuard(QObject):
         # Outside a scroll area, an unmodified wheel event intentionally does
         # nothing rather than changing a value accidentally.
         return True
+
+
+class DecimalCommaKeyFilter(QObject):
+    """Type "." when the comma key is pressed in a decimal number field.
+
+    With the C locale a comma is Qt's group separator, which QDoubleSpinBox
+    silently drops ("1,5" becomes 15).  Users with a German or French keyboard
+    habitually type a comma, so the key is translated to the decimal point.
+    """
+
+    def eventFilter(self, obj, event):
+        if (
+            event.type() == QEvent.KeyPress
+            and event.text() == ","
+            and not event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)
+            and _is_decimal_number_field(obj)
+        ):
+            QApplication.sendEvent(
+                obj, QKeyEvent(QEvent.KeyPress, Qt.Key_Period, event.modifiers(), ".")
+            )
+            return True
+        return False
+
+
+def _is_decimal_number_field(obj):
+    if isinstance(obj, QDoubleSpinBox):
+        return True
+    if isinstance(obj, QLineEdit):
+        return isinstance(obj.parent(), QDoubleSpinBox) or isinstance(
+            obj.validator(), QDoubleValidator
+        )
+    return False
+
+
+def install_decimal_point_locale(app=None):
+    """Use "." as decimal separator in every widget, independent of the OS.
+
+    Qt widgets otherwise follow the operating system's regional format
+    (macOS: Language & Region; Windows: Regional format), so a German setup
+    shows "12,5" in spin boxes while labels, plots and exported text use
+    "12.5".  The C locale keeps every number in one notation.  Must run before
+    the widgets are created: each widget copies the default locale at
+    construction.  The comma key types "." in decimal fields.
+    """
+    app = app or QApplication.instance()
+    if app is None:
+        raise RuntimeError("A QApplication is required")
+
+    locale = QLocale.c()
+    locale.setNumberOptions(QLocale.OmitGroupSeparator | QLocale.RejectGroupSeparator)
+    QLocale.setDefault(locale)
+
+    attribute = "_bloch_decimal_comma_key_filter"
+    if getattr(app, attribute, None) is None:
+        key_filter = DecimalCommaKeyFilter(app)
+        app.installEventFilter(key_filter)
+        setattr(app, attribute, key_filter)
+    return locale
 
 
 def install_spin_box_wheel_guard(app=None):
