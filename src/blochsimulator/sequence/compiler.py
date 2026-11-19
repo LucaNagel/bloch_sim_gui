@@ -697,8 +697,27 @@ class SequenceCompiler:
                     unphased[index] = total
             cache[key] = unphased
         if event.phase_offset_rad != 0.0:
-            return np.exp(1j * event.phase_offset_rad) * unphased
+            return cls._rotate_phase(unphased, event.phase_offset_rad)
         return unphased
+
+    @staticmethod
+    def _rotate_phase(values, phase_rad: float):
+        """Multiply ``values`` by ``exp(1j * phase_rad)`` the same way for any shape.
+
+        NumPy's complex multiply takes SIMD loops for arrays and a scalar path
+        for single values, which may round differently on some CPUs (seen on
+        x86-64 Linux). Rotating with real multiplies and adds keeps a pulse's
+        frame integrals bit-identical to its per-interval integrals everywhere.
+        """
+        values = np.asarray(values, dtype=np.complex128)
+        cos = np.cos(phase_rad)
+        sin = np.sin(phase_rad)
+        real = values.real
+        imag = values.imag
+        rotated = np.empty_like(values)
+        rotated.real = real * cos - imag * sin
+        rotated.imag = real * sin + imag * cos
+        return rotated
 
     @classmethod
     def _rf_event_integral(
@@ -720,7 +739,7 @@ class SequenceCompiler:
         # their phase offset (e.g. RF spoiling) differ by one exact rotation
         # instead of by the rounding of large phase arguments.
         if event.phase_offset_rad != 0.0:
-            total = np.exp(1j * event.phase_offset_rad) * total
+            total = cls._rotate_phase(total, event.phase_offset_rad)[()]
         return total
 
     @staticmethod
