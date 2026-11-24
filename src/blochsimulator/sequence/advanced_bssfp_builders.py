@@ -255,6 +255,62 @@ def _slab_refocus_area(rf_event, select_event, system) -> float:
     )
 
 
+def _encoding_lobe_limit_hint(
+    system,
+    *,
+    role_areas: Mapping[str, float],
+    lobe_duration_s: float,
+    allowed_lobe_duration_s: float,
+    minimum_lobe_duration_s: float,
+    nucleus: str,
+) -> str:
+    """Explain which scanner limit sets the encoding lobe in a TR error.
+
+    ``role_areas`` maps the limiting encoding roles to their largest moment
+    (1/m); roles whose moments are within 5 % of the largest are named
+    together, since all of them have to shrink to shorten the lobe. The
+    estimate assumes a triangular lobe on the gradient raster: a triangle of
+    rise ``r`` reaches the area ``A`` with slew ``A / r**2`` and amplitude
+    ``A / r``.
+    """
+    gamma = float(system.gamma)
+    slew_tms = float(system.max_slew) / gamma
+    grad_mtm = float(system.max_grad) / gamma * 1e3
+    profile = f"{grad_mtm:.4g} mT/m, {slew_tms:.4g} T/m/s for {nucleus}"
+    if lobe_duration_s > minimum_lobe_duration_s + system.grad_raster_time / 2:
+        return (
+            f" The encoding lobe is set to {lobe_duration_s * 1e3:.3f} ms; the "
+            f"scanner allows {minimum_lobe_duration_s * 1e3:.3f} ms, so shorten "
+            "it or leave it automatic."
+        )
+    area = max(role_areas.values())
+    roles = [role for role, value in role_areas.items() if value >= 0.95 * area]
+    role_text = (
+        roles[0] if len(roles) == 1 else ", ".join(roles[:-1]) + f" and {roles[-1]}"
+    )
+    raster = float(system.grad_raster_time)
+    peak = float(system.max_slew) * np.sqrt(area / float(system.max_slew))
+    limit = "slew rate" if peak <= float(system.max_grad) else "gradient amplitude"
+    hint = (
+        f" The {lobe_duration_s * 1e3:.3f} ms lobe is set by the {role_text} "
+        f"moment{'s' if len(roles) > 1 else ''} (up to {area:.4g} 1/m) and the scanner {limit} ({profile})."
+    )
+    rise = np.floor(allowed_lobe_duration_s / 2 / raster + 1e-9) * raster
+    if rise > 0:
+        need_slew_tms = area / rise**2 / gamma
+        need_grad_mtm = area / rise / gamma * 1e3
+        hint += (
+            f" This TR leaves about {allowed_lobe_duration_s * 1e3:.3f} ms per "
+            f"lobe, which needs roughly {need_slew_tms:.4g} T/m/s and "
+            f"{need_grad_mtm:.4g} mT/m in the scanner profile."
+        )
+    hint += (
+        " Alternatives: a higher sampling bandwidth (shorter readout), a larger"
+        f" {role_text} FOV or a smaller {role_text} matrix, or a longer TR."
+    )
+    return hint
+
+
 def make_pulseq_spectral_selective_bssfp(
     *,
     fov_m: Sequence[float] = (56e-3, 28e-3, 21e-3),
@@ -605,18 +661,24 @@ def make_pulseq_spectral_selective_bssfp(
         float(np.max(np.abs(kz_areas)))
         + max((abs(area) for area in slab_refocus_areas), default=0.0),
     )
-    minimum_encoding_duration = max(
-        pp.calc_duration(
-            make_role_trapezoid(
-                pp,
-                encoding_frame,
-                role,
-                area=area,
-                system=system,
-            )
+    role_minimum_durations = {
+        role: (
+            pp.calc_duration(
+                make_role_trapezoid(
+                    pp,
+                    encoding_frame,
+                    role,
+                    area=area,
+                    system=system,
+                )
+            ),
+            area,
         )
         for role, area in zip(("read", "phase", "partition"), encoding_areas)
         if area > 0
+    }
+    minimum_encoding_duration = max(
+        duration for duration, _ in role_minimum_durations.values()
     )
     minimum_encoding_duration = (
         np.ceil(minimum_encoding_duration / system.grad_raster_time - 1e-9)
@@ -680,6 +742,23 @@ def make_pulseq_spectral_selective_bssfp(
         ),
     )
     minimum_explicit_tr = np.ceil(minimum_explicit_tr / raster - 1e-9) * raster
+
+    def _tr_limit_hint() -> str:
+        allowed_lobe = repetition_time_s / 2 - max(
+            rf_block_duration + adc_center_from_start - rf_center_from_start,
+            rf_center_from_start + read_block_duration - adc_center_from_start,
+        )
+        return _encoding_lobe_limit_hint(
+            system,
+            role_areas={
+                role: area for role, (_, area) in role_minimum_durations.items()
+            },
+            lobe_duration_s=pre_duration,
+            allowed_lobe_duration_s=allowed_lobe,
+            minimum_lobe_duration_s=minimum_encoding_duration,
+            nucleus=nucleus,
+        )
+
     if repetition_time_s is None:
         rf_balance_delay_value = (
             2 * rf_center_from_start
@@ -705,7 +784,7 @@ def make_pulseq_spectral_selective_bssfp(
             f"Timing components: RF block {rf_block_duration * 1e3:.3f} ms, "
             f"ADC acquisition {readout_duration * 1e3:.3f} ms, readout block "
             f"{read_block_duration * 1e3:.3f} ms, and automatic encoding lobe "
-            f"{pre_duration * 1e3:.3f} ms."
+            f"{pre_duration * 1e3:.3f} ms.{_tr_limit_hint()}"
         )
     minimum_tr = (
         rf_block_duration
@@ -725,7 +804,7 @@ def make_pulseq_spectral_selective_bssfp(
             raise ValueError(
                 "repetition_time_s is too short; use at least "
                 f"{minimum_explicit_tr:.9g} s with the current RF, readout, "
-                "encoding duration, and scanner limits"
+                f"encoding duration, and scanner limits.{_tr_limit_hint()}"
             )
         tr_fill = max(0.0, tr_fill)
 
