@@ -13,12 +13,14 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QFrame,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -37,7 +39,12 @@ from ..sequence.psf import (
     psf_from_result,
     simulate_point_sources,
 )
-from .plot_export import install_plot_context_export, make_export_button
+from ..psf_export import write_psf_results
+from .plot_export import (
+    _default_directory,
+    install_plot_context_export,
+    make_export_button,
+)
 from .plot_interaction import StaticPlotWidget
 from .theme import set_tone
 
@@ -330,6 +337,15 @@ class PSFAnalysisView(QWidget):
             object_name="psf_export_plot",
         )
         controls.addWidget(self.export_button)
+        self.save_results_button = QPushButton("Save results…")
+        self.save_results_button.setObjectName("psf_save_results")
+        self.save_results_button.setToolTip(
+            "Save the PSF result as a .zip with the data (.npz) and a Jupyter "
+            "notebook that loads and plots it"
+        )
+        self.save_results_button.setEnabled(False)
+        self.save_results_button.clicked.connect(lambda: self.save_results())
+        controls.addWidget(self.save_results_button)
         layout.addLayout(controls)
 
         self.plot_area = QWidget()
@@ -664,6 +680,48 @@ class PSFAnalysisView(QWidget):
         self.image_scale.setEnabled(enabled)
         self.modulation_part.setEnabled(enabled)
         self.gradient_error_mode.setEnabled(enabled)
+        self.save_results_button.setEnabled(enabled and psf is not None)
+
+    def save_results(self, path=None):
+        """Save the shown PSF as a .zip with data and an example notebook.
+
+        Returns the written path, or ``None`` when cancelled or failed.
+        """
+        computation = self.computation
+        psf = self.psf
+        if computation is None or psf is None:
+            return None
+        if path is None:
+            default = _default_directory(self) / "psf_results.zip"
+            filename, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save PSF results",
+                str(default),
+                "PSF results with notebook (*.zip)",
+            )
+            if not filename:
+                return None
+            path = filename
+        frame = psf.encoding_frame
+        try:
+            written = write_psf_results(
+                path,
+                psf,
+                slice_profile=computation.slice_profile,
+                title=computation.context.title,
+                role_labels=[_role_label(role, frame) for role in psf.roles],
+                settings={
+                    "image_scale": self.image_scale.currentText(),
+                    "gradient_errors": self.gradient_error_mode.currentText(),
+                    "stale": bool(self._stale()),
+                },
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Save PSF results", str(exc))
+            return None
+        set_tone(self.status_label, "muted")
+        self.status_label.setText(f"Saved {written.name}")
+        return written
 
     def _gradient_error(self, program):
         """Return Δk per ADC sample for the k-space tab's imperfections."""

@@ -1,4 +1,6 @@
+import json
 import sys
+import zipfile
 
 import numpy as np
 import pytest
@@ -160,6 +162,29 @@ def test_psf_view_computes_2d_psf_and_slice_profile(qt_application, tmp_path):
     view.show()
     assert "sequence changed" in view.summary_label.text()
     view.close()
+
+
+def test_psf_view_saves_results_with_notebook(qt_application, tmp_path):
+    view, state = _view(_flash(tmp_path))
+    assert not view.save_results_button.isEnabled()
+    view.position_mm[0].setValue(10.0)
+    _compute(view)
+    assert view.save_results_button.isEnabled()
+
+    written = view.save_results(tmp_path / "flash psf")
+
+    assert written == tmp_path / "flash psf.zip"
+    with zipfile.ZipFile(written) as archive:
+        names = sorted(archive.namelist())
+        archive.extractall(tmp_path / "unpacked")
+    assert names == ["flash psf.ipynb", "flash psf.npz"]
+    with np.load(tmp_path / "unpacked" / "flash psf.npz") as data:
+        np.testing.assert_array_equal(data["psf"], view.psf.psf)
+        meta = json.loads(str(data["metadata_json"]))
+    assert meta["title"] == "Test sequence"
+    assert meta["role_labels"][1].startswith("Read")
+    assert meta["slice_metrics"]
+    assert "Saved flash psf.zip" in view.status_label.text()
 
 
 def test_psf_view_shows_3d_planes_without_slice_sweep(qt_application, tmp_path):

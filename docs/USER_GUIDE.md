@@ -359,6 +359,11 @@ profile and cross-talk. It includes relaxation and hyperpolarized depletion
 along the k-space order, so it shows the *effective* resolution. Cartesian 2D,
 EPI and 3D are supported. Results are marked stale when the sequence changes.
 
+**Save results…** writes a `.zip` with the PSF data (`.npz`: PSF, ideal PSF,
+k-space modulation, axis profiles, slice profile/spectral line when present,
+metrics as JSON) and a Jupyter notebook that loads and plots them. Unpack it and
+open the notebook next to the `.npz`.
+
 ### Spin probe
 
 Follows a spectral/spatial spin distribution through the sequence.
