@@ -182,9 +182,16 @@ Simulator {__version__}, prints the metrics and redraws the plots of the tab:
 
 1. the PSF image, normalised to its peak, with offsets in voxels from the source,
 2. the profiles through the peak along each encoding direction, with the ideal
-   PSF of flat k-space weighting dashed,
+   PSF (uniform k-space weighting) dashed,
 3. the k-space modulation (the transfer function),
 4. the spectral line (CSI) or the slice profile (2D), when they were computed.
+
+**Ideal PSF (uniform k-space weighting):** the same k-space samples and
+reconstruction, but every sample has the measured k-space-centre amplitude, so
+there is no relaxation, hyperpolarized depletion, T2* or gradient error along
+the k-space order. It is not a point: finite k-space coverage gives a sinc-like
+PSF (about 1.21 voxels FWHM for Cartesian). Broadening and peak efficiency are
+relative to it. For CSI, the ideal spectral line is that of an undamped FID.
 
 Keep the notebook next to `{data_file}`. Only NumPy and Matplotlib are needed.
 """,
@@ -222,9 +229,9 @@ def show(value, pattern="{:.3g}"):
     return "—" if value is None else pattern.format(value)
 
 
-print(f"Peak efficiency:       {show(meta['peak_efficiency'])}")
+print(f"Peak efficiency:       {show(meta['peak_efficiency'])} (peak / ideal peak, uniform k-space weighting)")
 print(f"Energy in own voxel:   {show(meta['voxel_energy_fraction'])}"
-      f" (ideal {show(meta['ideal_voxel_energy_fraction'])})")
+      f" (ideal, uniform k-space weighting: {show(meta['ideal_voxel_energy_fraction'])})")
 print()
 print(f"{'Direction':<24}{'FWHM [vox]':>12}{'Broadening':>12}{'Shift [vox]':>13}{'PSLR':>10}")
 for role in roles:
@@ -233,6 +240,7 @@ for role in roles:
         continue
     print(f"{labels[role]:<24}{show(m['fwhm_voxels']):>12}{show(m['broadening']):>12}"
           f"{show(m['peak_offset_voxels']):>13}{show(m['peak_sidelobe_ratio']):>10}")
+print("Broadening: FWHM / FWHM of the ideal PSF (uniform k-space weighting).")
 if meta["spectral_metrics"]:
     s = meta["spectral_metrics"]
     print()
@@ -305,9 +313,9 @@ for role in roles:
     line, = ax.plot(x, np.abs(data[f"profile_{role}"]) / scale, label=labels[role])
     ax.plot(x, np.abs(data[f"profile_ideal_{role}"]) / scale, "--",
             color=line.get_color(), linewidth=1)
-ax.plot([], [], "k--", linewidth=1, label="ideal")
+ax.plot([], [], "k--", linewidth=1, label="ideal (uniform k-space weighting)")
 ax.set_xlabel("Offset from the source [voxel]")
-ax.set_ylabel("|PSF| / ideal peak")
+ax.set_ylabel("|PSF| / ideal peak (uniform k-space weighting)")
 ax.set_ylim(bottom=0)
 ax.legend()
 plt.show()
@@ -363,9 +371,9 @@ if "spectral_line" in data.files:
     peak_line = np.abs(data["spectral_ideal_line"]).max() or 1.0
     ax.plot(frequency, np.abs(data["spectral_line"]) / peak_line, label="line")
     ax.plot(frequency, np.abs(data["spectral_ideal_line"]) / peak_line, "k--",
-            linewidth=1, label="ideal")
+            linewidth=1, label="ideal (undamped FID)")
     ax.set_xlabel("Frequency offset from the source [Hz]")
-    ax.set_ylabel("|line| / ideal peak")
+    ax.set_ylabel("|line| / ideal peak (undamped FID)")
     ax.legend()
     plt.show()
 

@@ -370,7 +370,7 @@ class PSFAnalysisView(QWidget):
         self.profile_plot = self._plot(
             "2 · Profiles through the peak",
             "Offset [voxel]",
-            "|PSF| / ideal peak",
+            "|PSF| / ideal peak (uniform k-space weighting)",
             "Solid: simulated PSF along each encoding direction through its "
             "peak. Dashed: ideal PSF with uniform k-space weighting. A wider "
             "main lobe is blurring; a shifted peak is a displacement.",
@@ -396,7 +396,7 @@ class PSFAnalysisView(QWidget):
         self.spectral_plot = self._plot(
             "5 · Spectral line (CSI)",
             "Frequency offset from the source [Hz]",
-            "|Spectrum| / ideal peak",
+            "|Spectrum| / ideal peak (undamped FID)",
             "Magnitude spectrum of the reconstructed CSI voxel at the source "
             "position. Dashed: the line of an undamped FID with the k-space "
             "centre amplitude, i.e. the spectral resolution limit. T2* widens "
@@ -418,9 +418,9 @@ class PSFAnalysisView(QWidget):
                 "Nominal [mm]",
                 "FWHM [mm]",
                 "FWHM / nominal",
-                "Broadening vs ideal",
+                "Broadening vs ideal (uniform k)",
                 "Peak shift [voxel]",
-                "Side lobe (ideal) [%]",
+                "Side lobe (ideal, uniform k) [%]",
             ]
         )
         self.metrics_table.verticalHeader().setVisible(False)
@@ -436,7 +436,8 @@ class PSFAnalysisView(QWidget):
         self.metrics_table.setToolTip(
             "Nominal: voxel size, or slice thickness for the slice row. "
             "Broadening: FWHM relative to the ideal PSF of the same matrix "
-            "or trajectory (about 1.21 voxels for Cartesian k-space). Peak shift: for the slice, in slice "
+            "or trajectory with uniform k-space weighting, i.e. without "
+            "relaxation, depletion or T2* along the k-space order (about 1.21 voxels for Cartesian k-space). Peak shift: for the slice, in slice "
             "thicknesses from the nominal centre. Side lobe: largest side lobe "
             "relative to the peak, with the ideal value in brackets."
         )
@@ -972,7 +973,12 @@ class PSFAnalysisView(QWidget):
                 np.abs(ideal) / scale,
                 pen=pg.mkPen(color, width=1, style=Qt.DashLine),
             )
-        plot.plot([], [], pen=pg.mkPen("#334155", style=Qt.DashLine), name="ideal")
+        plot.plot(
+            [],
+            [],
+            pen=pg.mkPen("#334155", style=Qt.DashLine),
+            name="ideal (uniform k-space weighting)",
+        )
         # The whole field of view is shown; |PSF| is never negative.
         extent = np.concatenate(
             [
@@ -1167,7 +1173,7 @@ class PSFAnalysisView(QWidget):
             offsets,
             np.abs(ideal) / scale,
             pen=pg.mkPen(SPECTRAL_COLOR, width=1, style=Qt.DashLine),
-            name="ideal",
+            name="ideal (undamped FID)",
         )
         plot.enableAutoRange()
         # The spectrum spans one bandwidth; |spectrum| is never negative.
@@ -1190,7 +1196,8 @@ class PSFAnalysisView(QWidget):
                 )
             )
         lines = [
-            f"Peak {psf.peak_efficiency:.3f} × the ideal PSF peak · "
+            f"Peak {psf.peak_efficiency:.3f} × the ideal PSF peak (uniform k-space "
+            "weighting) · "
             f"{100 * psf.voxel_energy_fraction:.1f} % of the PSF energy in the "
             f"source voxel (ideal {100 * psf.ideal_voxel_energy_fraction:.1f} %)."
         ]
