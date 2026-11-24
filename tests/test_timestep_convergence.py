@@ -167,3 +167,32 @@ def test_convergence_inputs_reject_invalid_tolerances_and_timesteps():
         run_timestep_convergence(program, probes, timesteps_s=(1e-6, 1e-6))
     with pytest.raises(ValueError, match="finite and positive"):
         run_timestep_convergence(program, probes, timesteps_s=(0.0,))
+
+
+def test_production_error_on_a_coarse_rf_raster_follows_the_timestep():
+    # Two 0.5 ms samples with a phase ramp: coarser than any useful step.
+    raster = 0.5e-3
+    program = SequenceProgram(
+        (RFEvent(0.0, 250.0 * np.exp(1j * np.array([0.0, 1.0])), raster),),
+        duration_s=2e-3,
+    )
+    probes = SpinProbeEnsemble.from_axes(
+        [[0.0, 0.0, 0.0]],
+        frequency_offsets_hz=[0.0, 100.0, 300.0],
+        b1_scales=[1.0],
+        relaxation_times_s=[(1e9, 1e9)],
+    )
+
+    result = run_timestep_convergence(
+        program,
+        probes,
+        timesteps_s=(None, 20e-6, 5e-6),
+        simulator=BlochSimulator(use_parallel=False, sequence_kernel="production"),
+    )
+
+    native, step_20, step_5 = (point.max_vector_error for point in result.points)
+    # The spin-major splitting error is set by the RF interval length: the
+    # step subdivides each sample, and the error falls with order two.
+    assert native > 1e-2
+    assert step_20 < 1e-3
+    assert step_5 < step_20 / 10

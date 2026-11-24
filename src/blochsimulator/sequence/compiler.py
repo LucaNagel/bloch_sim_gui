@@ -509,10 +509,19 @@ class SequenceCompiler:
 
     @staticmethod
     def _rf_step(event: RFEvent, simulation_timestep_s: float | None) -> float:
-        """Return the boundary step inside one RF event."""
+        """Return the boundary step inside one RF event.
+
+        A step at or above the RF raster is used as is. A finer step divides
+        every RF sample into equal parts no longer than the step, so sample
+        boundaries stay interval boundaries and the time step also bounds the
+        RF-active interval length of coarsely rastered pulses.
+        """
         if simulation_timestep_s is None:
             return event.raster_s
-        return max(event.raster_s, simulation_timestep_s)
+        if simulation_timestep_s >= event.raster_s:
+            return simulation_timestep_s
+        parts = int(np.ceil(event.raster_s / simulation_timestep_s * (1.0 - 1e-9)))
+        return event.raster_s / parts
 
     @staticmethod
     def _rf_local_grid(

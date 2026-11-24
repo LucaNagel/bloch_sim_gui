@@ -223,7 +223,13 @@ def test_skipped_statuses_name_the_dynamic_source():
     program = _slice_train(1)
     phantom = _phantom()
     native = estimate_dynamic_timestep_error(program, phantom, None, **OPTIONS)
-    identical = estimate_dynamic_timestep_error(program, phantom, 1e-6, **OPTIONS)
+    # RF samples longer than the step are divided, so only an RF-free
+    # program keeps the same discretization at the quarter step.
+    no_rf = SequenceProgram(
+        tuple(event for event in program.events if not isinstance(event, RFEvent)),
+        program.duration_s,
+    )
+    identical = estimate_dynamic_timestep_error(no_rf, phantom, 1e-6, **OPTIONS)
     coarse = estimate_dynamic_timestep_error(
         program, phantom, 20e-6, reference_timestep_s=40e-6, **OPTIONS
     )

@@ -25,7 +25,8 @@ def test_validator_executes_requested_subvoxel_sampling():
         assert candidate["metadata"]["n_simulated_spins"] == 32
         assert candidate["gate_passed"]
         assert candidate["metrics"]["checkpoint_pool_state"]["within_tolerance"]
-    assert report["timestep_refinement"]["compiled_grid_changed"] is False
+    # The half step divides the 20 us RF samples, so the grid is refined.
+    assert report["timestep_refinement"]["compiled_grid_changed"] is True
 
 
 @pytest.mark.parametrize("fault", ["pools", "final", "checkpoint", "nonfinite"])

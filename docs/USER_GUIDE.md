@@ -469,7 +469,8 @@ What actually drives runtime:
 - **Spins** = phantom voxels × subvoxel spins (× spectral components). The
   subvoxel grid of gradient-waveform spoiling multiplies everything.
 - **RF-active time step** (Settings → Simulation): coarser is faster but
-  changes RF accuracy.
+  changes RF accuracy. RF samples longer than the step are divided, so the
+  step also controls the accuracy of coarsely rastered pulses.
 - Number of ADC samples and intervals. The phantom's *spectral points* setting
   alone does not create extra Bloch states.
 - More threads do not scale linearly, especially for dynamic phantoms.

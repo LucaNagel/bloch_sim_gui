@@ -194,6 +194,19 @@ def test_compiler_uses_configured_rf_active_simulation_timestep():
     assert np.allclose(coarse.rf_hz, [3.0, 8.0])
 
 
+def test_compiler_divides_rf_samples_coarser_than_the_timestep():
+    rf = RFEvent(0.0, np.array([1.0, 2.0, 3.0]), 50e-6)
+    program = SequenceProgram((rf,), duration_s=150e-6)
+
+    compiled = SequenceCompiler().compile(program, simulation_timestep_s=20e-6)
+
+    # Each 50 µs sample splits into three equal parts of at most 20 µs, so
+    # sample boundaries remain interval boundaries.
+    assert compiled.n_intervals == 9
+    np.testing.assert_allclose(compiled.dt_s, np.full(9, 50e-6 / 3), rtol=1e-12)
+    np.testing.assert_allclose(compiled.rf_hz, np.repeat([1.0, 2.0, 3.0], 3))
+
+
 def _repeated_slice_selective_program(count=6, *, rf_raster=1e-6, step=1e-5):
     # Pulse starts are not representable in binary, so absolute boundaries of
     # the repetitions carry different rounding.

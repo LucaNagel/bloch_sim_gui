@@ -210,7 +210,12 @@ def test_untruncated_program_keeps_everything_but_adc():
 
 def test_skipped_statuses_are_json_safe():
     native = estimate_timestep_error(_block_program(), None)
-    identical = estimate_timestep_error(_block_program(), 1e-6)
+    # Without RF both steps compile alike; with RF a quarter step now always
+    # subdivides the samples.
+    no_rf = SequenceProgram(
+        (GradientEvent("z", 0.0, np.full(10, 4.0e4), 10e-6),), duration_s=2e-4
+    )
+    identical = estimate_timestep_error(no_rf, 1e-6)
     coarse = estimate_timestep_error(
         _block_program(), 20e-6, reference_timestep_s=40e-6
     )

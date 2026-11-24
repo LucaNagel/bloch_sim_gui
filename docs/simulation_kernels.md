@@ -107,8 +107,7 @@ new default `production`.
 
 The production result is Float64-close to the legacy kernel, not
 bit-identical: the difference is a time-step error (about `5e-4` relative at
-20 µs with a 1 µs RF raster, `8e-6` at 1 µs). It shrinks only where the RF
-raster is finer than the step, because constant RF samples are not subdivided.
+20 µs with a 1 µs RF raster, `8e-6` at 1 µs).
 `progress_callback(done, total)` counts plan intervals summed over passes
 instead of voxels, `chunk_voxels` is ignored, and `metadata["progress_unit"]`
 is `"intervals"`; `metadata["static_spin_major"]` is `True`. Cases the
@@ -123,10 +122,18 @@ kept for tests.
 Against the gold reference (`sequence/reference.py`, 24 probes on a
 phase-cycled sinc slice train, 1 µs RF raster) production is second order and
 about half as wrong as the legacy kernel: `2.9e-3` at 20 µs, `1.7e-4` at
-5 µs (legacy `5.9e-3`, `3.5e-4`). At or below the RF raster both stop
-changing: the legacy kernel keeps a first-order relaxation error (exact
-without relaxation), the spin-major path a smaller splitting error
-(`5e-7` with or without relaxation). `run_timestep_convergence` and
+5 µs (legacy `5.9e-3`, `3.5e-4`).
+
+The RF-active time step bounds every RF interval. A step finer than the RF
+raster divides each RF sample into equal parts no longer than the step, so
+sample boundaries remain interval boundaries. This matters for production:
+its splitting error depends on the interval length, not on the raster, so a
+coarsely rastered pulse (for example a 2 ms sinc with 64 samples, 31 µs)
+converges with the step (`3.6e-4` at 20 µs, `2.9e-5` at 5 µs) instead of
+keeping a raster-limited error (`1.4e-3`) that the time-step check could not
+see. The legacy kernel rotates a constant sample exactly without relaxation,
+so subdividing changes its results only by rounding and a smaller relaxation
+error. `run_timestep_convergence` and
 `estimate_timestep_error` use the simulator's kernel, so the time-step check
 measures the kernel that produces the result.
 
