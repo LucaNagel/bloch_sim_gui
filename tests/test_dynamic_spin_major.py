@@ -93,7 +93,8 @@ def _run(phantom, program, kernel="native_serial", **kwargs):
     )
 
 
-def _assert_close(actual, expected, tolerance=1e-12):
+def _assert_close(actual, expected, tolerance=1e-10):
+    # Different summation order: x86 CI and Apple M3 differ by a few 1e-12.
     for name in OUTPUTS:
         np.testing.assert_allclose(
             getattr(actual, name),

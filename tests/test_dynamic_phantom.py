@@ -34,6 +34,10 @@ from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationThrea
 from blochsimulator.ui.volume_viewer import PhantomInspectorWidget
 from blochsimulator.units import ppm_to_hz
 
+# The spin-major executor sums in a different order; x86 CI (no FMA, other
+# libm) and Apple M3 then differ by a few 1e-12 after many steps.
+SPIN_MAJOR_TOLERANCE = 1e-10
+
 
 def _dynamic_phantom(kpl=(0.0, 0.1)):
     shape = (2, 1, 1)
@@ -850,8 +854,8 @@ def test_native_serial_dynamic_pilot_is_bitwise_equal(kpl):
         np.testing.assert_allclose(
             getattr(spin_major, name),
             getattr(reference, name),
-            rtol=1e-12,
-            atol=1e-12,
+            rtol=SPIN_MAJOR_TOLERANCE,
+            atol=SPIN_MAJOR_TOLERANCE,
             err_msg=name,
         )
 
@@ -1203,8 +1207,8 @@ def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
         np.testing.assert_allclose(
             getattr(spin_major, name),
             getattr(reference, name),
-            rtol=1e-12,
-            atol=1e-12,
+            rtol=SPIN_MAJOR_TOLERANCE,
+            atol=SPIN_MAJOR_TOLERANCE,
             err_msg=name,
         )
 
