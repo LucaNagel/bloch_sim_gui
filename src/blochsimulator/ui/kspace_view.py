@@ -40,6 +40,7 @@ from ..sequence.kspace_trajectory import (
     classify_readout,
 )
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
+from .plot_export import install_plot_context_export, make_export_button
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .theme import set_tone
 
@@ -366,7 +367,8 @@ class KSpaceView(QWidget):
         layout.addLayout(self._display_controls())
         layout.addLayout(self._animation_controls())
 
-        grid = QGridLayout()
+        self.plot_area = QWidget()
+        grid = QGridLayout(self.plot_area)
         grid.setContentsMargins(0, 0, 0, 0)
         self.kspace_plot = self._plot(
             "1 · k-space",
@@ -418,7 +420,8 @@ class KSpaceView(QWidget):
         grid.addWidget(self.sequence_plot, 0, 1)
         grid.addWidget(self.k_time_plot, 1, 1)
         grid.addWidget(self.psf_plot, 1, 0)
-        layout.addLayout(grid, 1)
+        layout.addWidget(self.plot_area, 1)
+        install_plot_context_export(self.plot_area)
 
         self.cursor_lines = []
         for plot in (self.sequence_plot, self.k_time_plot):
@@ -591,7 +594,29 @@ class KSpaceView(QWidget):
         self.compute_psf_button.clicked.connect(self._compute_psf_requested)
         self.compute_psf_button.hide()
         controls.addWidget(self.compute_psf_button)
+        self.export_button = make_export_button(
+            self,
+            lambda: self.plot_area,
+            "kspace_trajectory",
+            data_provider=self._export_data,
+            object_name="kspace_export_plot",
+        )
+        controls.addWidget(self.export_button)
         return controls
+
+    def _export_data(self):
+        """Trajectory and sampling PSF arrays for the CSV/NPZ plot export."""
+        data = {}
+        for prefix, trajectory in (("", self.kspace), ("ideal_", self.ideal_kspace)):
+            if trajectory is None:
+                continue
+            data[f"{prefix}adc_times_s"] = np.asarray(trajectory.adc_times_s)
+            data[f"{prefix}adc_k_cyc_per_m"] = np.asarray(trajectory.adc_k_cyc_per_m)
+            data[f"{prefix}adc_event_index"] = np.asarray(trajectory.adc_event_index)
+        if self.psf is not None:
+            data["sampling_psf"] = np.asarray(self.psf.image)
+            data["sampling_psf_fov_m"] = np.asarray(self.psf.fov_m, dtype=float)
+        return data
 
     def _animation_controls(self):
         controls = QHBoxLayout()

@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
 
 from ..sequence.spin_sampling import SpinSampling
 from ..sequence.spoiling import SpinGridRecommendation, pathway_grid_coherence
+from .plot_export import install_plot_context_export, make_export_button
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .theme import set_tone
 
@@ -110,6 +111,13 @@ class SpoilingAnalysisView(QWidget):
         )
         self.apply_button.clicked.connect(self.apply_recommendation_requested)
         controls.addWidget(self.apply_button)
+        self.export_button = make_export_button(
+            self,
+            lambda: self.plot_area,
+            "spoiling_analysis",
+            object_name="spoiling_export_plot",
+        )
+        controls.addWidget(self.export_button)
         layout.addLayout(controls)
 
         self.stack = QStackedWidget()
@@ -119,6 +127,7 @@ class SpoilingAnalysisView(QWidget):
         set_tone(self.empty_label, "muted")
         self.stack.addWidget(self.empty_label)
         plots = QWidget()
+        self.plot_area = plots
         grid = QGridLayout(plots)
         grid.setContentsMargins(0, 0, 0, 0)
         self.pathway_plot = self._plot(
@@ -165,6 +174,7 @@ class SpoilingAnalysisView(QWidget):
         grid.addWidget(self.error_plot, 1, 0)
         grid.addWidget(self.positions_plot, 1, 1)
         self.stack.addWidget(plots)
+        install_plot_context_export(plots)
         layout.addWidget(self.stack, 1)
         self.set_snapshot(None, "No spoiling analysis available yet.")
 

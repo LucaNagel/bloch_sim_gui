@@ -37,6 +37,7 @@ from ..sequence.psf import (
     psf_from_result,
     simulate_point_sources,
 )
+from .plot_export import install_plot_context_export, make_export_button
 from .plot_interaction import StaticPlotWidget
 from .theme import set_tone
 
@@ -321,9 +322,18 @@ class PSFAnalysisView(QWidget):
             self._gradient_error_changed
         )
         controls.addWidget(self.gradient_error_mode)
+        self.export_button = make_export_button(
+            self,
+            lambda: self.plot_area,
+            "psf_analysis",
+            data_provider=self._export_data,
+            object_name="psf_export_plot",
+        )
+        controls.addWidget(self.export_button)
         layout.addLayout(controls)
 
-        grid = QGridLayout()
+        self.plot_area = QWidget()
+        grid = QGridLayout(self.plot_area)
         grid.setContentsMargins(0, 0, 0, 0)
         self.image_plot = self._plot(
             "1 · PSF image",
@@ -382,7 +392,8 @@ class PSFAnalysisView(QWidget):
         grid.addWidget(self.modulation_plot, 1, 0)
         grid.addWidget(self.slice_plot, 1, 1)
         grid.addWidget(self.spectral_plot, 2, 0, 1, 2)
-        layout.addLayout(grid, 1)
+        layout.addWidget(self.plot_area, 1)
+        install_plot_context_export(self.plot_area)
 
         self.metrics_table = QTableWidget(0, 7)
         self.metrics_table.setHorizontalHeaderLabels(
@@ -717,6 +728,24 @@ class PSFAnalysisView(QWidget):
             return
         self.psf = self._psf_for(self.psf.frame)
         self._display_changed()
+
+    def _export_data(self):
+        """Arrays of the shown PSF for the CSV/NPZ plot export."""
+        psf = self.psf
+        if psf is None:
+            return {}
+        data = {
+            "psf": np.asarray(psf.psf),
+            "ideal_psf": np.asarray(psf.ideal_psf),
+            "modulation": np.asarray(psf.modulation),
+            "voxel_size_m": np.asarray(psf.voxel_size_m, dtype=float),
+            "roles": np.asarray([str(role) for role in psf.roles]),
+        }
+        for role, offsets in zip(psf.roles, psf.offsets_m):
+            data[f"offsets_m_{role}"] = np.asarray(offsets)
+        for role, k in zip(psf.roles, psf.k_cyc_per_m):
+            data[f"k_cyc_per_m_{role}"] = np.asarray(k)
+        return data
 
     def _display_changed(self, *_):
         self._dirty = True

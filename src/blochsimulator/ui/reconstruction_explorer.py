@@ -40,6 +40,7 @@ from PyQt5.QtWidgets import (
 from ..sequence.reconstruction import SequenceReconstructionModel
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .colormaps import COLORMAP_NAMES, colormap
+from .plot_export import make_export_button
 from .reconstruction_phantom import (
     VOLUME_PLANES,
     contour_segments,
@@ -1016,6 +1017,14 @@ class SequenceReconstructionExplorer(QWidget):
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_current_view)
         controls_layout.addWidget(self.export_button)
+        self.export_plot_button = make_export_button(
+            self,
+            lambda: self.pages.currentWidget(),
+            "reconstruction_explorer",
+            data_provider=self._export_plot_data,
+            object_name="reconstruction_export_plot",
+        )
+        controls_layout.addWidget(self.export_plot_button)
         controls_layout.addStretch(1)
 
         self.controls_scroll = QScrollArea()
@@ -3176,6 +3185,12 @@ class SequenceReconstructionExplorer(QWidget):
                 viewer.tabs.setCurrentIndex(
                     int(np.clip(index, 0, viewer.tabs.count() - 1))
                 )
+
+    def _export_plot_data(self):
+        """The shown reconstruction array for the CSV/NPZ plot export."""
+        if self._current_display is None:
+            return {}
+        return {"current_view": np.asarray(self._current_display)}
 
     def _export_current_view(self):
         if self._current_display is None:
