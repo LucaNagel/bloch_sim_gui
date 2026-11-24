@@ -38,11 +38,21 @@ from blochsimulator.sequence import (
 )
 from blochsimulator.spectral_phantom import SpectralPhantom
 
+try:
+    from .synthetic_phantoms import make_synthetic_phantom
+except ImportError:  # run as a script from the benchmarks folder
+    from synthetic_phantoms import make_synthetic_phantom  # type: ignore
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+SYNTHETIC_PHANTOM_PREFIX = "synthetic:"
+# The default phantoms are the analytic two-container phantoms of
+# ``synthetic_phantoms``, rasterized on DEFAULT_SYNTHETIC_PHANTOM_SHAPE, so the
+# benchmarks need no phantom files. Other phantoms are passed as .npz paths.
+DEFAULT_SYNTHETIC_PHANTOM_SHAPE = (42, 56, 8)
 DEFAULT_PHANTOMS = {
-    "static": REPOSITORY_ROOT / "phantoms" / "Pyruvate Lactate 2 containers static.npz",
-    "dynamic": REPOSITORY_ROOT / "phantoms" / "Pyruvate to lactate with inflow 2.npz",
+    "static": Path(f"{SYNTHETIC_PHANTOM_PREFIX}static"),
+    "dynamic": Path(f"{SYNTHETIC_PHANTOM_PREFIX}dynamic"),
 }
 SEQUENCE_NAMES = ("ss_bssfp", "bssfp", "me_bssfp", "flash", "csi")
 PROFILE_NAMES = ("quick", "full")
@@ -146,8 +156,9 @@ def resolve_phantom_paths(values: Sequence[str]) -> list[tuple[str, Path]]:
     for value in values:
         alias = str(value).strip().lower()
         path = DEFAULT_PHANTOMS.get(alias, Path(value).expanduser())
-        path = path.resolve()
-        if not path.is_file():
+        if not _is_synthetic(path):
+            path = path.resolve()
+        if not _is_synthetic(path) and not path.is_file():
             raise FileNotFoundError(f"phantom not found: {path}")
         base_label = alias if alias in DEFAULT_PHANTOMS else _slug(path.stem)
         label = base_label
@@ -160,8 +171,19 @@ def resolve_phantom_paths(values: Sequence[str]) -> list[tuple[str, Path]]:
     return resolved
 
 
+def _is_synthetic(path) -> bool:
+    return str(path).startswith(SYNTHETIC_PHANTOM_PREFIX)
+
+
 def load_phantom(path: Path):
-    """Load a dynamic, spectral, or conventional phantom without GUI imports."""
+    """Load a dynamic, spectral, or conventional phantom without GUI imports.
+
+    ``synthetic:static`` and ``synthetic:dynamic`` build the analytic
+    two-container phantom on DEFAULT_SYNTHETIC_PHANTOM_SHAPE.
+    """
+    if _is_synthetic(path):
+        kind = str(path)[len(SYNTHETIC_PHANTOM_PREFIX) :]
+        return make_synthetic_phantom(kind, DEFAULT_SYNTHETIC_PHANTOM_SHAPE)
     try:
         return DynamicSpectralPhantom.load(path)
     except ValueError:

@@ -48,6 +48,7 @@ from time import perf_counter
 import numpy as np
 
 from blochsimulator.sequence import (
+    ScannerParameters,
     make_pulseq_bssfp,
     make_pulseq_csi,
     make_pulseq_flash,
@@ -116,6 +117,12 @@ OVERSAMPLING_SEQUENCES = {
         "matrix": (8, 8, 8),
     },
 }
+
+
+# The preclinical default scanner profile (400 mT/m, 3000 T/m/s). The builders'
+# legacy 32 mT/m limit is too low for C13: the read gradient of a 20 kHz,
+# 32 mm FLASH alone needs 58.4 mT/m.
+BENCHMARK_SCANNER = ScannerParameters()
 
 
 def add_oversampling_arguments(parser: argparse.ArgumentParser) -> None:
@@ -188,6 +195,7 @@ def build_oversampling_sequence(name: str, *, dynamic_frames: int = 1):
             repetitions=dynamic_frames,
             acquisition_interval_s=1.0 if dynamic_frames > 1 else None,
             nucleus="C13",
+            scanner_parameters=BENCHMARK_SCANNER,
         )
     if name == "csi":
         return make_pulseq_csi(

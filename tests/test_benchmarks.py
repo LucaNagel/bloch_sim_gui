@@ -191,7 +191,11 @@ def test_resolution_slice_retains_supplied_phantom_model(alias, expected_type):
             phantom.pyruvate_inflow.rate_curve_s_inv
             == source.pyruvate_inflow.rate_curve_s_inv
         )
-        assert phantom.kpl_map_s_inv == pytest.approx(0.1)
+        # Conservative resampling keeps the in-plane mean of the kPL map.
+        assert np.mean(phantom.kpl_map_s_inv) == pytest.approx(
+            np.mean(source.kpl_map_s_inv[:, :, slice_index])
+        )
+        assert np.max(phantom.kpl_map_s_inv) <= np.max(source.kpl_map_s_inv) + 1e-12
 
 
 @pytest.mark.parametrize(

@@ -50,6 +50,7 @@ from time import perf_counter
 import numpy as np
 
 from blochsimulator.sequence import (
+    ScannerParameters,
     design_metabolite_selective_pulse,
     load_pulseq,
     make_pulseq_bssfp,
@@ -112,6 +113,12 @@ TIMESTEP_SEQUENCES = {
     "ss_bssfp": "3D spectrally selective bSSFP, Gaussian lactate/pyruvate pulses",
     "csi": "2D FID-CSI, 3 ms slice-selective sinc pulse",
 }
+
+
+# The preclinical default scanner profile (400 mT/m, 3000 T/m/s). The builders'
+# legacy 32 mT/m limit is too low for C13: the read gradient of a 20 kHz,
+# 32 mm FLASH alone needs 58.4 mT/m.
+BENCHMARK_SCANNER = ScannerParameters()
 
 
 def add_timestep_arguments(parser: argparse.ArgumentParser) -> None:
@@ -234,6 +241,7 @@ def build_timestep_sequence(name: str, phantom):
         slice_thickness_m=SLICE_THICKNESS_M,
         spoiler_cycles_per_slice=1.0,
         nucleus=nucleus,
+        scanner_parameters=BENCHMARK_SCANNER,
     )
     if name == "flash_block":
         return make_pulseq_flash(rf_pulse_type="block", rf_duration_s=0.5e-3, **flash)

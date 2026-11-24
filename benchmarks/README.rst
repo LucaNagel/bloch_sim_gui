@@ -2,11 +2,16 @@ Bloch-simulator benchmarks
 ==========================
 
 The benchmark runner generates representative Pulseq sequences, loads the
-selected phantom files, measures wall-clock simulation time, and saves both
-CSV and JSON results. The default aliases point to:
+selected phantoms, measures wall-clock simulation time, and saves both CSV
+and JSON results. The default aliases build the analytic two-container C13
+phantom of ``synthetic_phantoms.py`` on a 42×56×8 grid, so no phantom files are
+needed:
 
-* ``static``: ``phantoms/Pyruvate Lactate 2 containers static.npz``
-* ``dynamic``: ``phantoms/Pyruvate to lactate with inflow 2.npz``
+* ``static``: pyruvate in one container, pyruvate and lactate in the other
+* ``dynamic``: pyruvate inflow with pyruvate-to-lactate exchange
+  (kPL 0.05 and 0.15 1/s)
+
+Any other ``--phantoms`` value is read as the path of a saved ``.npz`` phantom.
 
 What the benchmarks are for
 ---------------------------
