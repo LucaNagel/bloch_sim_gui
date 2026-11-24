@@ -161,3 +161,26 @@ def test_fast_readouts_keep_the_adc_centred_on_a_raster_plateau(builder, bandwid
         assert block.adc.delay >= read.delay + read.rise_time - 1e-12
         checked += 1
     assert checked
+
+
+@pytest.mark.parametrize("error", [AssertionError, ValueError])
+def test_lobe_duration_steps_past_either_pulseq_rounding_error(error):
+    # Pulseq builds differ in how they reject a duration a hair below their
+    # own minimum (assert on macOS wheels, ValueError seen on Linux CI).
+    from types import SimpleNamespace
+
+    from blochsimulator.sequence.pulseq_builders import _fitting_trapezoid_duration
+
+    calls = []
+
+    def make_trapezoid(channel, *, area, duration, system):
+        calls.append(duration)
+        if duration < 2.52e-3 + 1e-9:
+            raise error("Requested area is too large for this gradient.")
+
+    pp = SimpleNamespace(make_trapezoid=make_trapezoid)
+    system = SimpleNamespace(grad_raster_time=10e-6)
+    assert _fitting_trapezoid_duration(pp, system, 1.0, 2.52e-3) == pytest.approx(
+        2.53e-3
+    )
+    assert len(calls) == 2

@@ -443,9 +443,14 @@ def _feasible_role_trapezoid(
         encoding_frame,
         role,
         area=area,
-        duration=_ceil_to_raster(
-            max(float(minimum_duration_s), float(pp.calc_duration(shortest))),
-            system.grad_raster_time,
+        duration=_fitting_trapezoid_duration(
+            pp,
+            system,
+            area,
+            _ceil_to_raster(
+                max(float(minimum_duration_s), float(pp.calc_duration(shortest))),
+                system.grad_raster_time,
+            ),
         ),
         system=system,
     )
@@ -865,12 +870,22 @@ def _shortest_common_lobe_duration(
     # one more raster step then fits every lobe.
     for area in areas:
         if abs(float(area)) > 0:
-            try:
-                pp.make_trapezoid(
-                    "x", area=float(area), duration=duration, system=system
-                )
-            except AssertionError:
-                duration += float(system.grad_raster_time)
+            duration = _fitting_trapezoid_duration(pp, system, area, duration)
+    return duration
+
+
+def _fitting_trapezoid_duration(pp, system, area: float, duration: float) -> float:
+    """Return ``duration`` or the next raster step that fits ``area``.
+
+    Depending on the pypulseq build and platform, a too short duration is
+    reported as an ``AssertionError`` or a ``ValueError``.
+    """
+    for _ in range(3):
+        try:
+            pp.make_trapezoid("x", area=float(area), duration=duration, system=system)
+            return duration
+        except (AssertionError, ValueError):
+            duration += float(system.grad_raster_time)
     return duration
 
 
