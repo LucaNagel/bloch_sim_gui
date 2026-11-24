@@ -64,6 +64,8 @@ NOMINAL_FILL = (21, 128, 61, 28)
 PLOT_MINIMUM_HEIGHT = 340
 # Floor of the dB image, relative to the ideal peak.
 IMAGE_FLOOR_DB = -60.0
+IMAGE_VIEWS = {"PSF image": "psf", "k-space weights": "weights"}
+
 PLANES = {
     "Read × phase": ("phase", "read"),
     "Read × partition": ("partition", "read"),
@@ -295,16 +297,28 @@ class PSFAnalysisView(QWidget):
         self.frame_selector.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.frame_selector.currentIndexChanged.connect(self._frame_changed)
         controls.addWidget(self.frame_selector)
+        self.image_view = QComboBox()
+        self.image_view.addItems(list(IMAGE_VIEWS))
+        self.image_view.setObjectName("psf_image_view")
+        self.image_view.setToolTip(
+            "Plot 1 shows the PSF image or the sampled k-space weights "
+            "(the k-space modulation relative to the k-space centre)"
+        )
+        self.image_view.currentIndexChanged.connect(self._display_changed)
+        controls.addWidget(self.image_view)
         controls.addWidget(QLabel("Plane"))
         self.plane_selector = QComboBox()
         self.plane_selector.addItems(list(PLANES))
-        self.plane_selector.setToolTip("Plane of a 3D PSF shown in plot 1")
+        self.plane_selector.setToolTip(
+            "Plane of a 3D result shown in plot 1 (through the PSF peak or "
+            "the k-space centre)"
+        )
         self.plane_selector.currentIndexChanged.connect(self._display_changed)
         controls.addWidget(self.plane_selector)
         self.image_scale = QComboBox()
         self.image_scale.addItems(["Linear", "dB"])
         self.image_scale.setToolTip(
-            "Colour scale of the PSF image, normalised to the peak of the "
+            "Colour scale of plot 1, normalised to the peak of the "
             "shown plane so the colours span the full range; dB shows side "
             f"lobes down to {IMAGE_FLOOR_DB:g} dB of that peak"
         )
@@ -312,7 +326,10 @@ class PSFAnalysisView(QWidget):
         controls.addWidget(self.image_scale)
         self.modulation_part = QComboBox()
         self.modulation_part.addItems(["Magnitude", "Phase"])
-        self.modulation_part.setToolTip("Part of the k-space modulation in plot 3")
+        self.modulation_part.setToolTip(
+            "Part of the k-space modulation in plot 3 and of the k-space "
+            "weights in plot 1"
+        )
         self.modulation_part.currentIndexChanged.connect(self._display_changed)
         controls.addWidget(self.modulation_part)
         self.gradient_error_mode = QComboBox()
@@ -358,7 +375,8 @@ class PSFAnalysisView(QWidget):
             "Magnitude of the reconstructed point source, relative to the peak "
             "of the ideal PSF (uniform k-space weighting). The axes are the "
             "displacement from the source in voxels over the whole field of "
-            "view. For 3D, the plane passes through the peak.",
+            "view. For 3D, the plane passes through the peak. Switch to "
+            "k-space weights to see the sampled k-space relative to its centre.",
             legend=False,
         )
         self.image_plot.setAspectLocked(True)
@@ -367,6 +385,9 @@ class PSFAnalysisView(QWidget):
             pg.colormap.get("viridis").getLookupTable(nPts=256)
         )
         self.image_plot.addItem(self.image_item)
+        # Spiral k-space weights have no grid; they are drawn as samples.
+        self.weight_scatter = pg.ScatterPlotItem(size=6, pen=None)
+        self.image_plot.addItem(self.weight_scatter)
         self.profile_plot = self._plot(
             "2 · Profiles through the peak",
             "Offset [voxel]",
@@ -679,6 +700,7 @@ class PSFAnalysisView(QWidget):
             enabled and psf is not None and len(psf.roles) == 3
         )
         self.image_scale.setEnabled(enabled)
+        self.image_view.setEnabled(enabled)
         self.modulation_part.setEnabled(enabled)
         self.gradient_error_mode.setEnabled(enabled)
         self.save_results_button.setEnabled(enabled and psf is not None)
@@ -713,6 +735,7 @@ class PSFAnalysisView(QWidget):
                 role_labels=[_role_label(role, frame) for role in psf.roles],
                 settings={
                     "image_scale": self.image_scale.currentText(),
+                    "image_view": self.image_view.currentText(),
                     "gradient_errors": self.gradient_error_mode.currentText(),
                     "stale": bool(self._stale()),
                 },
@@ -846,6 +869,7 @@ class PSFAnalysisView(QWidget):
         )
         if psf is None:
             self.image_item.clear()
+            self.weight_scatter.clear()
             self.title_label.setText("PSF analysis")
             self.metrics_summary.setText("Choose a point source and click Compute PSF.")
             return
@@ -904,12 +928,23 @@ class PSFAnalysisView(QWidget):
         )
         set_tone(self.summary_label, "ok")
 
-    def _render_image(self, psf):
+    def _image_roles(self, psf):
         roles = psf.roles
         if len(roles) == 3:
             row_role, column_role = PLANES[self.plane_selector.currentText()]
         else:
             row_role, column_role = roles
+        return row_role, column_role
+
+    def _render_image(self, psf):
+        if IMAGE_VIEWS[self.image_view.currentText()] == "weights":
+            self._render_weights(psf)
+            return
+        self.image_plot.setTitle("1 · PSF image", color="#0f172a")
+        self.weight_scatter.clear()
+        self.image_item.setVisible(True)
+        roles = psf.roles
+        row_role, column_role = self._image_roles(psf)
         row_axis, column_axis = roles.index(row_role), roles.index(column_role)
         magnitude = np.abs(psf.psf)
         if magnitude.ndim == 3:
@@ -952,6 +987,90 @@ class PSFAnalysisView(QWidget):
             "left", f"{_role_label(row_role, frame)} offset [voxel]"
         )
         # The whole field of view; the profiles zoom in on the main lobe.
+        self.image_plot.getViewBox().setRange(rect=rect, padding=0.0)
+
+    def _weight_values(self, weights):
+        """Colour values and levels of k-space weights for plot 1."""
+        if self.modulation_part.currentText() == "Phase":
+            return np.degrees(np.angle(weights)), (-180.0, 180.0)
+        magnitude = np.abs(weights)
+        top = float(np.nanmax(magnitude)) if magnitude.size else 0.0
+        if self.image_scale.currentText() == "dB":
+            values = 20.0 * np.log10(np.maximum(magnitude / (top or 1.0), 1e-12))
+            return np.maximum(values, IMAGE_FLOOR_DB), (IMAGE_FLOOR_DB, 0.0)
+        return magnitude, (0.0, max(top, 1e-12))
+
+    def _render_weights(self, psf):
+        """Show the k-space modulation relative to the k-space centre."""
+        phase = self.modulation_part.currentText() == "Phase"
+        self.image_plot.setTitle(
+            "1 · k-space weights" + (" (phase [°])" if phase else ""),
+            color="#0f172a",
+        )
+        row_role, column_role = self._image_roles(psf)
+        frame = psf.encoding_frame
+        self.image_plot.setLabel("bottom", f"{_role_label(column_role, frame)} k [Δk]")
+        self.image_plot.setLabel("left", f"{_role_label(row_role, frame)} k [Δk]")
+        row_axis = psf.roles.index(row_role)
+        column_axis = psf.roles.index(column_role)
+        if psf.kind == "spiral":
+            self.image_item.clear()
+            self.image_item.setVisible(False)
+            _, weights = self._spiral_modulation(psf)
+            fov = [
+                offsets.size * (offsets[1] - offsets[0]) if offsets.size > 1 else 1.0
+                for offsets in psf.offsets_m
+            ]
+            x = np.asarray(psf.k_cyc_per_m[column_axis]) * fov[column_axis]
+            y = np.asarray(psf.k_cyc_per_m[row_axis]) * fov[row_axis]
+            values, levels = self._weight_values(weights)
+            span = (levels[1] - levels[0]) or 1.0
+            colormap = pg.colormap.get("viridis")
+            brushes = [
+                pg.mkBrush(colormap.map(float(np.clip((v - levels[0]) / span, 0, 1))))
+                for v in np.nan_to_num(values)
+            ]
+            self.weight_scatter.setData(x=x, y=y, brush=brushes)
+            half = float(max(np.abs(x).max(initial=0.5), np.abs(y).max(initial=0.5)))
+            self.image_plot.getViewBox().setRange(
+                xRange=(-half - 0.5, half + 0.5),
+                yRange=(-half - 0.5, half + 0.5),
+                padding=0.0,
+            )
+            return
+        self.weight_scatter.clear()
+        self.image_item.setVisible(True)
+        modulation = np.asarray(psf.modulation)
+        centre = tuple(int(np.argmin(np.abs(k))) for k in psf.k_cyc_per_m)
+        reference = modulation[centre]
+        weights = modulation / (reference if reference != 0 else 1.0)
+        if weights.ndim == 3:
+            index = [slice(None)] * 3
+            (other,) = {0, 1, 2} - {row_axis, column_axis}
+            index[other] = centre[other]
+            weights = weights[tuple(index)]
+            if row_axis > column_axis:
+                weights = weights.T
+        k_rows = np.asarray(psf.k_cyc_per_m[row_axis], dtype=float)
+        k_columns = np.asarray(psf.k_cyc_per_m[column_axis], dtype=float)
+        row_order, column_order = np.argsort(k_rows), np.argsort(k_columns)
+        weights = weights[np.ix_(row_order, column_order)]
+
+        def in_steps(k):
+            step = np.median(np.abs(np.diff(k))) if k.size > 1 else 1.0
+            return k / (step or 1.0)
+
+        rows = in_steps(k_rows[row_order])
+        columns = in_steps(k_columns[column_order])
+        values, levels = self._weight_values(weights)
+        self.image_item.setImage(np.nan_to_num(values), levels=levels, autoLevels=False)
+        rect = QRectF(
+            float(columns[0]) - 0.5,
+            float(rows[0]) - 0.5,
+            float(columns[-1] - columns[0]) + 1.0,
+            float(rows[-1] - rows[0]) + 1.0,
+        )
+        self.image_item.setRect(rect)
         self.image_plot.getViewBox().setRange(rect=rect, padding=0.0)
 
     def _render_profiles(self, psf):

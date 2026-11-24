@@ -358,6 +358,10 @@ reports PSF FWHM, broadening, peak shift, side lobes and, for 2D, the slice
 profile and cross-talk. It includes relaxation and hyperpolarized depletion
 along the k-space order, so it shows the *effective* resolution. Cartesian 2D,
 EPI and 3D are supported. Results are marked stale when the sequence changes.
+Plot 1 switches between the *PSF image* and the *k-space weights*: the sampled
+k-space relative to its centre (magnitude or phase, following the k-space
+part selector; spiral samples are drawn as points). Uniform weights give the
+ideal PSF; decay towards the k-space edges is what broadens it.
 
 **Save results…** writes a `.zip` with the PSF data (`.npz`: PSF, ideal PSF,
 k-space modulation, axis profiles, slice profile/spectral line when present,

@@ -187,6 +187,45 @@ def test_psf_view_saves_results_with_notebook(qt_application, tmp_path):
     assert "Saved flash psf.zip" in view.status_label.text()
 
 
+def test_psf_view_switches_plot_1_to_kspace_weights(qt_application, tmp_path):
+    programs = {
+        "flash": (_flash(tmp_path), (4, 8)),
+        "bssfp": (_bssfp_3d(tmp_path), (4, 8)),
+        "csi": (_csi(tmp_path), (4, 4)),
+        "spiral": (_spiral(tmp_path), None),
+    }
+    for name, (program, shape) in programs.items():
+        view, _ = _view(program)
+        view.position_mm[0].setValue(2.0)
+        view.show()
+        _compute(view)
+        view.image_view.setCurrentText("k-space weights")
+        QApplication.processEvents()
+        title = view.image_plot.getPlotItem().titleLabel.text
+        assert "k-space weights" in title, name
+        if shape is None:
+            assert not view.image_item.isVisible()
+            points = view.weight_scatter.data
+            assert len(points) == view.psf.modulation.size
+        else:
+            image = view.image_item.image
+            assert image.shape == shape, name
+            # Weights are relative to the k-space centre.
+            centre = tuple(n // 2 for n in shape)
+            assert image[centre] == pytest.approx(1.0, rel=1e-6), name
+            assert view.image_item.levels[0] == 0.0
+        view.modulation_part.setCurrentText("Phase")
+        QApplication.processEvents()
+        if shape is not None:
+            assert view.image_item.levels == pytest.approx((-180.0, 180.0))
+        view.image_view.setCurrentText("PSF image")
+        QApplication.processEvents()
+        assert view.image_item.isVisible()
+        assert len(view.weight_scatter.data) == 0
+        assert "PSF image" in view.image_plot.getPlotItem().titleLabel.text
+        view.close()
+
+
 def test_psf_view_shows_3d_planes_without_slice_sweep(qt_application, tmp_path):
     view, _ = _view(_bssfp_3d(tmp_path))
     view.show()
