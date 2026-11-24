@@ -1152,3 +1152,43 @@ def test_radial_me_bssfp_centres_the_realised_echo_train(tmp_path):
     assert echo_spacing != pytest.approx(2.0049e-3, abs=1e-7)
     np.testing.assert_allclose(np.diff(echo_times), echo_spacing, atol=1e-7)
     assert echo_times[echoes // 2] == pytest.approx(repetition_time / 2, abs=5e-6)
+
+
+def test_ss_bssfp_tr_error_names_the_limiting_scanner_slew_rate():
+    """A slow 13C gradient profile explains why the default TR fails."""
+    scanner = {"max_grad_mtm": 500.0, "max_slew_tms": 720.0}
+    with pytest.raises(ValueError) as error:
+        make_pulseq_spectral_selective_bssfp(
+            nucleus="C13",
+            field_strength_t=7.0,
+            spectral_rf_pulse_type="SLR",
+            repetitions=1,
+            scanner_parameters=scanner,
+        )
+    message = str(error.value)
+    assert "the minimum is 6.590 ms" in message
+    assert "scanner slew rate (500 mT/m, 720 T/m/s for C13)" in message
+    assert "read, phase and partition moments" in message
+    needed = float(message.split("needs roughly ")[1].split(" T/m/s")[0])
+    assert 720.0 < needed < 3000.0
+
+    # The suggested slew rate is enough for the requested TR.
+    sequence = make_pulseq_spectral_selective_bssfp(
+        nucleus="C13",
+        field_strength_t=7.0,
+        spectral_rf_pulse_type="SLR",
+        repetitions=1,
+        scanner_parameters={**scanner, "max_slew_tms": needed},
+    )
+    assert sequence.definitions["TR"] == pytest.approx(6.29e-3)
+
+
+def test_ss_bssfp_tr_error_points_at_a_too_long_requested_encoding_lobe():
+    with pytest.raises(ValueError, match="encoding lobe is set to 0.500 ms"):
+        make_pulseq_spectral_selective_bssfp(
+            nucleus="C13",
+            field_strength_t=7.0,
+            spectral_rf_pulse_type="SLR",
+            repetitions=1,
+            encoding_duration_s=0.5e-3,
+        )
