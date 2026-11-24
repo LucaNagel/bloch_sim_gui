@@ -23,6 +23,9 @@ two methods:
     is not truncated as in the original ``TWOPI`` constant.  Exchange and
     sources are not part of that model and are rejected.
 
+The exact method also tracks concentrations, washout and contrast-agent
+relaxation-rate increments; see :func:`simulate_reference_sequence`.
+
 ``steady_state=True`` corresponds to Hargreaves' mode 3: the start state is the
 fixed point of the affine map of the whole program, and the transient is then
 recorded from it.
@@ -71,7 +74,9 @@ class ReferenceSimulationResult:
     pool, xyz)``.  ADC states are not receiver-weighted or demodulated;
     retaining the individual spin states avoids cancellation hiding a local
     integration error.  ``initial_magnetization`` is the start state, which is
-    the steady state when ``steady_state=True`` was requested.
+    the steady state when ``steady_state=True`` was requested.  The
+    concentration arrays have shape ``(observation, spin, pool)`` (final:
+    ``(spin, pool)``) and are ``None`` unless concentration was tracked.
     """
 
     final_magnetization: np.ndarray
@@ -82,6 +87,9 @@ class ReferenceSimulationResult:
     interval_count: int
     initial_magnetization: np.ndarray | None = None
     method: str = "exact"
+    final_concentration: np.ndarray | None = None
+    adc_concentration: np.ndarray | None = None
+    checkpoint_concentration: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -91,6 +99,9 @@ class ReferenceSimulationResult:
             "checkpoint_times_s",
             "checkpoint_magnetization",
             "initial_magnetization",
+            "final_concentration",
+            "adc_concentration",
+            "checkpoint_concentration",
         ):
             value = getattr(self, name)
             if value is None:
@@ -114,7 +125,11 @@ def simulate_reference_sequence(
     pools: Sequence[ReferencePool] | None = None,
     exchange_rates_per_s=None,
     longitudinal_source: Callable[[float], object] | None = None,
-    source_knots_s: Sequence[float] = (),
+    initial_concentration=None,
+    concentration_source: Callable[[float], object] | None = None,
+    loss_rates_per_s=0.0,
+    relaxation_rate_increments: Callable[[float], object] | None = None,
+    knots_s: Sequence[float] = (),
     steady_state: bool = False,
 ) -> ReferenceSimulationResult:
     """Propagate a small spin ensemble with the reference solver.
@@ -130,14 +145,35 @@ def simulate_reference_sequence(
     The rotation signs match the event-based production kernel and
     Hargreaves' ``bloch.c``.
 
-    ``pools`` replaces ``t1_s``, ``t2_s`` and ``initial_magnetization`` by
-    per-pool values.  ``exchange_rates_per_s[j, i]`` is the longitudinal rate
-    from pool ``i`` into pool ``j`` in 1/s; diagonal entries are added as they
-    are, so a conversion ``i -> j`` with rate ``k`` needs ``[j, i] = k`` and
-    ``[i, i] = -k``.  ``longitudinal_source(t)`` returns the Mz source per
-    second, broadcastable to ``(spin, pool)``; it is evaluated at interval
-    boundaries and integrated exactly as a linear function within each
-    interval.  Add the times where it has kinks to ``source_knots_s``.
+    Kinetics (``method="exact"`` only):
+
+    ``pools``
+        Replaces ``t1_s``, ``t2_s`` and ``initial_magnetization`` by per-pool
+        values.
+    ``exchange_rates_per_s``
+        Shape ``(pool, pool)`` or ``(spin, pool, pool)``; entry ``[j, i]`` is
+        the longitudinal rate from pool ``i`` into pool ``j`` in 1/s.
+        Diagonal entries are added as they are, so a conversion ``i -> j``
+        with rate ``k`` needs ``[j, i] = k`` and ``[i, i] = -k``.
+    ``longitudinal_source(t)``
+        Mz source per second, broadcastable to ``(spin, pool)``.
+    ``initial_concentration``
+        Broadcastable to ``(spin, pool)``; switches on concentration tracking.
+        Concentration follows the same exchange without T1 and receives
+        ``concentration_source(t)``; Mz then relaxes towards
+        ``pool.equilibrium * concentration``, i.e. ``equilibrium`` is the
+        equilibrium polarization.
+    ``loss_rates_per_s``
+        Washout rate per spin, acting on every pool, on transverse and
+        longitudinal magnetization and on concentration.
+    ``relaxation_rate_increments(t)``
+        Returns ``(dR1, dR2)``, each broadcastable to ``(spin, pool)``, added
+        to ``1/T1`` and ``1/T2`` (contrast agents).  It is evaluated at each
+        interval midpoint and held over the interval.
+
+    Sources are evaluated at interval boundaries and integrated exactly as
+    linear functions within each interval.  Add every time where a source or
+    rate curve has a kink or a step to ``knots_s``.
     """
 
     if not isinstance(program, SequenceProgram):
@@ -148,6 +184,7 @@ def simulate_reference_sequence(
     positions = _vectors(positions_m, "positions_m")
     frequencies = _values(frequency_offsets_hz, np.float64, "frequency_offsets_hz")
     tx = _values(tx_sensitivity, np.complex128, "tx_sensitivity")
+    loss_values = _values(loss_rates_per_s, np.float64, "loss_rates_per_s")
     pooled = pools is not None
     if pooled:
         if t1_s is not None or t2_s is not None or initial_magnetization is not None:
@@ -174,7 +211,7 @@ def simulate_reference_sequence(
         ):
             if not np.all(np.isfinite(value)):
                 raise ValueError(f"{name} must be finite")
-        n_spins = max(positions.shape[0], frequencies.size, tx.size)
+        n_spins = max(positions.shape[0], frequencies.size, tx.size, loss_values.size)
         n_pools = len(pools)
         t1 = np.broadcast_to(pool_t1, (n_spins, n_pools)).copy()
         t2 = np.broadcast_to(pool_t2, (n_spins, n_pools)).copy()
@@ -194,6 +231,7 @@ def simulate_reference_sequence(
             t1_values.size,
             t2_values.size,
             tx.size,
+            loss_values.size,
         )
         n_pools = 1
         pool_offsets = np.zeros(1, dtype=np.float64)
@@ -206,49 +244,87 @@ def simulate_reference_sequence(
     positions = _broadcast_rows(positions, n_spins, "positions_m")
     frequencies = _broadcast_values(frequencies, n_spins, "frequency_offsets_hz")
     tx = _broadcast_values(tx, n_spins, "tx_sensitivity")
+    loss = _broadcast_values(loss_values, n_spins, "loss_rates_per_s")
     pool_frequencies = frequencies[:, None] + pool_offsets[None, :]
 
     if np.any(t1 <= 0) or np.any(t2 <= 0):
         raise ValueError("t1_s and t2_s must be positive")
+    if np.any(loss < 0):
+        raise ValueError("loss_rates_per_s must be non-negative")
+    if not np.any(loss):
+        loss = None
 
     exchange = None
     if exchange_rates_per_s is not None:
         exchange = np.asarray(exchange_rates_per_s, dtype=np.float64)
-        if exchange.shape != (n_pools, n_pools):
+        if exchange.shape not in ((n_pools, n_pools), (n_spins, n_pools, n_pools)):
             raise ValueError(
-                f"exchange_rates_per_s must have shape ({n_pools}, {n_pools})"
+                f"exchange_rates_per_s must have shape ({n_pools}, {n_pools}) "
+                f"or ({n_spins}, {n_pools}, {n_pools})"
             )
         if not np.all(np.isfinite(exchange)):
             raise ValueError("exchange_rates_per_s must be finite")
-        if not np.any(exchange):
-            exchange = None
+        exchange = (
+            np.broadcast_to(exchange, (n_spins, n_pools, n_pools))
+            if np.any(exchange)
+            else None
+        )
+
+    concentration = None
+    if initial_concentration is not None:
+        if not pooled:
+            raise ValueError("concentration tracking requires pools")
+        concentration = _spin_pool_values(
+            initial_concentration, n_spins, n_pools, "initial_concentration"
+        ).copy()
+    elif concentration_source is not None:
+        raise ValueError("concentration_source requires initial_concentration")
+    tracked = concentration is not None
+
     if method == "hargreaves" and (
-        exchange is not None or longitudinal_source is not None
+        exchange is not None
+        or longitudinal_source is not None
+        or tracked
+        or loss is not None
     ):
         raise ValueError(
             "method='hargreaves' replicates bloch.c and supports neither "
-            "exchange nor longitudinal sources"
+            "exchange, sources, concentration nor washout"
         )
-    if steady_state and longitudinal_source is not None:
-        raise ValueError("steady_state is undefined with a longitudinal source")
+    time_dependent = (
+        longitudinal_source is not None
+        or concentration_source is not None
+        or relaxation_rate_increments is not None
+    )
+    if steady_state and (time_dependent or tracked):
+        raise ValueError(
+            "steady_state is undefined with sources, concentration tracking or "
+            "time-dependent relaxation"
+        )
 
-    def source_at(time_s: float) -> np.ndarray:
-        value = np.asarray(longitudinal_source(float(time_s)), dtype=np.float64)
-        try:
-            value = np.broadcast_to(value, (n_spins, n_pools))
-        except ValueError as exc:
-            raise ValueError(
-                "longitudinal_source must return values broadcastable to "
-                f"({n_spins}, {n_pools})"
-            ) from exc
-        if not np.all(np.isfinite(value)):
-            raise ValueError("longitudinal_source returned non-finite values")
-        return value
+    def spin_pool_curve(function, time_s: float, name: str) -> np.ndarray:
+        return _spin_pool_values(function(float(time_s)), n_spins, n_pools, name)
+
+    def rates_at(time_s: float):
+        r1 = 1.0 / t1
+        r2 = 1.0 / t2
+        if relaxation_rate_increments is None:
+            return r1, r2
+        increments = relaxation_rate_increments(float(time_s))
+        if not isinstance(increments, (tuple, list)) or len(increments) != 2:
+            raise ValueError("relaxation_rate_increments must return (dR1, dR2)")
+        delta_r1 = _spin_pool_values(increments[0], n_spins, n_pools, "dR1")
+        delta_r2 = _spin_pool_values(increments[1], n_spins, n_pools, "dR2")
+        r1 = r1 + delta_r1
+        r2 = r2 + delta_r2
+        if np.any(r1 <= 0) or np.any(r2 <= 0):
+            raise ValueError("relaxation rates must stay positive")
+        return r1, r2
 
     checkpoints = _checkpoints(checkpoints_s, program.duration_s)
     knots = (
-        _checkpoints(source_knots_s, program.duration_s)
-        if longitudinal_source is not None
+        _checkpoints(knots_s, program.duration_s)
+        if time_dependent
         else np.zeros(0, dtype=np.float64)
     )
     adc_times = _adc_times(program)
@@ -265,18 +341,49 @@ def simulate_reference_sequence(
         gradient_hz_per_m = _gradient_at(program, midpoint)
         effective_rf = rf_hz * tx
         frequency = pool_frequencies + (positions @ gradient_hz_per_m)[:, None]
+        r1, r2 = rates_at(midpoint)
         if method == "hargreaves":
-            return _hargreaves_map(effective_rf, frequency, t1, t2, equilibrium, dt)
+            return _hargreaves_map(effective_rf, frequency, r1, r2, equilibrium, dt)
         sources = None
-        if longitudinal_source is not None:
-            sources = (source_at(start), source_at(end))
+        if longitudinal_source is not None or concentration_source is not None:
+            zero = np.zeros((n_spins, n_pools), dtype=np.float64)
+            sources = tuple(
+                (
+                    zero
+                    if function is None
+                    else spin_pool_curve(function, time_s, "source")
+                )
+                for function in (longitudinal_source, concentration_source)
+                for time_s in (start, end)
+            )
         return _exact_map(
-            effective_rf, frequency, t1, t2, equilibrium, exchange, sources, dt
+            effective_rf,
+            frequency,
+            r1,
+            r2,
+            equilibrium,
+            exchange=exchange,
+            sources=sources,
+            tracked=tracked,
+            loss=loss,
+            dt=dt,
         )
+
+    dimension = 3 * n_pools + (n_pools if tracked else 0)
+
+    def pack(magnetization, concentration_values):
+        flat = magnetization.reshape(n_spins, 3 * n_pools)
+        if not tracked:
+            return flat.copy()
+        return np.concatenate((flat, concentration_values), axis=1)
+
+    def unpack(flat):
+        magnetization = flat[:, : 3 * n_pools].reshape(n_spins, n_pools, 3)
+        values = flat[:, 3 * n_pools :] if tracked else None
+        return magnetization, values
 
     intervals = list(zip(boundaries[:-1], boundaries[1:]))
     if steady_state:
-        dimension = 3 * n_pools
         total_matrix = np.broadcast_to(
             np.eye(dimension), (n_spins, dimension, dimension)
         ).copy()
@@ -300,24 +407,34 @@ def simulate_reference_sequence(
     checkpoint_states = np.empty(
         (checkpoints.size, n_spins, n_pools, 3), dtype=np.float64
     )
+    adc_concentration = checkpoint_concentration = None
+    if tracked:
+        adc_concentration = np.empty((adc_times.size, n_spins, n_pools))
+        checkpoint_concentration = np.empty((checkpoints.size, n_spins, n_pools))
     adc_by_state = _indices_by_state(adc_state_indices)
     checkpoints_by_state = _indices_by_state(checkpoint_state_indices)
-    _record_observations(adc_states, adc_by_state.get(0, ()), state)
-    _record_observations(checkpoint_states, checkpoints_by_state.get(0, ()), state)
 
-    for interval_index, (start, end) in enumerate(intervals):
-        matrix, offset = interval_map(start, end)
-        flat = state.reshape(n_spins, 3 * n_pools)
-        state = (np.einsum("sij,sj->si", matrix, flat) + offset).reshape(
-            n_spins, n_pools, 3
-        )
-        state_index = interval_index + 1
+    def record(state_index):
         _record_observations(adc_states, adc_by_state.get(state_index, ()), state)
         _record_observations(
-            checkpoint_states,
-            checkpoints_by_state.get(state_index, ()),
-            state,
+            checkpoint_states, checkpoints_by_state.get(state_index, ()), state
         )
+        if tracked:
+            _record_observations(
+                adc_concentration, adc_by_state.get(state_index, ()), concentration
+            )
+            _record_observations(
+                checkpoint_concentration,
+                checkpoints_by_state.get(state_index, ()),
+                concentration,
+            )
+
+    record(0)
+    for interval_index, (start, end) in enumerate(intervals):
+        matrix, offset = interval_map(start, end)
+        flat = pack(state, concentration)
+        state, concentration = unpack(np.einsum("sij,sj->si", matrix, flat) + offset)
+        record(interval_index + 1)
 
     if not pooled:
         state = state[:, 0]
@@ -333,7 +450,23 @@ def simulate_reference_sequence(
         interval_count=max(0, boundaries.size - 1),
         initial_magnetization=start_state,
         method=method,
+        final_concentration=concentration,
+        adc_concentration=adc_concentration,
+        checkpoint_concentration=checkpoint_concentration,
     )
+
+
+def _spin_pool_values(value, n_spins: int, n_pools: int, name: str) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float64)
+    try:
+        array = np.broadcast_to(array, (n_spins, n_pools))
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be broadcastable to ({n_spins}, {n_pools})"
+        ) from exc
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite values")
+    return array
 
 
 def _rotation_vectors(rf_hz: np.ndarray, frequency_hz: np.ndarray) -> np.ndarray:
@@ -346,11 +479,20 @@ def _rotation_vectors(rf_hz: np.ndarray, frequency_hz: np.ndarray) -> np.ndarray
     return omega
 
 
-def _exact_map(rf_hz, frequency_hz, t1, t2, equilibrium, exchange, sources, dt):
-    """Return the exact affine interval map ``M -> A M + b`` per spin."""
+def _exact_map(
+    rf_hz, frequency_hz, r1, r2, equilibrium, *, exchange, sources, tracked, loss, dt
+):
+    """Return the exact affine interval map ``x -> A x + b`` per spin.
+
+    The state ``x`` holds ``(Mx, My, Mz)`` per pool, followed by one
+    concentration per pool when ``tracked``.  Two augmented coordinates carry
+    the constant 1 and the time since the interval start, so linear sources
+    are integrated exactly by the same matrix exponential.
+    """
 
     n_spins, n_pools = frequency_hz.shape
-    dimension = 3 * n_pools
+    magnetization = 3 * n_pools
+    dimension = magnetization + (n_pools if tracked else 0)
     constant = dimension
     ramp = dimension + 1
     size = dimension + (2 if sources is not None else 1)
@@ -365,19 +507,36 @@ def _exact_map(rf_hz, frequency_hz, t1, t2, equilibrium, exchange, sources, dt):
         generator[:, y, z] = -wx
         generator[:, z, x] = -wy
         generator[:, z, y] = wx
-        generator[:, x, x] = -1.0 / t2[:, pool]
-        generator[:, y, y] = -1.0 / t2[:, pool]
-        generator[:, z, z] = -1.0 / t1[:, pool]
-        generator[:, z, constant] = equilibrium[:, pool] / t1[:, pool]
+        generator[:, x, x] = -r2[:, pool]
+        generator[:, y, y] = -r2[:, pool]
+        generator[:, z, z] = -r1[:, pool]
+        target = equilibrium[:, pool] * r1[:, pool]
+        if tracked:
+            generator[:, z, magnetization + pool] = target
+        else:
+            generator[:, z, constant] = target
         if exchange is not None:
             for source_pool in range(n_pools):
-                generator[:, z, 3 * source_pool + 2] += exchange[pool, source_pool]
-        if sources is not None:
-            start_value, end_value = sources
-            generator[:, z, constant] += start_value[:, pool]
-            generator[:, z, ramp] = (end_value[:, pool] - start_value[:, pool]) / dt
+                rate = exchange[:, pool, source_pool]
+                generator[:, z, 3 * source_pool + 2] += rate
+                if tracked:
+                    generator[
+                        :, magnetization + pool, magnetization + source_pool
+                    ] += rate
     if sources is not None:
+        mz_start, mz_end, c_start, c_end = sources
+        for pool in range(n_pools):
+            z = 3 * pool + 2
+            generator[:, z, constant] += mz_start[:, pool]
+            generator[:, z, ramp] = (mz_end[:, pool] - mz_start[:, pool]) / dt
+            if tracked:
+                row = magnetization + pool
+                generator[:, row, constant] += c_start[:, pool]
+                generator[:, row, ramp] = (c_end[:, pool] - c_start[:, pool]) / dt
         generator[:, ramp, constant] = 1.0
+    if loss is not None:
+        index = np.arange(dimension)
+        generator[:, index, index] -= loss[:, None]
     transition = expm(generator * dt)
     return transition[:, :dimension, :dimension], transition[:, :dimension, constant]
 
@@ -408,13 +567,13 @@ def _cayley_klein_rotation(rotation: np.ndarray) -> np.ndarray:
     return matrix
 
 
-def _hargreaves_map(rf_hz, frequency_hz, t1, t2, equilibrium, dt):
+def _hargreaves_map(rf_hz, frequency_hz, r1, r2, equilibrium, dt):
     """Rotate, then relax, as one time step of Hargreaves' ``bloch.c``."""
 
     n_spins, n_pools = frequency_hz.shape
     rotation = _cayley_klein_rotation(_rotation_vectors(rf_hz, frequency_hz) * dt)
-    e1 = np.exp(-dt / t1)
-    e2 = np.exp(-dt / t2)
+    e1 = np.exp(-dt * r1)
+    e2 = np.exp(-dt * r2)
     rotation[..., 0:2, :] *= e2[..., None, None]
     rotation[..., 2, :] *= e1[..., None]
     dimension = 3 * n_pools

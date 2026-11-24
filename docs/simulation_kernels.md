@@ -74,15 +74,32 @@ The Gold reference has two methods. `method="exact"` (default) also handles
 several spectral pools (`pools=[ReferencePool(...)]`), longitudinal exchange
 such as pyruvate-to-lactate conversion (`exchange_rates_per_s`), relaxation to a
 per-pool equilibrium and a longitudinal source that is linear between
-`source_knots_s` (inflow), all inside one matrix exponential per interval. The
+`knots_s` (inflow), all inside one matrix exponential per interval. The
 dynamic kernel agrees with it to `1e-15` without RF and converges to it with
 order 2 when RF is on. `method="hargreaves"` repeats the time-stepping of Brian
 Hargreaves' `bloch.c`: per raster interval a Cayley-Klein rotation, then
 `diag(E2, E2, E1)` decay and recovery; it is first order and has no exchange or
 sources. A test compares it with a line-by-line transcription of the C loop.
 `steady_state=True` (both methods) starts from the fixed point of the whole
-program, like `bloch.c` mode 3. Concentration tracking, washout, contrast
-agents and dynamic tissue models are not part of the Gold reference yet.
+program, like `bloch.c` mode 3.
+
+The exact method also tracks concentrations (`initial_concentration`,
+`concentration_source`; Mz then relaxes towards `equilibrium * C`), washout
+(`loss_rates_per_s`, acting on all pools, transverse, longitudinal and
+concentration states) and contrast agents (`relaxation_rate_increments(t)`
+returning `(dR1, dR2)`, held over each interval at its midpoint; Hargreaves
+mode supports these too). The dynamic kernel matches all three to `1e-15`
+without RF and converges with order 2 with RF, with two caveats found by
+these comparisons:
+
+- Washout combined with pyruvate inflow is Strang-split around each free
+  interval while the inflow is integrated without loss. The error is second
+  order in the free-interval length and linear in the loss rate (about `1e-8`
+  for a 240 µs interval with 4/s).
+- Contrast rates are held per `step_s` epoch, but epoch boundaries are not
+  interval boundaries: a free interval that crosses an epoch takes the rate of
+  the epoch containing its midpoint. With dense checkpoints or short free
+  intervals (TR ≪ `step_s`) the effect is negligible.
 
 The old name `optimized` is still accepted for `production` (in Python, saved
 settings, projects, and scripts). It runs the same kernel with bit-identical

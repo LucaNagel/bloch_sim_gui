@@ -1,13 +1,16 @@
-"""Gold reference: Hargreaves replica, steady state, pools and kinetics."""
+"""Gold reference: Hargreaves replica, steady state, pools, kinetics,
+concentration tracking, washout and contrast relaxation."""
 
 import numpy as np
 import pytest
 
 from blochsimulator import BlochSimulator
 from blochsimulator.dynamic_phantom import (
+    ContrastRelaxation,
     DynamicSpectralPhantom,
     PyruvateInflow,
     TimeCurve,
+    VoxelWashout,
 )
 from blochsimulator.sequence import GradientEvent, RFEvent, SequenceProgram
 from blochsimulator.sequence.reference import (
@@ -200,7 +203,7 @@ def test_linear_source_is_integrated_exactly_between_knots():
         SequenceProgram((), duration_s=duration),
         pools=(ReferencePool(t1_s=1e12, t2_s=1.0, initial_magnetization=(0, 0, 0)),),
         longitudinal_source=lambda t: np.interp(t, knots, values),
-        source_knots_s=knots,
+        knots_s=knots,
     )
     expected = 0.5 * 1e-3 * 600.0 + 0.5 * 2e-3 * (600.0 + 150.0)
     assert result.final_magnetization[0, 0, 2] == pytest.approx(expected, rel=1e-12)
@@ -280,7 +283,7 @@ def _dynamic_versus_gold(rf_scale, repeat):
                 d * np.interp(t, knots, values),
                 0.0,
             ),
-            source_knots_s=knots,
+            knots_s=knots,
             checkpoints_s=checkpoints,
         )
         actual = dynamic.checkpoint_pool_magnetization[:, :, voxel, 0, 0]
@@ -296,3 +299,255 @@ def test_dynamic_kernel_converges_second_order_to_gold_with_rf():
     errors = [_dynamic_versus_gold(1.0, repeat) for repeat in (1, 2, 4)]
     assert errors[0] / errors[1] == pytest.approx(4.0, rel=0.05)
     assert errors[1] / errors[2] == pytest.approx(4.0, rel=0.05)
+
+
+def _gradient_program(rf_scale, repeat):
+    raster = RASTER / repeat
+    rf = rf_scale * np.asarray([800 + 200j, 1200 - 100j, 600 + 50j, 0j])
+    return SequenceProgram(
+        (
+            RFEvent(2 * RASTER, np.repeat(rf, repeat), raster),
+            GradientEvent(
+                "x", 0.0, np.repeat(np.linspace(-1500.0, 2000.0, 12), repeat), raster
+            ),
+        ),
+        duration_s=12 * RASTER,
+    )
+
+
+def test_concentration_tracking_with_washout_matches_analytic_solution():
+    # Mz relaxes towards p * C; C and Mz both leave at the washout rate.
+    polarization, loss, t1, kpl = 0.2, 3.0, 0.5, 2.0
+    program = SequenceProgram((), duration_s=0.3)
+    result = simulate_reference_sequence(
+        program,
+        pools=(
+            ReferencePool(0.0, t1, 0.1, polarization, (0.0, 0.0, 1.0)),
+            ReferencePool(0.0, t1, 0.1, polarization, (0.0, 0.0, 0.0)),
+        ),
+        exchange_rates_per_s=[[-kpl, 0.0], [kpl, 0.0]],
+        initial_concentration=(1.0, 0.3),
+        loss_rates_per_s=loss,
+        checkpoints_s=(0.1, 0.3),
+    )
+    t = result.checkpoint_times_s
+    washout = np.exp(-loss * t)
+    pyruvate_c = np.exp(-kpl * t)
+    lactate_c = 1.3 - pyruvate_c
+    # Excess Mz - p C obeys the same exchange with an extra T1 decay.
+    pyruvate_excess = (1.0 - polarization) * np.exp(-(kpl + 1 / t1) * t)
+    lactate_excess = (-polarization * 0.3 + (1.0 - polarization)) * np.exp(
+        -t / t1
+    ) - pyruvate_excess
+    expected_c = np.stack((pyruvate_c, lactate_c), axis=1) * washout[:, None]
+    expected_mz = (
+        polarization * np.stack((pyruvate_c, lactate_c), axis=1)
+        + np.stack((pyruvate_excess, lactate_excess), axis=1)
+    ) * washout[:, None]
+    np.testing.assert_allclose(
+        result.checkpoint_concentration[:, 0], expected_c, rtol=0, atol=1e-13
+    )
+    np.testing.assert_allclose(
+        result.checkpoint_magnetization[:, 0, :, 2], expected_mz, rtol=0, atol=1e-13
+    )
+
+
+def _tracked_versus_gold(rf_scale, repeat, *, inflow=True, loss=(0.0, 0.0)):
+    knots = (0.0, 6 * RASTER, 12 * RASTER)
+    values = (0.0, 200.0, 100.0)
+    delivery = (1.0, 0.5)
+    polarization, inflow_polarization = 0.2, 0.5
+    phantom = _kinetic_phantom()
+    phantom.equilibrium_polarization = polarization
+    phantom.initial_spin_density_maps = {
+        "Pyruvate": np.ones(phantom.shape),
+        "Lactate": np.full(phantom.shape, 0.3),
+    }
+    if inflow:
+        phantom.pyruvate_inflow = PyruvateInflow(
+            TimeCurve(knots, values, "linear", "hold"),
+            np.asarray(delivery).reshape(phantom.shape),
+            polarization_curve=TimeCurve(
+                (0.0, 12 * RASTER), (inflow_polarization,) * 2, "linear", "hold"
+            ),
+        )
+    if any(loss):
+        phantom.voxel_washout = VoxelWashout(np.asarray(loss).reshape(phantom.shape))
+    program = _gradient_program(rf_scale, repeat)
+    checkpoints = (0.0, 7 * RASTER, 12 * RASTER)
+    dynamic = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        checkpoints_s=checkpoints,
+        simulation_timestep_s=RASTER / repeat,
+    )
+    offsets = dynamic.metadata["pool_frequency_offsets_hz"]
+    pools = (
+        ReferencePool(offsets[0], 30.0, 1.0, polarization, (0.0, 0.0, 1.0)),
+        ReferencePool(offsets[1], 25.0, 1.0, polarization, (0.0, 0.0, 0.0)),
+    )
+    error = 0.0
+    for voxel, (x, kpl) in enumerate(((-0.005, 0.5), (0.005, 3.0))):
+        rate = delivery[voxel]
+        gold = simulate_reference_sequence(
+            program,
+            positions_m=(x, 0.0, 0.0),
+            pools=pools,
+            exchange_rates_per_s=[[-kpl, 0.0], [kpl, 0.0]],
+            initial_concentration=(1.0, 0.3),
+            longitudinal_source=(
+                (
+                    lambda t, d=rate: (
+                        d * inflow_polarization * np.interp(t, knots, values),
+                        0.0,
+                    )
+                )
+                if inflow
+                else None
+            ),
+            concentration_source=(
+                (lambda t, d=rate: (d * np.interp(t, knots, values), 0.0))
+                if inflow
+                else None
+            ),
+            loss_rates_per_s=loss[voxel],
+            knots_s=knots,
+            checkpoints_s=checkpoints,
+        )
+        actual = dynamic.checkpoint_pool_magnetization[:, :, voxel, 0, 0]
+        error = max(error, np.abs(gold.checkpoint_magnetization[:, 0] - actual).max())
+    return error
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{}, {"inflow": False, "loss": (0.7, 4.0)}], ids=["inflow", "washout"]
+)
+def test_dynamic_kernel_matches_gold_concentration_tracking(kwargs):
+    assert _tracked_versus_gold(0.0, 1, **kwargs) < 1e-13
+    errors = [_tracked_versus_gold(1.0, repeat, **kwargs) for repeat in (1, 2, 4)]
+    assert errors[0] / errors[1] == pytest.approx(4.0, rel=0.05)
+    assert errors[1] / errors[2] == pytest.approx(4.0, rel=0.05)
+
+
+def test_dynamic_kernel_washout_with_inflow_is_second_order_in_free_intervals():
+    # The production kernel Strang-splits the loss around each free interval
+    # while integrating the inflow without it; Gold is exact, so the gap
+    # shrinks fourfold when checkpoints halve the free intervals.
+    error = _tracked_versus_gold(0.0, 1, loss=(0.7, 4.0))
+    assert 1e-9 < error < 1e-7
+
+
+def _contrast_versus_gold(rf_scale, repeat, kernel):
+    times = np.asarray([0.0, 5 * RASTER, 12 * RASTER])
+    step = 3 * RASTER
+    delta_r1 = np.asarray([[0.0, 0.0], [3000.0, 800.0], [1000.0, 2000.0]])
+    delta_r2 = 10.0 * delta_r1
+    phantom = _kinetic_phantom()
+    phantom.kpl_map_s_inv = np.zeros(phantom.shape)
+    phantom.equilibrium_polarization = 0.2
+    phantom.initial_spin_density_maps = {
+        "Pyruvate": np.ones(phantom.shape),
+        "Lactate": np.full(phantom.shape, 0.3),
+    }
+    phantom.contrast_relaxation = ContrastRelaxation(
+        np.asarray([0, 1], dtype=int).reshape(phantom.shape),
+        times,
+        delta_r1,
+        delta_r2,
+        step_s=step,
+    )
+    program = _gradient_program(rf_scale, repeat)
+    epochs = tuple(np.arange(5) * step)
+    # Production evaluates each free interval in the epoch of its midpoint,
+    # so epoch boundaries are passed as checkpoints to split the intervals.
+    checkpoints = tuple(sorted({0.0, 7 * RASTER, 12 * RASTER, *epochs}))
+    dynamic = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+        program,
+        phantom,
+        checkpoints_s=checkpoints,
+        simulation_timestep_s=RASTER / repeat,
+        sequence_kernel=kernel,
+    )
+    offsets = dynamic.metadata["pool_frequency_offsets_hz"]
+    pools = (
+        ReferencePool(offsets[0], 30.0, 1.0, 0.2, (0.0, 0.0, 1.0)),
+        ReferencePool(offsets[1], 25.0, 1.0, 0.2, (0.0, 0.0, 0.0)),
+    )
+    error = 0.0
+    for voxel, x in enumerate((-0.005, 0.005)):
+
+        def increments(t, voxel=voxel):
+            middle = (np.floor(t / step) + 0.5) * step
+            r1 = np.interp(middle, times, delta_r1[:, voxel])
+            r2 = np.interp(middle, times, delta_r2[:, voxel])
+            return (r1, r1), (r2, r2)
+
+        gold = simulate_reference_sequence(
+            program,
+            positions_m=(x, 0.0, 0.0),
+            pools=pools,
+            initial_concentration=(1.0, 0.3),
+            relaxation_rate_increments=increments,
+            knots_s=epochs,
+            checkpoints_s=checkpoints,
+        )
+        actual = dynamic.checkpoint_pool_magnetization[:, :, voxel, 0, 0]
+        error = max(error, np.abs(gold.checkpoint_magnetization[:, 0] - actual).max())
+    return error
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+@pytest.mark.parametrize("kernel", ["reference", "production"])
+def test_dynamic_kernel_matches_gold_contrast_relaxation(kernel):
+    assert _contrast_versus_gold(0.0, 1, kernel) < 1e-13
+    errors = [_contrast_versus_gold(1.0, repeat, kernel) for repeat in (1, 2, 4)]
+    assert errors[0] / errors[1] == pytest.approx(4.0, rel=0.05)
+    assert errors[1] / errors[2] == pytest.approx(4.0, rel=0.05)
+
+
+def test_hargreaves_contrast_increments_equal_exact_without_rf():
+    program = _gradient_program(0.0, 1)
+
+    def increments(t):
+        return (500.0 if t < 6 * RASTER else 2000.0), 4000.0
+
+    kwargs = dict(
+        positions_m=[(-0.005, 0.0, 0.0), (0.005, 0.0, 0.0)],
+        t1_s=0.5,
+        t2_s=0.05,
+        initial_magnetization=(0.6, -0.3, 0.7),
+        relaxation_rate_increments=increments,
+        knots_s=(6 * RASTER,),
+        checkpoints_s=(7 * RASTER,),
+    )
+    exact = simulate_reference_sequence(program, **kwargs)
+    hargreaves = simulate_reference_sequence(program, method="hargreaves", **kwargs)
+    np.testing.assert_allclose(
+        hargreaves.checkpoint_magnetization,
+        exact.checkpoint_magnetization,
+        rtol=0,
+        atol=1e-14,
+    )
+
+
+def test_concentration_and_washout_argument_checks():
+    program = SequenceProgram((), duration_s=1e-3)
+    pools = (ReferencePool(),)
+    with pytest.raises(ValueError, match="requires pools"):
+        simulate_reference_sequence(program, initial_concentration=1.0)
+    with pytest.raises(ValueError, match="requires initial_concentration"):
+        simulate_reference_sequence(
+            program, pools=pools, concentration_source=lambda t: 1.0
+        )
+    with pytest.raises(ValueError, match="hargreaves"):
+        simulate_reference_sequence(program, method="hargreaves", loss_rates_per_s=1.0)
+    with pytest.raises(ValueError, match="steady_state"):
+        simulate_reference_sequence(
+            program, pools=pools, initial_concentration=1.0, steady_state=True
+        )
+    with pytest.raises(ValueError, match="non-negative"):
+        simulate_reference_sequence(program, loss_rates_per_s=-1.0)
+    with pytest.raises(ValueError, match="positive"):
+        simulate_reference_sequence(
+            program, relaxation_rate_increments=lambda t: (-2.0, 0.0)
+        )
