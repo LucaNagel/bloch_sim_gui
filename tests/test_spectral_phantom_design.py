@@ -40,7 +40,8 @@ from blochsimulator.ui.main_window import BlochSimulatorGUI
 from blochsimulator.ui.b0_widgets import B0WorkspaceWidget
 from blochsimulator.ui.volume_viewer import VolumeViewerWidget
 from blochsimulator.mouse_phantom import MousePerfusionConfig
-from blochsimulator.b0_field import PhantomB0Field
+from blochsimulator.b0_field import B0FieldSettings, PhantomB0Field
+from blochsimulator.dynamic_phantom import TimeCurve
 from blochsimulator.ui.widgets import IMAGE_HISTOGRAM_WIDTH
 from blochsimulator.phantom_widget import (
     PhantomCreatorWidget,
@@ -864,7 +865,8 @@ def test_b0_workspace_applies_tissue_offsets_to_the_mouse_phantom():
     ]
     assert "Liver" in names and "Background" not in names
     widget.offset_table.item(_b0_offset_row(widget, "Liver"), 2).setText("1.5")
-    widget.drift_enabled.setChecked(True)
+    # The GUI no longer offers a B0 drift.
+    assert not hasattr(widget, "drift_enabled")
     assert widget.apply_field()
 
     liver_label = next(
@@ -876,7 +878,7 @@ def test_b0_workspace_applies_tissue_offsets_to_the_mouse_phantom():
     )
     assert difference[liver] == pytest.approx(1.5)
     assert np.allclose(difference[~liver], 0.0)
-    assert phantom.dynamic_b0 is not None
+    assert phantom.dynamic_b0 is None
 
     # A fresh workspace loads the stored field instead of re-adding it.
     reloaded = B0WorkspaceWidget()
@@ -884,14 +886,36 @@ def test_b0_workspace_applies_tissue_offsets_to_the_mouse_phantom():
     reloaded.set_phantom(phantom)
     row = _b0_offset_row(reloaded, "Liver")
     assert float(reloaded.offset_table.item(row, 2).text()) == pytest.approx(1.5)
-    assert reloaded.drift_enabled.isChecked()
-    widget.drift_enabled.setChecked(False)
     widget.offset_table.item(_b0_offset_row(widget, "Liver"), 2).setText("0")
     assert widget.apply_field()
     assert np.asarray(phantom.b0_map_ppm) == pytest.approx(base)
     assert phantom.dynamic_b0 is None
     widget.close()
     reloaded.close()
+    app.processEvents()
+
+
+def test_b0_workspace_keeps_a_stored_drift_unchanged():
+    app = QApplication.instance() or QApplication([])
+    phantom = MousePerfusionConfig(shape=(12, 8, 24)).build()
+    drift = TimeCurve(times_s=(0.0, 5.0), values=(0.0, 12.0))
+    PhantomB0Field(phantom).apply(B0FieldSettings(drift_curve_hz=drift))
+    assert phantom.dynamic_b0 is not None
+
+    widget = B0WorkspaceWidget()
+    widget.auto_apply.setChecked(False)
+    widget.set_phantom(phantom)
+    assert "drift is kept" in widget.apply_status.text()
+    widget.offset_table.item(_b0_offset_row(widget, "Liver"), 2).setText("0.5")
+    assert widget.apply_field()
+    assert phantom.dynamic_b0 is not None
+    assert tuple(phantom.dynamic_b0.offset_curve_hz.values) == (0.0, 12.0)
+
+    # A drift does not carry over to a phantom that has none.
+    other = MousePerfusionConfig(shape=(12, 8, 24)).build()
+    widget.set_phantom(other)
+    assert widget.settings().drift_curve_hz is None
+    widget.close()
     app.processEvents()
 
 

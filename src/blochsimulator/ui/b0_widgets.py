@@ -34,8 +34,6 @@ from ..dynamic_phantom import TimeCurve
 from .styles import BOLD_GROUP_TITLES_STYLE
 from .volume_viewer import VolumeViewerWidget
 
-_DEFAULT_DRIFT = ((0.0, 0.0), (10.0, 0.0))
-
 
 def _number_spin(minimum, maximum, value, suffix, decimals=3):
     spin = QDoubleSpinBox()
@@ -51,8 +49,9 @@ class B0WorkspaceWidget(QWidget):
     """Edit the static B0 field and apply it to the current phantom.
 
     The field is an analytic spatial pattern plus a constant offset per
-    region (designer shapes or anatomy labels) plus an optional uniform drift
-    over time for time-resolved phantoms.
+    region (designer shapes or anatomy labels). A uniform drift over time is
+    not edited here; one stored with the phantom (scripting API or an older
+    project) is passed through unchanged.
     """
 
     phantom_updated = pyqtSignal(object)
@@ -64,6 +63,8 @@ class B0WorkspaceWidget(QWidget):
         self._updating = False
         self._settings_pending = False
         self._session_settings: Optional[B0FieldSettings] = None
+        # Drift curve stored with the phantom; the GUI does not edit it.
+        self._drift_curve_hz: Optional[TimeCurve] = None
         self._apply_timer = QTimer(self)
         self._apply_timer.setSingleShot(True)
         self._apply_timer.setInterval(120)
@@ -75,7 +76,6 @@ class B0WorkspaceWidget(QWidget):
         self._preview_shape = None
         self._build_ui()
         self._update_pattern_info()
-        self._update_drift_enabled()
 
     # -- UI ---------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -85,9 +85,9 @@ class B0WorkspaceWidget(QWidget):
         layout.setSpacing(8)
         header = QLabel(
             "The B0 offset of each voxel is the constant offset of the region it "
-            "belongs to plus a spatial inhomogeneity pattern (plus an optional "
-            "uniform drift over time). It shifts every peak in that voxel and "
-            "applies to any phantom, including the anatomical mouse."
+            "belongs to plus a spatial inhomogeneity pattern. It shifts every "
+            "peak in that voxel and applies to any phantom, including the "
+            "anatomical mouse."
         )
         header.setWordWrap(True)
         header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -166,37 +166,6 @@ class B0WorkspaceWidget(QWidget):
         self.reset_offsets_button.clicked.connect(self._reset_offsets)
         offsets_layout.addWidget(self.reset_offsets_button)
         controls_layout.addWidget(offsets_group, 1)
-
-        drift_group = QGroupBox("Uniform B0 drift over time (optional)")
-        drift_layout = QVBoxLayout(drift_group)
-        self.drift_enabled = QCheckBox("Enable time-dependent B0 offset")
-        self.drift_enabled.toggled.connect(self._drift_toggled)
-        drift_layout.addWidget(self.drift_enabled)
-        self.drift_help = QLabel()
-        self.drift_help.setWordWrap(True)
-        drift_layout.addWidget(self.drift_help)
-        self.drift_table = QTableWidget(0, 2)
-        self.drift_table.setHorizontalHeaderLabels(["Time (s)", "Offset (Hz)"])
-        self.drift_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeToContents
-        )
-        self.drift_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.drift_table.verticalHeader().setVisible(False)
-        self.drift_table.setMinimumHeight(105)
-        self.drift_table.setMaximumHeight(150)
-        self.drift_table.cellChanged.connect(self._drift_table_changed)
-        drift_layout.addWidget(self.drift_table)
-        drift_buttons = QHBoxLayout()
-        self.add_drift_point = QPushButton("Add point")
-        self.add_drift_point.clicked.connect(self._add_drift_point)
-        self.remove_drift_point = QPushButton("Remove point")
-        self.remove_drift_point.clicked.connect(self._remove_drift_point)
-        drift_buttons.addWidget(self.add_drift_point)
-        drift_buttons.addWidget(self.remove_drift_point)
-        drift_buttons.addStretch()
-        drift_layout.addLayout(drift_buttons)
-        controls_layout.addWidget(drift_group)
-        self._populate_drift(None)
 
         application_group = QGroupBox("Phantom coupling")
         application_layout = QVBoxLayout(application_group)
@@ -354,9 +323,7 @@ class B0WorkspaceWidget(QWidget):
             strength_ppm=self.strength_spin.value(),
             center=tuple(spin.value() / 100.0 for spin in self.center_spins),
             region_offsets_ppm=offsets,
-            drift_curve_hz=(
-                self._read_drift() if self.drift_enabled.isChecked() else None
-            ),
+            drift_curve_hz=self._drift_curve_hz,
         )
 
     def _show_settings(self, settings: B0FieldSettings) -> None:
@@ -369,12 +336,10 @@ class B0WorkspaceWidget(QWidget):
             for spin, value in zip(self.center_spins, settings.center):
                 spin.setValue(float(value) * 100.0)
             self._populate_offsets(settings.region_offsets_ppm)
-            self.drift_enabled.setChecked(settings.drift_curve_hz is not None)
-            self._populate_drift(settings.drift_curve_hz)
+            self._drift_curve_hz = settings.drift_curve_hz
         finally:
             self._updating = False
         self._update_pattern_info()
-        self._update_drift_enabled()
 
     def _populate_offsets(self, offsets) -> None:
         field = self.field
@@ -415,40 +380,11 @@ class B0WorkspaceWidget(QWidget):
         else:
             text = (
                 "This phantom has no shapes or anatomy labels; only the spatial "
-                "pattern and the drift apply."
+                "pattern applies."
             )
         self.offsets_help.setText(text)
         self.reset_offsets_button.setEnabled(bool(names))
 
-    def _populate_drift(self, curve: Optional[TimeCurve]) -> None:
-        samples = (
-            _DEFAULT_DRIFT if curve is None else tuple(zip(curve.times_s, curve.values))
-        )
-        with QSignalBlocker(self.drift_table):
-            self.drift_table.setRowCount(len(samples))
-            for row, (time_s, value) in enumerate(samples):
-                self.drift_table.setItem(row, 0, QTableWidgetItem(f"{time_s:g}"))
-                self.drift_table.setItem(row, 1, QTableWidgetItem(f"{value:g}"))
-
-    def _read_drift(self) -> TimeCurve:
-        samples = []
-        for row in range(self.drift_table.rowCount()):
-            time_item = self.drift_table.item(row, 0)
-            value_item = self.drift_table.item(row, 1)
-            if time_item is None or value_item is None:
-                raise ValueError("drift rows require both time and offset")
-            samples.append((float(time_item.text()), float(value_item.text())))
-        if not samples:
-            raise ValueError("an enabled drift requires at least one point")
-        samples.sort()
-        return TimeCurve(
-            times_s=tuple(item[0] for item in samples),
-            values=tuple(item[1] for item in samples),
-            interpolation="linear",
-            outside="hold",
-        )
-
-    # -- edits ------------------------------------------------------------
     def _reset_center(self) -> None:
         self._updating = True
         try:
@@ -493,45 +429,6 @@ class B0WorkspaceWidget(QWidget):
                     item.setText("0")
         self._settings_changed()
 
-    def _drift_toggled(self, _checked):
-        self._update_drift_enabled()
-        if not self._updating:
-            self._settings_changed()
-
-    def _drift_table_changed(self, row, column):
-        if self._updating:
-            return
-        item = self.drift_table.item(row, column)
-        try:
-            float(item.text())
-        except (AttributeError, TypeError, ValueError):
-            with QSignalBlocker(self.drift_table):
-                item.setText("0")
-        self._settings_changed()
-
-    def _add_drift_point(self):
-        row = self.drift_table.rowCount()
-        time_s, value = 0.0, 0.0
-        if row:
-            try:
-                time_s = float(self.drift_table.item(row - 1, 0).text()) + 1.0
-                value = float(self.drift_table.item(row - 1, 1).text())
-            except (AttributeError, ValueError):
-                pass
-        with QSignalBlocker(self.drift_table):
-            self.drift_table.insertRow(row)
-            self.drift_table.setItem(row, 0, QTableWidgetItem(f"{time_s:g}"))
-            self.drift_table.setItem(row, 1, QTableWidgetItem(f"{value:g}"))
-        self._settings_changed()
-
-    def _remove_drift_point(self):
-        row = self.drift_table.currentRow()
-        if row < 0:
-            row = self.drift_table.rowCount() - 1
-        if row >= 0 and self.drift_table.rowCount() > 1:
-            self.drift_table.removeRow(row)
-            self._settings_changed()
-
     def _update_pattern_info(self):
         mode = str(self.mode_combo.currentData())
         amplitude = self.strength_spin.value()
@@ -559,25 +456,6 @@ class B0WorkspaceWidget(QWidget):
                 "the FOV centre. Moving the centre moves the extremum."
             )
         self.pattern_info.setText(text)
-
-    def _update_drift_enabled(self):
-        supported = self.field is not None and self.field.supports_drift
-        self.drift_enabled.setEnabled(supported or self.drift_enabled.isChecked())
-        enabled = self.drift_enabled.isChecked()
-        for widget in (self.drift_table, self.add_drift_point, self.remove_drift_point):
-            widget.setEnabled(enabled)
-        if self.field is not None and not supported:
-            self.drift_help.setText(
-                "A drift needs a time-resolved phantom. Enable the kinetics model "
-                "in the Phantom Designer (or use the renal mouse phantom) to add "
-                "one."
-            )
-        else:
-            self.drift_help.setText(
-                "Adds the same frequency offset in Hz to every voxel, linearly "
-                "interpolated over sequence time; endpoint values are held outside "
-                "the table."
-            )
 
     def _settings_changed(self):
         if self._updating:
@@ -624,6 +502,8 @@ class B0WorkspaceWidget(QWidget):
         if stored is not None:
             self._show_settings(stored)
             status = f"Loaded the B0 field stored with {phantom.name}."
+            if stored.drift_curve_hz is not None:
+                status += " Its stored B0 drift is kept unchanged (not editable here)."
         elif session is not None and not session.is_empty():
             # A new phantom without its own field takes the workspace field,
             # as the B1 workspace does; offsets carry over by region name.
@@ -636,9 +516,8 @@ class B0WorkspaceWidget(QWidget):
                     for name, value in session.region_offsets_ppm.items()
                     if name in self.field.region_names
                 },
-                drift_curve_hz=(
-                    session.drift_curve_hz if self.field.supports_drift else None
-                ),
+                # A drift is not edited here, so it never carries over.
+                drift_curve_hz=None,
             )
             self._show_settings(carried)
             self._settings_pending = not carried.is_empty()

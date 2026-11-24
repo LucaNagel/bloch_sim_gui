@@ -277,9 +277,11 @@ B0 field of the current phantom, the mouse perfusion phantom included:
 - a spatial pattern (linear X/Y/Z or radial XY/XYZ, in ppm, with a movable
   centre: drag in any slice of the preview to move the cyan crosshair),
 - a constant offset per region: per shape for designer phantoms, per tissue
-  for the mouse phantom,
-- an optional uniform drift over time (Hz, separate from RF/receiver
-  carriers); it needs a time-resolved phantom.
+  for the mouse phantom.
+
+A uniform B0 drift over time is not edited in the GUI. It can be set from
+Python (`DynamicB0` on a time-resolved phantom); a drift stored with a phantom
+is kept unchanged by the B0 Field tab.
 
 Changes are applied to the phantom automatically and are saved with it. The
 field adds to any B0 map the phantom already has. Transmit and receive fields

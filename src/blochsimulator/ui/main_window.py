@@ -2400,8 +2400,8 @@ class BlochSimulatorGUI(QMainWindow):
                 "and receive B1− fields."
             ),
             "B0 Field": (
-                "Add a spatial B0 inhomogeneity, per-region B0 offsets and an "
-                "optional drift to the current phantom (designer or mouse)."
+                "Add a spatial B0 inhomogeneity and per-region B0 offsets to the "
+                "current phantom (designer or mouse)."
             ),
             "Simulations": (
                 "Switch between completed sequence simulations retained for this "
