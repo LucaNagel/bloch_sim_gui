@@ -265,6 +265,13 @@ from .widgets import (
     style_image_item,
 )
 from .default_settings import WorkspaceDefaults, load_kernel_settings
+from .fundamental_inputs import (
+    B0_REASON,
+    NUCLEUS_REASON,
+    REFERENCE_REASON,
+    ConfirmedComboBox,
+    ConfirmedDoubleSpinBox,
+)
 
 
 # Run progress is drawn in permille so time extrapolation moves smoothly.
@@ -3109,7 +3116,7 @@ class SequenceSimulationWidget(QWidget):
         sequence_layout.addWidget(self.sequence_source, 1, 1, 1, 3)
 
         self.nucleus_label = QLabel("Nucleus")
-        self.nucleus = QComboBox()
+        self.nucleus = ConfirmedComboBox("the nucleus", NUCLEUS_REASON)
         self.nucleus.setObjectName("sequence_nucleus")
         self.nucleus.addItems(list(NUCLEUS_GAMMA_HZ_PER_T))
         self.nucleus.setCurrentText(self.workspace_defaults.phantom_nucleus)
@@ -3118,7 +3125,9 @@ class SequenceSimulationWidget(QWidget):
             "physical RF/gradient units"
         )
         self.sequence_reference_label = QLabel("Reference")
-        self.sequence_reference_ppm = QDoubleSpinBox()
+        self.sequence_reference_ppm = ConfirmedDoubleSpinBox(
+            "the sequence reference", REFERENCE_REASON
+        )
         self.sequence_reference_ppm.setObjectName("sequence_reference_ppm")
         self.sequence_reference_ppm.setRange(-10000.0, 10000.0)
         self.sequence_reference_ppm.setDecimals(4)
@@ -5277,7 +5286,7 @@ class SequenceSimulationWidget(QWidget):
             ["Phantom tab / designer", "Built-in quick object", "Spin probe"]
         )
         object_form.addRow("Source", self.object_source)
-        self.field_strength_t = QDoubleSpinBox()
+        self.field_strength_t = ConfirmedDoubleSpinBox("B0", B0_REASON)
         self.field_strength_t.setRange(0.01, 30.0)
         self.field_strength_t.setDecimals(4)
         self.field_strength_t.setValue(self.workspace_defaults.field_strength_t)

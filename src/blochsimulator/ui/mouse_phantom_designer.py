@@ -51,6 +51,12 @@ from ..units import (
     relative_polarization_to_percent,
 )
 from .default_settings import WorkspaceDefaults
+from .fundamental_inputs import (
+    B0_REASON,
+    NUCLEUS_REASON,
+    ConfirmedComboBox,
+    ConfirmedDoubleSpinBox,
+)
 from .volume_viewer import PhantomInspectorWidget
 from .widgets import ExplicitAcceptDialog, PolarizationPercentSpinBox
 from .theme import set_tone
@@ -786,8 +792,9 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         decimals=4,
         suffix="",
         step=None,
+        confirm=None,
     ):
-        spin = QDoubleSpinBox()
+        spin = QDoubleSpinBox() if confirm is None else ConfirmedDoubleSpinBox(*confirm)
         spin.setRange(float(minimum), float(maximum))
         spin.setDecimals(int(decimals))
         spin.setSuffix(suffix)
@@ -890,7 +897,12 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
             mouse_position_layout.setColumnStretch(2 * axis + 1, 1)
         anatomy_form.addRow("Mouse position", mouse_position_widget)
         self.field_strength = self._float_spin(
-            0.001, 1000.0, decimals=3, suffix=" T", step=0.1
+            0.001,
+            1000.0,
+            decimals=3,
+            suffix=" T",
+            step=0.1,
+            confirm=("B0", B0_REASON),
         )
         anatomy_form.addRow("B0", self.field_strength)
         self.temperature_c = self._float_spin(
@@ -937,7 +949,7 @@ class MousePhantomDesignerDialog(ExplicitAcceptDialog):
         compound_group = QGroupBox("Injected compound")
         compound_form = self._group_form(compound_group)
         self.compound_form = compound_form
-        self.nucleus = QComboBox()
+        self.nucleus = ConfirmedComboBox("the nucleus", NUCLEUS_REASON)
         self.nucleus.setObjectName("mouse_nucleus")
         for key, label in MOUSE_NUCLEI.items():
             self.nucleus.addItem(label, key)

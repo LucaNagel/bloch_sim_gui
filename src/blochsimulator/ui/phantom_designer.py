@@ -67,6 +67,12 @@ from .sequence_geometry_viewer import (
     sequence_overhang_note,
 )
 from .default_settings import WorkspaceDefaults
+from .fundamental_inputs import (
+    B0_REASON,
+    NUCLEUS_REASON,
+    ConfirmedComboBox,
+    ConfirmedDoubleSpinBox,
+)
 from .styles import BOLD_GROUP_TITLES_STYLE
 from .widgets import ExplicitAcceptDialog
 from .theme import color as theme_color, set_tone
@@ -726,11 +732,13 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         spectral_fields = QGridLayout()
         spectral_fields.setHorizontalSpacing(8)
         spectral_fields.setVerticalSpacing(6)
-        self.field_strength_t = self._number_spin(0.001, 1000.0, 3.0, " T")
+        self.field_strength_t = self._number_spin(
+            0.001, 1000.0, 3.0, " T", confirm=("B0", B0_REASON)
+        )
         self.field_strength_t.setToolTip(
             "Main field used to convert ppm peak and B0 offsets to Hz"
         )
-        self.nucleus = QComboBox()
+        self.nucleus = ConfirmedComboBox("the nucleus", NUCLEUS_REASON)
         self.nucleus.addItem("Auto (H1 static / C13 dynamic)", None)
         for nucleus in sorted(NUCLEUS_GAMMA_HZ_PER_T):
             self.nucleus.addItem(nucleus, nucleus)
@@ -1708,8 +1716,10 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         return widget
 
     @staticmethod
-    def _number_spin(minimum, maximum, value, suffix):
-        widget = QDoubleSpinBox()
+    def _number_spin(minimum, maximum, value, suffix, confirm=None):
+        widget = (
+            QDoubleSpinBox() if confirm is None else ConfirmedDoubleSpinBox(*confirm)
+        )
         widget.setRange(minimum, maximum)
         widget.setDecimals(4)
         widget.setValue(value)

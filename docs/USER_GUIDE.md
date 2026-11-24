@@ -100,6 +100,12 @@ it, and it is stored in the `.seq` file. The phantom's *Spectrum centre* and
 you get a warning before the run — usually this means your excitation hits
 nothing.
 
+**Fundamental values ask first.** Changing *B0*, the *Nucleus* or the
+*Sequence reference* by hand (arrows, typed value + Enter, list choice) opens a
+confirmation, in Sequence Mode and in both phantom designers. The mouse wheel
+does not change these fields; loading a project or phantom sets them without
+asking.
+
 **Generate sequence.** Editing parameters does not update the timeline until
 you click **Generate sequence** (or enable *Live preview*, which can be slow for
 long sequences). Running a simulation always generates first. If generation

@@ -108,6 +108,20 @@ def inline_sequence_generation(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_fundamental_change_dialog(monkeypatch):
+    """Fail instead of hanging on a modal B0/nucleus/reference question.
+
+    Tests of the confirmation replace the function with their own answer.
+    """
+    from blochsimulator.ui import fundamental_inputs
+
+    def refuse(_parent, label, old, new, _reason):
+        raise AssertionError(f"unexpected confirmation: {label} {old} -> {new}")
+
+    monkeypatch.setattr(fundamental_inputs, "confirm_fundamental_change", refuse)
+
+
+@pytest.fixture(autouse=True)
 def cleanup_qt_widgets(qt_application):
     """Close and destroy top-level widgets between tests.
 

@@ -168,7 +168,14 @@ def test_b1_application_failure_keeps_edits_and_current_tab(
 
 
 @pytest.fixture(params=["spectral", "mouse"])
-def phantom_editor(request, qt_application):
+def phantom_editor(request, qt_application, monkeypatch):
+    from blochsimulator.ui import fundamental_inputs
+
+    # The B0 field asks before a typed change; confirming it must still not
+    # accept the dialog.
+    monkeypatch.setattr(
+        fundamental_inputs, "confirm_fundamental_change", lambda *args: True
+    )
     if request.param == "spectral":
         dialog = SpectralPhantomDesignerDialog(
             design=PhantomDesign(shape=(4, 4, 2), shapes=[ShapeDefinition(name="Test")])
