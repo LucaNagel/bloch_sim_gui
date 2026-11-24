@@ -70,6 +70,20 @@ Its distance to both kernels measures the time-step error of the compiled
 symmetric splitting (about `6e-3` at the 20 µs default and `6e-6` at 1 µs for
 a FLASH test case, order about 2).
 
+The Gold reference has two methods. `method="exact"` (default) also handles
+several spectral pools (`pools=[ReferencePool(...)]`), longitudinal exchange
+such as pyruvate-to-lactate conversion (`exchange_rates_per_s`), relaxation to a
+per-pool equilibrium and a longitudinal source that is linear between
+`source_knots_s` (inflow), all inside one matrix exponential per interval. The
+dynamic kernel agrees with it to `1e-15` without RF and converges to it with
+order 2 when RF is on. `method="hargreaves"` repeats the time-stepping of Brian
+Hargreaves' `bloch.c`: per raster interval a Cayley-Klein rotation, then
+`diag(E2, E2, E1)` decay and recovery; it is first order and has no exchange or
+sources. A test compares it with a line-by-line transcription of the C loop.
+`steady_state=True` (both methods) starts from the fixed point of the whole
+program, like `bloch.c` mode 3. Concentration tracking, washout, contrast
+agents and dynamic tissue models are not part of the Gold reference yet.
+
 The old name `optimized` is still accepted for `production` (in Python, saved
 settings, projects, and scripts). It runs the same kernel with bit-identical
 results; the result metadata reports `sequence_kernel="production"` and keeps
