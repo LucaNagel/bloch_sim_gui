@@ -12,6 +12,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from ..simulator import TissueParameters
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 from .styles import BOLD_GROUP_TITLES_STYLE
+from .fundamental_inputs import B0_REASON, NUCLEUS_REASON, ConfirmedComboBox
 
 
 class TissueParameterWidget(QGroupBox):
@@ -58,7 +59,7 @@ class TissueParameterWidget(QGroupBox):
         # Shared scanner frequency reference
         reference_layout = QHBoxLayout()
         reference_layout.addWidget(QLabel("Field:"))
-        self.field_combo = QComboBox()
+        self.field_combo = ConfirmedComboBox("B0", B0_REASON)
         self.field_combo.setObjectName("field_strength_combo")
         self.field_combo.addItems(["1.5T", "3.0T", "7.0T"])
         self.field_combo.setCurrentText("3.0T")
@@ -66,7 +67,7 @@ class TissueParameterWidget(QGroupBox):
         reference_layout.addWidget(self.field_combo)
 
         reference_layout.addWidget(QLabel("Nucleus:"))
-        self.nucleus_combo = QComboBox()
+        self.nucleus_combo = ConfirmedComboBox("the nucleus", NUCLEUS_REASON)
         self.nucleus_combo.setObjectName("nucleus_combo")
         self.nucleus_combo.addItems(sorted(NUCLEUS_GAMMA_HZ_PER_T))
         self.nucleus_combo.setCurrentText("H1")

@@ -11,8 +11,8 @@ passed on to the surrounding scroll area instead of changing the value.
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QEvent, Qt
-from PyQt5.QtGui import QValidator
+from PyQt5.QtCore import QEvent, QPointF, Qt
+from PyQt5.QtGui import QMouseEvent, QValidator
 from PyQt5.QtWidgets import QComboBox, QDoubleSpinBox, QMessageBox
 
 B0_REASON = (
@@ -77,14 +77,32 @@ class ConfirmedDoubleSpinBox(QDoubleSpinBox):
     def _differs(self, value: float) -> bool:
         return abs(value - self.value()) > 0.5 * 10.0 ** (-self.decimals())
 
+    _STEP_KEYS = (Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown)
+
+    def _stop_auto_repeat(self):
+        """End the arrow button's press-and-hold repeat before a dialog.
+
+        The modal question takes the mouse release, so Qt would keep
+        stepping (and asking) after the dialog closes.
+        """
+        release = QMouseEvent(
+            QEvent.MouseButtonRelease,
+            QPointF(-1.0, -1.0),
+            Qt.LeftButton,
+            Qt.NoButton,
+            Qt.NoModifier,
+        )
+        super().mouseReleaseEvent(release)
+
     def stepBy(self, steps):
         target = min(
             max(self.value() + steps * self.singleStep(), self.minimum()),
             self.maximum(),
         )
-        if not self._differs(target) or _ask(
-            self, self._display(self.value()), self._display(target)
-        ):
+        if not self._differs(target):
+            return
+        self._stop_auto_repeat()
+        if _ask(self, self._display(self.value()), self._display(target)):
             super().stepBy(steps)
 
     def wheelEvent(self, event):
@@ -108,6 +126,10 @@ class ConfirmedDoubleSpinBox(QDoubleSpinBox):
             )
 
     def keyPressEvent(self, event):
+        if event.key() in self._STEP_KEYS and event.isAutoRepeat():
+            # A held arrow key asks once, not once per repeat.
+            event.accept()
+            return
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             self._check_typed_value()
         super().keyPressEvent(event)

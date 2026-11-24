@@ -1,9 +1,9 @@
 """B0, nucleus and sequence reference ask before a user changes them."""
 
 import pytest
-from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt5.QtCore import QElapsedTimer, QEvent, QPoint, QPointF, Qt
 from PyQt5.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QStyle, QStyleOptionSpinBox
 
 from blochsimulator.ui import fundamental_inputs
 from blochsimulator.ui.fundamental_inputs import (
@@ -61,6 +61,53 @@ def test_arrow_steps_need_confirmation(answers):
     spin.stepBy(1)
     assert spin.value() == pytest.approx(4.0)
     assert answers["asked"] == [("B0", "3.0000 T", "4.0000 T")] * 2
+
+
+def _run_events(ms):
+    timer = QElapsedTimer()
+    timer.start()
+    while timer.elapsed() < ms:
+        QApplication.processEvents()
+
+
+@pytest.mark.parametrize("reply", [False, True])
+def test_held_arrow_button_asks_only_once(answers, reply):
+    """The dialog takes the mouse release; the arrow must not keep repeating."""
+    spin = _spin()
+    spin.show()
+    QApplication.processEvents()
+    option = QStyleOptionSpinBox()
+    spin.initStyleOption(option)
+    down = spin.style().subControlRect(
+        QStyle.CC_SpinBox, option, QStyle.SC_SpinBoxDown, spin
+    )
+    answers["replies"] = [reply] * 20
+    # Press without release: the release is what the modal dialog swallows.
+    QApplication.sendEvent(
+        spin,
+        QMouseEvent(
+            QEvent.MouseButtonPress,
+            QPointF(down.center()),
+            Qt.LeftButton,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        ),
+    )
+    _run_events(1200)
+    assert answers["asked"] == [("B0", "3.0000 T", "2.0000 T")]
+    assert spin.value() == pytest.approx(2.0 if reply else 3.0)
+    spin.close()
+
+
+def test_held_arrow_key_asks_only_once(answers):
+    spin = _spin()
+    answers["replies"] = [True] * 5
+    for repeat in (False, True, True):
+        QApplication.sendEvent(
+            spin, QKeyEvent(QEvent.KeyPress, Qt.Key_Down, Qt.NoModifier, "", repeat)
+        )
+    assert answers["asked"] == [("B0", "3.0000 T", "2.0000 T")]
+    assert spin.value() == pytest.approx(2.0)
 
 
 def test_typed_value_needs_confirmation_on_enter(answers):
@@ -154,11 +201,15 @@ def test_application_fields_use_confirmed_inputs():
     from blochsimulator.ui.mouse_phantom_designer import MousePhantomDesignerDialog
     from blochsimulator.ui.phantom_designer import SpectralPhantomDesignerDialog
     from blochsimulator.ui.sequence_simulation_widget import SequenceSimulationWidget
+    from blochsimulator.ui.tissue_parameters import TissueParameterWidget
 
     sequence = SequenceSimulationWidget()
     designer = SpectralPhantomDesignerDialog()
     mouse = MousePhantomDesignerDialog()
+    free_mode = TissueParameterWidget()
     widgets = [
+        free_mode.field_combo,
+        free_mode.nucleus_combo,
         sequence.nucleus,
         sequence.sequence_reference_ppm,
         sequence.field_strength_t,
