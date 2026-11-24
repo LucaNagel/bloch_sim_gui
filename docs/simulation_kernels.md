@@ -89,17 +89,13 @@ The exact method also tracks concentrations (`initial_concentration`,
 concentration states) and contrast agents (`relaxation_rate_increments(t)`
 returning `(dR1, dR2)`, held over each interval at its midpoint; Hargreaves
 mode supports these too). The dynamic kernel matches all three to `1e-15`
-without RF and converges with order 2 with RF, with two caveats found by
-these comparisons:
-
-- Washout combined with pyruvate inflow is Strang-split around each free
-  interval while the inflow is integrated without loss. The error is second
-  order in the free-interval length and linear in the loss rate (about `1e-8`
-  for a 240 µs interval with 4/s).
-- Contrast rates are held per `step_s` epoch, but epoch boundaries are not
-  interval boundaries: a free interval that crosses an epoch takes the rate of
-  the epoch containing its midpoint. With dense checkpoints or short free
-  intervals (TR ≪ `step_s`) the effect is negligible.
+without RF and converges with order 2 with RF. One approximation remains:
+washout combined with pyruvate inflow is Strang-split around each free
+interval while the inflow is integrated without loss. The error is second
+order in the free-interval length and linear in the loss rate (about `1e-8`
+for a 240 µs interval with 4/s). Contrast `step_s` epoch boundaries where the
+rates change are interval breakpoints, so every interval lies inside one
+epoch.
 
 The old name `optimized` is still accepted for `production` (in Python, saved
 settings, projects, and scripts). It runs the same kernel with bit-identical

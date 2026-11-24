@@ -768,6 +768,26 @@ class ContrastRelaxation:
                 )
         return result
 
+    def breakpoints_s(
+        self, duration_s: float, *, timeline_offset_s: float = 0.0
+    ) -> Tuple[float, ...]:
+        """Return epoch boundaries on the sequence timeline where rates change.
+
+        Splitting intervals there keeps every interval inside one epoch, so
+        the epoch rates chosen at interval midpoints hold exactly.
+        """
+        duration_s = float(duration_s)
+        kinetics_start = -float(timeline_offset_s)
+        first = int(np.floor(kinetics_start / self.step_s))
+        last = int(np.ceil((kinetics_start + duration_s) / self.step_s))
+        epochs = np.arange(first, last + 1, dtype=np.float64)
+        if epochs.size < 2:
+            return ()
+        rates = self.rates_at((epochs + 0.5) * self.step_s)
+        changed = np.any(rates[1:] != rates[:-1], axis=(1, 2))
+        boundaries = epochs[1:][changed] * self.step_s + float(timeline_offset_s)
+        return tuple(float(value) for value in boundaries if 0.0 < value < duration_s)
+
     def interval_rows(self, interval_mid_s, kinetics_time_offset_s=0.0):
         """Return (row per interval or -1, table (rows, compartments, 2)).
 
@@ -1122,6 +1142,13 @@ class DynamicSpectralPhantom:
             )
         if self.dynamic_b0 is not None:
             values.extend(self.dynamic_b0.offset_curve_hz.breakpoints_s(duration_s))
+        if self.contrast_relaxation is not None:
+            values.extend(
+                self.contrast_relaxation.breakpoints_s(
+                    duration_s,
+                    timeline_offset_s=-self.kinetics_time_offset_s,
+                )
+            )
         conversion_start_s = self.conversion_start_on_sequence_timeline_s
         if 0.0 <= conversion_start_s <= duration_s:
             values.append(conversion_start_s)

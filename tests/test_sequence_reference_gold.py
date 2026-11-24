@@ -458,9 +458,9 @@ def _contrast_versus_gold(rf_scale, repeat, kernel):
     )
     program = _gradient_program(rf_scale, repeat)
     epochs = tuple(np.arange(5) * step)
-    # Production evaluates each free interval in the epoch of its midpoint,
-    # so epoch boundaries are passed as checkpoints to split the intervals.
-    checkpoints = tuple(sorted({0.0, 7 * RASTER, 12 * RASTER, *epochs}))
+    # Sparse checkpoints: the kernel itself must split free intervals at the
+    # epoch boundaries where the rates change.
+    checkpoints = (0.0, 7 * RASTER, 12 * RASTER)
     dynamic = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
         program,
         phantom,
@@ -551,3 +551,19 @@ def test_concentration_and_washout_argument_checks():
         simulate_reference_sequence(
             program, relaxation_rate_increments=lambda t: (-2.0, 0.0)
         )
+
+
+def test_contrast_epoch_boundaries_are_breakpoints_where_rates_change():
+    contrast = ContrastRelaxation(
+        np.zeros((1, 1, 1), dtype=int),
+        np.asarray([1.0, 2.0]),
+        np.asarray([[0.0], [4.0]]),
+        np.asarray([[0.0], [40.0]]),
+        step_s=0.5,
+    )
+    # Epoch-midpoint rates are 0 up to 1 s (mid 0.75 s) and 4 from 2 s on
+    # (mid 2.25 s), so only the boundaries at 1, 1.5 and 2 s change them; a
+    # kinetics offset of 0.25 s moves them 0.25 s earlier on the sequence.
+    assert contrast.breakpoints_s(4.0) == (1.0, 1.5, 2.0)
+    assert contrast.breakpoints_s(4.0, timeline_offset_s=-0.25) == (0.75, 1.25, 1.75)
+    assert contrast.breakpoints_s(1.5) == (1.0,)
