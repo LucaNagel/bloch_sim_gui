@@ -1,10 +1,11 @@
-"""The private static spin-major adapter (kernel §5d C5).
+"""The static spin-major adapter (kernel §5d C5, default since stage 2).
 
-``_static_spin_major=True`` runs ``simulate_sequence`` and
+The static ``"production"`` kernel runs ``simulate_sequence`` and
 ``simulate_spectral_sequence`` on the dynamic spin-major executor. It is a
 float64-close path: the dynamic kernel splits free precession around the RF
-rotation, so the gap to the static kernel is a time-step error that shrinks
-with the step, while the default static path stays bit-identical.
+rotation, so the gap to the ``"legacy"`` fast-math kernel is a time-step
+error that shrinks with the step. The private switch ``_static_spin_major``
+forces the executor on or off.
 """
 
 import dataclasses
@@ -83,12 +84,14 @@ def _simulator():
 
 
 def _pair(phantom, program=None, **kwargs):
-    """Return (static, spin-major) results without any fallback."""
+    """Return (legacy, spin-major) results without any fallback."""
     program = _train() if program is None else program
     kwargs.setdefault("simulation_timestep_s", STEP_S)
     kwargs.setdefault("checkpoints_s", CHECKPOINTS_S)
     simulator = _simulator()
-    static = simulator.simulate_sequence(program, phantom, **kwargs)
+    static = simulator.simulate_sequence(
+        program, phantom, **{"sequence_kernel": "legacy", **kwargs}
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("error", KernelFallbackWarning)
         spin_major = simulator.simulate_sequence(
@@ -125,12 +128,48 @@ def _assert_close(static, spin_major, tolerance=TOLERANCE):
         )
 
 
-def test_default_path_is_unchanged():
-    result = _simulator().simulate_sequence(
-        _train(), _phantom(), simulation_timestep_s=STEP_S
+def test_production_default_runs_spin_major_and_legacy_keeps_the_old_path():
+    simulator = _simulator()
+    assert simulator.sequence_kernel == "production"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", KernelFallbackWarning)
+        default = simulator.simulate_sequence(
+            _train(), _phantom(), simulation_timestep_s=STEP_S
+        )
+        forced = simulator.simulate_sequence(
+            _train(), _phantom(), simulation_timestep_s=STEP_S, _static_spin_major=True
+        )
+    assert default.metadata["static_spin_major"] is True
+    assert default.metadata["sequence_kernel"] == "production"
+    assert default.metadata["numerical_contract"] == "float64-close"
+    np.testing.assert_array_equal(default.signal, forced.signal)
+
+    legacy = simulator.simulate_sequence(
+        _train(), _phantom(), simulation_timestep_s=STEP_S, sequence_kernel="legacy"
     )
-    assert "static_spin_major" not in result.metadata
-    assert "progress_unit" not in result.metadata
+    assert "static_spin_major" not in legacy.metadata
+    assert "progress_unit" not in legacy.metadata
+    assert legacy.metadata["sequence_kernel"] == "legacy"
+    assert legacy.metadata["numerical_contract"] == "legacy-fast-math"
+    # The old name runs exactly the old path, and so does the switch.
+    for options in (
+        {"sequence_kernel": "optimized"},
+        {"_static_spin_major": False},
+    ):
+        result = simulator.simulate_sequence(
+            _train(), _phantom(), simulation_timestep_s=STEP_S, **options
+        )
+        assert "static_spin_major" not in result.metadata
+        np.testing.assert_array_equal(result.signal, legacy.signal)
+
+
+def test_production_runs_without_a_simulation_time_step():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", KernelFallbackWarning)
+        static, spin_major = _pair(_phantom(), simulation_timestep_s=None)
+    assert spin_major.metadata["static_spin_major"] is True
+    # Coarse RF raster: only the splitting error of the declared raster.
+    _assert_close(static, spin_major, tolerance=1e-4)
 
 
 def test_single_object_is_close_and_reports_the_path():
@@ -249,7 +288,9 @@ def test_spectral_species_become_pools_and_split_into_passes():
         simulation_timestep_s=STEP_S,
         checkpoints_s=CHECKPOINTS_S,
     )
-    static = simulator.simulate_spectral_sequence(_train(), phantom, **options)
+    static = simulator.simulate_spectral_sequence(
+        _train(), phantom, sequence_kernel="legacy", **options
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("error", KernelFallbackWarning)
         spin_major = simulator.simulate_spectral_sequence(
@@ -289,7 +330,7 @@ def test_relaxation_groups_beyond_the_limit_fall_back_with_a_reason():
     assert result.metadata["static_spin_major"] is False
     assert "relaxation groups" in result.metadata["static_spin_major_fallback_reason"]
     reference = _simulator().simulate_sequence(
-        program, phantom, simulation_timestep_s=STEP_S
+        program, phantom, simulation_timestep_s=STEP_S, sequence_kernel="legacy"
     )
     np.testing.assert_array_equal(result.signal, reference.signal)
 
@@ -525,7 +566,12 @@ def _reconstruct(result):
 
 # Keys whose value names the path; every other key of the static run must
 # be unchanged, and the spin-major run may only add keys.
-_PATH_KEYS = {"numerical_contract", "native_sequence_kernel"}
+_PATH_KEYS = {
+    "numerical_contract",
+    "native_sequence_kernel",
+    "sequence_kernel",
+    "requested_sequence_kernel",
+}
 
 
 @pytest.mark.parametrize("name", ["flash", "epi", "csi", "epsi", "spiral"])

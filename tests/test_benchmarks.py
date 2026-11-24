@@ -343,9 +343,7 @@ def test_kernel_benchmark_defaults_cover_both_kernel_families():
 
 def test_kernel_benchmark_accepts_public_names_for_old_requests():
     # Results report the public name; an old request name is not a fallback.
-    assert _ran_requested_kernel(
-        "sequence", "optimized", {"sequence_kernel": "production"}
-    )
+    assert _ran_requested_kernel("sequence", "optimized", {"sequence_kernel": "legacy"})
     assert not _ran_requested_kernel(
         "sequence", "optimized", {"sequence_kernel": "strict_reference"}
     )

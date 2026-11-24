@@ -408,7 +408,9 @@ def test_sequence_preview_reports_cumulative_signal_and_finishes_at_one():
     program = SequenceProgram((ADCEvent(0.0, 2, 0.001),), duration_s=0.002)
     previews = []
 
-    result = BlochSimulator(use_parallel=False).simulate_sequence(
+    result = BlochSimulator(
+        use_parallel=False, sequence_kernel="legacy"
+    ).simulate_sequence(
         program,
         phantom,
         chunk_voxels=2,
@@ -494,7 +496,9 @@ def test_sequence_simulation_reports_compile_and_chunk_status():
     )
     messages = []
 
-    result = BlochSimulator(use_parallel=False).simulate_sequence(
+    result = BlochSimulator(
+        use_parallel=False, sequence_kernel="legacy"
+    ).simulate_sequence(
         program,
         phantom,
         chunk_voxels=1,
@@ -535,7 +539,7 @@ def test_spectral_progress_reports_each_chunk_across_components(
         (RFEvent(0.0, np.array([250.0]), 1e-3), ADCEvent(1e-3, 2, 1e-3)),
         duration_s=3e-3,
     )
-    simulator = BlochSimulator(use_parallel=False)
+    simulator = BlochSimulator(use_parallel=False, sequence_kernel="legacy")
     # With default chunking, 32^3 subspins leave room for two parent voxels.
     sampling = SpinSampling((32, 32, 32)) if chunk_voxels is None else None
     simulation_options = {
@@ -604,7 +608,7 @@ def test_default_chunks_split_long_runs_for_regular_progress():
 def test_default_chunking_reports_voxel_progress_after_leading_chunk():
     phantom = _phantom(shape=(200,), m0=(1.0, 0.0, 0.0))
     program = SequenceProgram((ADCEvent(0.0, 2, 1e-3),), duration_s=2e-3)
-    simulator = BlochSimulator(use_parallel=False)
+    simulator = BlochSimulator(use_parallel=False, sequence_kernel="legacy")
     updates = []
     previews = []
 
@@ -798,8 +802,8 @@ def test_optimized_sequence_kernel_matches_strict_reference(relaxation_model):
         sequence_kernel="strict_reference",
     )
 
-    # "optimized" is the old name of "production" and stays accepted.
-    assert optimized.metadata["sequence_kernel"] == "production"
+    # "optimized" is the old name of the legacy kernel and stays accepted.
+    assert optimized.metadata["sequence_kernel"] == "legacy"
     assert optimized.metadata["requested_sequence_kernel"] == "optimized"
     assert optimized.metadata["effective_threads"] == 2
     assert optimized.metadata["numerical_contract"] == "legacy-fast-math"
@@ -1513,7 +1517,9 @@ def test_legacy_adapter_matches_existing_endpoint_solver():
     # Use the identical point coordinate as the legacy reference.
     phantom.positions[0] = position[0]
     program = SequenceProgram.from_legacy(b1, gradients, time)
-    streamed = BlochSimulator(use_parallel=False).simulate_sequence(program, phantom)
+    streamed = BlochSimulator(
+        use_parallel=False, sequence_kernel="legacy"
+    ).simulate_sequence(program, phantom)
     assert streamed.mx.item() == pytest.approx(legacy["mx"].item(), abs=1e-10)
     assert streamed.my.item() == pytest.approx(legacy["my"].item(), abs=1e-10)
     assert streamed.mz.item() == pytest.approx(legacy["mz"].item(), abs=1e-10)

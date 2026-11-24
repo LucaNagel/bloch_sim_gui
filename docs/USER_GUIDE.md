@@ -455,9 +455,14 @@ The run time is stored as `simulation_wall_time_s` in the dataset attributes.
 ## 9. Performance and kernels
 
 Keep the defaults (**Sequence Bloch kernel → Production**, **Dynamic spectral
-kernel → Production**). The *strict reference* kernel is for validation, not
-speed. Older names (`optimized`, `native_parallel`, `native_serial`) still work
-in Python and in saved settings and run the same code.
+kernel → Production**). For static phantoms *Production* now runs the
+second-order spin-major executor; cases it cannot handle fall back to the old
+kernel with a warning, and the completion message names the reason.
+*Legacy fast-math* is the previous default and stays selectable for one
+release to compare old results. The *strict reference* kernel is for
+validation, not speed. Older names (`native_parallel`, `native_serial`) still
+work and run the same code; `optimized` selects *Legacy* in Python and
+*Production* in saved GUI settings.
 
 What actually drives runtime:
 

@@ -98,25 +98,40 @@ def _slab_phantom():
     return Phantom(shape, (0.01, 0.01, 0.04), np.ones(shape), np.full(shape, 0.1))
 
 
+LEGACY = BlochSimulator(use_parallel=False, sequence_kernel="legacy")
+
+
 def test_block_pulse_has_no_time_step_error():
     estimate = estimate_timestep_error(
         _block_program(), 20e-6, frequency_offsets_hz=(0.0, 150.0)
     )
+    legacy = estimate_timestep_error(
+        _block_program(),
+        20e-6,
+        frequency_offsets_hz=(0.0, 150.0),
+        simulator=LEGACY,
+    )
 
     assert estimate.status == "checked"
     assert estimate.reference_timestep_s == pytest.approx(5e-6)
-    assert estimate.max_vector_error < 1e-9
+    # Production splits free precession around each merged RF interval; the
+    # legacy kernel rotates a constant RF sample exactly.
+    assert estimate.max_vector_error < 1e-5
+    assert legacy.max_vector_error < 1e-9
     assert not estimate.exceeds(TIMESTEP_ERROR_NOTE_THRESHOLD)
     assert SequenceSimulationWidget._timestep_error_note(estimate.to_metadata()) == ""
 
 
 def test_spsp_pulse_at_20_us_exceeds_one_percent(spsp_program):
     estimate = estimate_timestep_error(
-        spsp_program, 20e-6, **timestep_error_inputs(_slab_phantom())
+        spsp_program,
+        20e-6,
+        simulator=LEGACY,
+        **timestep_error_inputs(_slab_phantom()),
     )
 
     assert estimate.status == "checked"
-    # Measured 1.55 % (20 µs against 5 µs) at the slab edge.
+    # Legacy kernel: measured 1.55 % (20 µs against 5 µs) at the slab edge.
     assert estimate.max_vector_error > TIMESTEP_ERROR_NOTE_THRESHOLD
     assert estimate.probe_count == 9
     assert abs(estimate.worst_probe["position_m"][2]) > 0.0
@@ -129,12 +144,21 @@ def test_spsp_pulse_at_20_us_exceeds_one_percent(spsp_program):
 def test_spsp_error_shrinks_with_the_step(spsp_program):
     inputs = timestep_error_inputs(_slab_phantom())
     errors = [
+        estimate_timestep_error(
+            spsp_program, step, simulator=LEGACY, **inputs
+        ).max_vector_error
+        for step in (20e-6, 10e-6)
+    ]
+    production = [
         estimate_timestep_error(spsp_program, step, **inputs).max_vector_error
         for step in (20e-6, 10e-6)
     ]
 
     # Second order in the RF step: halving it divides the error by about four.
     assert errors[1] < errors[0] / 3
+    # Production (measured 0.78 % and 0.32 %) is below legacy and shrinks too.
+    assert production[0] < errors[0]
+    assert production[1] < production[0] / 2
 
 
 def test_probe_lines_follow_rf_active_gradients():
@@ -314,10 +338,10 @@ def test_dynamic_inputs_follow_the_sequence_reference():
     )
 
 
-def _run_worker(program, phantom, step_s):
+def _run_worker(program, phantom, step_s, kernel="production"):
     outputs, errors, stages = [], [], []
     worker = SequenceSimulationThread(
-        BlochSimulator(use_parallel=False),
+        BlochSimulator(use_parallel=False, sequence_kernel=kernel),
         program,
         phantom,
         (),
@@ -335,7 +359,7 @@ def _run_worker(program, phantom, step_s):
 
 
 def test_worker_records_and_widget_reports_spsp_error(spsp_program):
-    result, stages = _run_worker(spsp_program, _slab_phantom(), 20e-6)
+    result, stages = _run_worker(spsp_program, _slab_phantom(), 20e-6, "legacy")
 
     check = result.metadata["timestep_error"]
     assert check["status"] == "checked"

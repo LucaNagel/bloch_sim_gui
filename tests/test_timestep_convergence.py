@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from blochsimulator import BlochSimulator
 from blochsimulator.sequence import (
     ConvergenceCriteria,
     RFEvent,
@@ -88,6 +89,8 @@ def test_convergence_sweep_identifies_first_noncommuting_coarsening_failure():
             max_vector_error=1e-3,
             rms_vector_error=1e-3,
         ),
+        # Exact per constant RF sample only in the legacy kernel.
+        simulator=BlochSimulator(use_parallel=False, sequence_kernel="legacy"),
     )
 
     native, raster_point, coarse = result.points

@@ -1329,6 +1329,14 @@ class CustomPulse(PulseSequence):
         return b1, gradients, time
 
 
+def _use_static_spin_major(kernel: str, switch: Optional[bool]) -> bool:
+    """Return whether a static run uses the spin-major executor.
+
+    ``switch=None`` uses it for the production kernel only.
+    """
+    return kernel == "production" if switch is None else bool(switch)
+
+
 class BlochSimulator:
     """
     High-level interface for Bloch equation simulations.
@@ -1362,11 +1370,14 @@ class BlochSimulator:
         memory_policy : MemoryPolicy, optional
             Reserve-based or fixed-limit RAM policy. The process-wide GUI policy
             is used when omitted.
-        sequence_kernel : {"production", "strict_reference"}
+        sequence_kernel : {"production", "legacy", "strict_reference"}
             Native kernel used by event-based sequence simulations.
-            ``strict_reference`` selects the separately compiled no-fast-math
-            extension that checks the production kernel. The old name
-            ``"optimized"`` is an alias of ``"production"``.
+            ``"production"`` runs on the float64 spin-major executor and falls
+            back to ``"legacy"`` (the fast-math C kernel, the default before
+            the switch) for objects it cannot run. ``strict_reference`` selects
+            the separately compiled no-fast-math extension that checks the
+            legacy kernel. The old name ``"optimized"`` is an alias of
+            ``"legacy"``.
         dynamic_sequence_kernel : {"numpy", "production", "reference"}
             Kernel used specifically for dynamic spectral sequence simulations.
             ``"production"`` is the native kernel (old names
@@ -1427,9 +1438,10 @@ class BlochSimulator:
         except StaticSpinMajorFallback as exc:
             reason = exc.reason
         # Frames: this helper, the public method, its caller.
+        fallback = "legacy" if kernel == "production" else kernel
         warnings.warn(
-            "the static spin-major adapter fell back to the static "
-            f"{kernel} kernel: {reason}",
+            "the static spin-major executor fell back to the static "
+            f"{fallback} kernel: {reason}",
             KernelFallbackWarning,
             stacklevel=3,
         )
@@ -2092,7 +2104,7 @@ class BlochSimulator:
         spin_sampling=None,
         spoiler_mode: str = "ideal",
         checkpoint_dtype=None,
-        _static_spin_major: bool = False,
+        _static_spin_major: Optional[bool] = None,
     ):
         """Simulate independent Lorentzian spectral components and sum signals.
 
@@ -2105,14 +2117,15 @@ class BlochSimulator:
         across all components after each chunk. Voxels shared by components
         count once per component, matching the independent simulation work.
 
-        The private switch ``_static_spin_major=True`` runs all components as
-        pools of one spin-major run (passes of at most six pools), with
-        float64-close results. Progress then counts plan intervals summed
-        over passes, and the preview reports the summed signal of finished
-        passes plus the running one. If the executor cannot run the object,
-        a ``KernelFallbackWarning`` is emitted, the reason is stored in
-        ``metadata["static_spin_major_fallback_reason"]``, and the static
-        kernel runs.
+        The ``"production"`` kernel runs all components as pools of one
+        spin-major run (passes of at most six pools), with float64-close
+        results. Progress then counts plan intervals summed over passes, and
+        the preview reports the summed signal of finished passes plus the
+        running one. If the executor cannot run the object, a
+        ``KernelFallbackWarning`` is emitted, the reason is stored in
+        ``metadata["static_spin_major_fallback_reason"]``, and the
+        ``"legacy"`` kernel runs. The private switch ``_static_spin_major``
+        (``None``: production only) forces the executor on or off.
         """
         from .sequence import SequenceSimulationResult
         from .spectral_phantom import SpectralPhantom
@@ -2139,18 +2152,15 @@ class BlochSimulator:
             raise ValueError("spectral phantom has no active components")
         static_outputs = None
         static_metadata = {}
-        if _static_spin_major:
+        selected_kernel = canonical_kernel_name(
+            "sequence",
+            self.sequence_kernel if sequence_kernel is None else sequence_kernel,
+        )
+        if _use_static_spin_major(selected_kernel, _static_spin_major):
             static_outputs, static_metadata = self._run_static_spin_major(
                 program,
                 components,
-                kernel=canonical_kernel_name(
-                    "sequence",
-                    (
-                        self.sequence_kernel
-                        if sequence_kernel is None
-                        else sequence_kernel
-                    ),
-                ),
+                kernel=selected_kernel,
                 signal_weighting=signal_weighting,
                 checkpoints_s=checkpoints_s,
                 simulation_timestep_s=simulation_timestep_s,
@@ -2519,7 +2529,7 @@ class BlochSimulator:
         spoiler_mode: str = "ideal",
         checkpoint_dtype=None,
         equilibrium_mz=None,
-        _static_spin_major: bool = False,
+        _static_spin_major: Optional[bool] = None,
         _static_spin_major_output=None,
     ):
         """Simulate an event-based sequence on a heterogeneous 1D/2D/3D object.
@@ -2533,9 +2543,9 @@ class BlochSimulator:
         physical voxel volume of a 3D phantom. ``simulation_timestep_s`` sets
         the maximum compiler interval while RF is active; event boundaries and
         ADC observation times are always retained exactly. ``sequence_kernel``
-        overrides the simulator's ``"production"`` or ``"strict_reference"`` kernel
-        selection for this call (the old name ``"optimized"`` still selects
-        ``"production"``). ``spin_sampling`` controls deterministic
+        overrides the simulator's ``"production"``, ``"legacy"`` or
+        ``"strict_reference"`` kernel selection for this call (the old name
+        ``"optimized"`` selects ``"legacy"``). ``spin_sampling`` controls deterministic
         intravoxel position sampling in gradient-waveform mode.
         ``spoiler_mode='ideal'`` always uses one spin per voxel and applies
         declared transverse crushers, while ``'gradient'`` derives spoiling
@@ -2551,15 +2561,16 @@ class BlochSimulator:
         ``chunk_voxels`` the first chunk holds about 1/64 of the voxels so
         an early run rate is available.
 
-        The private switch ``_static_spin_major=True`` runs the object as a
-        one-pool phantom on the float64 spin-major executor (results
-        float64-close to the static kernel; ``chunk_voxels`` is ignored).
+        The ``"production"`` kernel runs the object as a one-pool phantom on
+        the float64 spin-major executor (``chunk_voxels`` is ignored).
         Progress then counts plan intervals instead of voxels, and the
         preview reports the signal of the finished intervals. If the
         executor cannot run the object, a ``KernelFallbackWarning`` is
         emitted, the reason is stored in
-        ``metadata["static_spin_major_fallback_reason"]``, and the static
-        kernel runs.
+        ``metadata["static_spin_major_fallback_reason"]``, and the
+        ``"legacy"`` fast-math kernel runs. The private switch
+        ``_static_spin_major`` (``None``: production only) forces the
+        executor on or off.
         """
         from .phantom import Phantom
         from .sequence import (
@@ -2670,7 +2681,7 @@ class BlochSimulator:
         if _static_spin_major_output is not None:
             # One component of a spectral spin-major run.
             static_output, static_metadata = _static_spin_major_output
-        elif _static_spin_major:
+        elif _use_static_spin_major(selected_kernel, _static_spin_major):
             static_outputs, static_metadata = self._run_static_spin_major(
                 program,
                 [(str(getattr(phantom, "name", "static")), phantom)],

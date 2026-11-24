@@ -52,14 +52,15 @@ received signals are then summed.
 
 | Selection | Implementation and intended use |
 | --- | --- |
-| **Production (recommended)** — `production` | Native streaming C kernel. It propagates one spin through the complete sequence without storing a spin-by-time history, processes active spins in bounded chunks, and distributes spins over the configured CPU threads. RF-free intervals avoid the general 3×3 rotation, RF-active intervals use a quaternion rotation, and phantoms with at most 64 distinct exact T1/T2 pairs reuse precomputed relaxation factors. Continuous T1/T2 maps automatically use per-spin factors instead. Use this for normal simulations. |
-| **Strict reference (validation)** — `strict_reference` | Separately compiled Float64 extension. It uses the general rotation-matrix path with per-spin/per-interval relaxation and has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the production kernel, but deliberately omits its fast paths. It disables fast math and floating-point contraction and reports the `strict-float64` numerical contract. It checks the production kernel for fast-math effects; it is not a more accurate physical model, because it uses the same time discretization. |
+| **Production (recommended)** — `production` | Default since this release. Runs the static object on the dynamic Float64 spin-major executor (module `blochsimulator.static_spin_major`): spectral components become pools of one run (at most six per pass, more run in passes), per-voxel T1/T2 become relaxation groups (at most 256), and coils, Tx maps, subvoxel spins, crushers and checkpoints keep their static semantics. It splits free precession symmetrically around the RF rotation (second order). Anything the executor cannot run falls back to the legacy kernel with a `KernelFallbackWarning` (see below). Use this for normal simulations. |
+| **Legacy fast-math (previous default)** — `legacy` | The previous native streaming C kernel (`blochsimulator_cy`, `-ffast-math`, contract `legacy-fast-math`). It propagates one spin through the complete sequence without storing a spin-by-time history, processes active spins in bounded chunks and distributes them over the CPU threads; RF-free intervals avoid the general 3×3 rotation, RF-active intervals use a quaternion rotation, and up to 64 distinct T1/T2 pairs reuse precomputed relaxation factors. It stays selectable for one release to compare old results and will then be removed. |
+| **Strict reference (validation)** — `strict_reference` | Separately compiled Float64 extension. It uses the general rotation-matrix path with per-spin/per-interval relaxation and has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the legacy kernel, but deliberately omits its fast paths. It disables fast math and floating-point contraction and reports the `strict-float64` numerical contract. It checks the legacy kernel for fast-math effects; it is not a more accurate physical model, because it uses the same time discretization. |
 
-The production and strict reference paths implement the same Bloch
-propagation, but their floating-point operation order is not identical. Very small rounding-level
-differences are therefore possible. OpenMP parallelism is across spins, and
-thread-local ADC sums are combined after propagation. This makes the standard
-kernel much easier to parallelize than the dynamic solver.
+The legacy and strict reference paths implement the same Bloch propagation,
+but their floating-point operation order is not identical, so rounding-level
+differences are possible. The strict reference checks the legacy kernel, not
+the spin-major production path; both are checked against the Gold reference
+below.
 
 The physical reference for the static kernels is the Python Gold reference
 `blochsimulator.sequence.reference.simulate_reference_sequence`. It does not use
@@ -97,40 +98,37 @@ for a 240 µs interval with 4/s). Contrast `step_s` epoch boundaries where the
 rates change are interval breakpoints, so every interval lies inside one
 epoch.
 
-The old name `optimized` is still accepted for `production` (in Python, saved
-settings, projects, and scripts). It runs the same kernel with bit-identical
-results; the result metadata reports `sequence_kernel="production"` and keeps
-the name as passed in `requested_sequence_kernel`.
+The old name `optimized` is still accepted (in Python, saved settings,
+projects, and scripts). In Python it selects `legacy`, so existing scripts and
+benchmarks keep bit-identical results; the result metadata reports
+`sequence_kernel="legacy"` and keeps the name as passed in
+`requested_sequence_kernel`. A GUI setting saved as `optimized` opens with the
+new default `production`.
 
-A private, experimental switch `_static_spin_major=True` on
-`simulate_sequence` and `simulate_spectral_sequence` runs the static object on
-the dynamic spin-major executor instead (module
-`blochsimulator.static_spin_major`). Spectral components become pools of one
-run (at most six per pass, more run in passes), per-voxel T1/T2 become
-relaxation groups (at most 256), and coils, Tx maps, subvoxel spins, crushers
-and checkpoints keep their static semantics. The result is Float64-close, not
-bit-identical: the dynamic kernel splits free precession around the RF
-rotation, so the difference to the production kernel is a time-step error
-(about `5e-4` relative at 20 µs with a 1 µs RF raster, `8e-6` at 1 µs). It
-shrinks only where the RF raster is finer than the step, because constant RF
-samples are not subdivided. With the switch, `progress_callback(done, total)`
-counts plan intervals summed over passes instead of voxels, `chunk_voxels` is
-ignored, and `metadata["progress_unit"]` is `"intervals"`. Anything the
-executor cannot run (strict reference, more than 256 T1/T2 combinations,
-negative equilibrium Mz, a spatially varying chemical shift, a too small
-memory budget) emits `KernelFallbackWarning`, records
-`static_spin_major_fallback_reason` and runs the static kernel. The default
-is unchanged.
+The production result is Float64-close to the legacy kernel, not
+bit-identical: the difference is a time-step error (about `5e-4` relative at
+20 µs with a 1 µs RF raster, `8e-6` at 1 µs). It shrinks only where the RF
+raster is finer than the step, because constant RF samples are not subdivided.
+`progress_callback(done, total)` counts plan intervals summed over passes
+instead of voxels, `chunk_voxels` is ignored, and `metadata["progress_unit"]`
+is `"intervals"`; `metadata["static_spin_major"]` is `True`. Cases the
+executor cannot run (more than 256 T1/T2 combinations, negative equilibrium
+Mz, a spatially varying chemical shift, a too small memory budget, explicit
+positions with several pools, more than three axes) emit
+`KernelFallbackWarning`, record `static_spin_major_fallback_reason` and run
+the legacy kernel; the GUI completion message names the reason. The private
+switch `_static_spin_major` (`None` = by kernel, `True`/`False` = force) is
+kept for tests.
 
 Against the gold reference (`sequence/reference.py`, 24 probes on a
-phase-cycled sinc slice train, 1 µs RF raster) the switch is second order and
-about half as wrong as the static kernel: `2.9e-3` at 20 µs, `1.7e-4` at
-5 µs (static `5.9e-3`, `3.5e-4`). At or below the RF raster both stop
-changing: the static kernel keeps a first-order relaxation error (exact
+phase-cycled sinc slice train, 1 µs RF raster) production is second order and
+about half as wrong as the legacy kernel: `2.9e-3` at 20 µs, `1.7e-4` at
+5 µs (legacy `5.9e-3`, `3.5e-4`). At or below the RF raster both stop
+changing: the legacy kernel keeps a first-order relaxation error (exact
 without relaxation), the spin-major path a smaller splitting error
 (`5e-7` with or without relaxation). `run_timestep_convergence` and
-`estimate_timestep_error` take the same private switch, so the time-step
-check measures the kernel that produces the result.
+`estimate_timestep_error` use the simulator's kernel, so the time-step check
+measures the kernel that produces the result.
 
 ### Dynamic spectral model
 

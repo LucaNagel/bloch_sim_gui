@@ -1,5 +1,6 @@
 import pytest
 
+from blochsimulator import BlochSimulator
 from blochsimulator.sequence import (
     ConvergenceCriteria,
     SequenceConvergenceCase,
@@ -49,6 +50,9 @@ def test_suite_reports_global_limit_and_limiting_sequence_class():
             max_vector_error=1e-3,
             rms_vector_error=1e-3,
         ),
+        # The legacy kernel rotates each constant RF sample exactly; the
+        # spin-major production kernel splits it (raster-limited error).
+        simulator=BlochSimulator(use_parallel=False, sequence_kernel="legacy"),
     )
 
     native, native_raster, coarse = result.summary_records()

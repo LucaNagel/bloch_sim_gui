@@ -274,15 +274,16 @@ def run_timestep_convergence(
     criteria: ConvergenceCriteria | None = None,
     max_rf_checkpoints: int = 64,
     simulator=None,
-    _static_spin_major: bool = False,
+    _static_spin_major: bool | None = None,
 ) -> TimestepConvergenceResult:
     """Compare production time steps with the independent gold reference.
 
     This routine is intended for tens to a few thousand probes, not full image
     phantoms.  The default observations are RF event ends plus sequence end, so
     the checkpoints do not insert additional boundaries inside an RF event and
-    artificially improve a coarse candidate. The private switch
-    ``_static_spin_major`` is passed to ``simulate_sequence``.
+    artificially improve a coarse candidate. The simulator's static kernel
+    runs the candidates; the private switch ``_static_spin_major`` is passed to
+    ``simulate_sequence``.
     """
 
     if not isinstance(program, SequenceProgram):
@@ -467,7 +468,7 @@ def estimate_timestep_error(
     spoiler_mode: str = "ideal",
     simulator=None,
     cancel_callback=None,
-    _static_spin_major: bool = False,
+    _static_spin_major: bool | None = None,
 ) -> TimestepErrorEstimate:
     """Estimate the RF time-step error of a whole sequence from a few probes.
 
@@ -487,9 +488,9 @@ def estimate_timestep_error(
     are dropped because they do not change the magnetization. When the
     reference needs more than ``max_reference_intervals`` RF intervals, only
     the sequence up to the first RF event beyond that budget is checked.
-    With the private switch ``_static_spin_major`` both runs use the static
-    spin-major path, so the estimate measures the kernel that produces the
-    result.
+    Both runs use the simulator's static kernel (spin-major for
+    ``"production"``), so the estimate measures the kernel that produces the
+    result; the private switch ``_static_spin_major`` overrides that.
     """
 
     start = perf_counter()

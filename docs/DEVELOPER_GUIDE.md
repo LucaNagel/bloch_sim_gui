@@ -824,7 +824,9 @@ default first; the dialog's combo-box constants must match it. Stored settings
 outside that subset resolve to the GUI default. Old names (`optimized`,
 `native_parallel`, `native_serial`) are aliases in `KERNEL_ALIASES`;
 `canonical_kernel_name` maps them to the public names `production`,
-`strict_reference`, `numpy`, and `reference`, and `internal_dynamic_kernel`
+`legacy`, `strict_reference`, `numpy`, and `reference` (sequence `optimized`
+maps to `legacy`, which keeps benchmarks on the old path; the settings loader
+maps a stored `optimized` to the GUI default `production`), and `internal_dynamic_kernel`
 maps a dynamic name to its internal path. `SEQUENCE_KERNEL_NAMES` and
 `DYNAMIC_KERNEL_NAMES` iterate only the public names but accept the aliases in
 `in` tests, so `benchmark_kernels.py` keeps working unchanged. The remaining

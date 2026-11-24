@@ -1,11 +1,10 @@
 """Private adapter that runs static sequences on the spin-major executor.
 
 ``BlochSimulator.simulate_sequence`` and ``simulate_spectral_sequence`` call
-:func:`run_static_components` when the private switch
-``_static_spin_major=True`` is set. The static components become pools of a
-dynamic phantom without kinetics, which reuses the dynamic compile, the
-execution plan and the float64 spin-major executor. The default static path
-is unchanged.
+:func:`run_static_components` for the ``"production"`` kernel (the default).
+The static components become pools of a dynamic phantom without kinetics,
+which reuses the dynamic compile, the execution plan and the float64
+spin-major executor.
 
 Mapping of static component ``c`` onto pool ``c``:
 
@@ -24,7 +23,7 @@ Results are returned per component in per-unit magnetization over that
 component's active voxels, aligned with ``get_active_properties()``.
 Progress counts plan intervals summed over passes, not voxels. Anything the
 executor cannot run raises :class:`StaticSpinMajorFallback`; callers warn
-with ``KernelFallbackWarning`` and run the static kernel instead.
+with ``KernelFallbackWarning`` and run the ``"legacy"`` kernel instead.
 """
 
 from __future__ import annotations
@@ -295,8 +294,6 @@ def run_static_components(
         raise StaticSpinMajorFallback(
             "the strict reference kernel has no spin-major executor"
         )
-    if simulation_timestep_s is None:
-        raise StaticSpinMajorFallback("no simulation time step was given")
     first = components[0][1]
     single = len(components) == 1
     if first.has_explicit_positions and not single:

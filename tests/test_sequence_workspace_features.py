@@ -253,7 +253,7 @@ def test_spectral_worker_updates_percentage_and_eta_within_one_component(
     widget._simulation_started_at = 100.0
     assert widget._estimated_work_units() == 5
     worker = SequenceSimulationThread(
-        BlochSimulator(use_parallel=False),
+        BlochSimulator(use_parallel=False, sequence_kernel="legacy"),
         program,
         widget.phantom,
         (),

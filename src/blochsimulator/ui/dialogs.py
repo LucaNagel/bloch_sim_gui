@@ -56,18 +56,27 @@ class SettingsDialog(QDialog):
     # Other kernels (dynamic "numpy" and "reference") remain available from
     # Python for benchmarks and validation.
     SEQUENCE_KERNELS = (("Production (recommended)", "production"),)
-    SEQUENCE_KERNEL_EXTRAS = (("Strict reference (validation)", "strict_reference"),)
+    SEQUENCE_KERNEL_EXTRAS = (
+        ("Legacy fast-math (previous default)", "legacy"),
+        ("Strict reference (validation)", "strict_reference"),
+    )
     DYNAMIC_SEQUENCE_KERNELS = (("Production (recommended)", "production"),)
     DYNAMIC_SEQUENCE_KERNEL_EXTRAS = ()
     SEQUENCE_KERNEL_TOOLTIPS = {
         "production": (
-            "Recommended for ordinary Bloch simulations. Uses native streaming "
-            "propagation and mathematically equivalent fast paths for RF-free "
-            "intervals and uniform relaxation."
+            "Recommended for ordinary Bloch simulations. Runs on the Float64 "
+            "spin-major executor that also runs dynamic phantoms, with multiple "
+            "CPU workers. Objects it cannot run fall back to the legacy kernel "
+            "with a warning."
+        ),
+        "legacy": (
+            "The default before the spin-major switch, kept selectable for one "
+            "release. Native streaming propagation compiled with fast-math. "
+            "Results differ from Production at the level of the time-step error."
         ),
         "strict_reference": (
             "Validation option. Uses a separately compiled Float64 reference "
-            "kernel without fast-math or floating-point contraction, so production "
+            "kernel without fast-math or floating-point contraction, so legacy "
             "results can be checked for fast-math effects. It is slower and not "
             "intended as a speed setting. The physical reference for static "
             "simulations is the Python Gold reference used by the validation tests."

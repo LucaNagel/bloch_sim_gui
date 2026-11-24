@@ -120,6 +120,10 @@ def test_kernel_difference_shrinks_with_the_time_step(dynamic_kernel, static_ker
         )
         magnetization_errors.append(np.abs(dynamic_final - static_final).max())
 
+    if static_kernel == dynamic_kernel == "production":
+        # Static production runs on the same spin-major executor.
+        assert max(signal_errors + magnetization_errors) < 1e-12
+        return
     for errors in (signal_errors, magnetization_errors):
         assert errors[0] > 4.0 * errors[1] > 16.0 * errors[2]
     assert signal_errors[-1] < SIGNAL_TOLERANCE_AT_1_US
