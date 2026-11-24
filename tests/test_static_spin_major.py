@@ -418,3 +418,141 @@ def test_progress_preview_and_cancel():
             _static_spin_major=True,
             cancel_callback=lambda: True,
         )
+
+
+def _probes(n_spins=4):
+    from blochsimulator.sequence.convergence import SpinProbeEnsemble
+
+    rng = np.random.default_rng(1)
+    return SpinProbeEnsemble(
+        positions_m=np.column_stack(
+            [np.zeros(n_spins), np.zeros(n_spins), rng.uniform(-4e-3, 4e-3, n_spins)]
+        ),
+        frequency_offsets_hz=rng.uniform(-200.0, 200.0, n_spins),
+        b1_scales=np.ones(n_spins),
+        t1_s=np.full(n_spins, 3.0),
+        t2_s=np.full(n_spins, 0.08),
+        initial_magnetization=(0.0, 0.0, 1.0),
+    )
+
+
+def test_second_order_against_the_gold_reference():
+    from blochsimulator.sequence.convergence import run_timestep_convergence
+
+    steps = (20e-6, 10e-6, 5e-6)
+    errors = {}
+    for spin_major in (False, True):
+        result = run_timestep_convergence(
+            _train(repetitions=1),
+            _probes(),
+            timesteps_s=steps,
+            simulator=_simulator(),
+            _static_spin_major=spin_major,
+        )
+        errors[spin_major] = [point.max_vector_error for point in result.points]
+    orders = np.log(np.divide(errors[True][:-1], errors[True][1:])) / np.log(2.0)
+    assert np.all(orders > 1.8)
+    # Symmetric splitting halves the static kernel's error on this train.
+    assert errors[True][0] < 0.75 * errors[False][0]
+
+
+def test_timestep_estimate_measures_the_kernel_that_runs():
+    from blochsimulator.sequence.convergence import estimate_timestep_error
+
+    class Recording(BlochSimulator):
+        paths = []
+
+        def simulate_sequence(self, *args, **kwargs):
+            result = super().simulate_sequence(*args, **kwargs)
+            self.paths.append(result.metadata.get("static_spin_major", False))
+            return result
+
+    simulator = Recording(use_parallel=False, num_threads=1)
+    estimates = {}
+    for spin_major in (False, True):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", KernelFallbackWarning)
+            estimates[spin_major] = estimate_timestep_error(
+                _train(repetitions=1),
+                STEP_S,
+                positions_m=((0.0, 0.0, -4e-3), (0.0, 0.0, 4e-3)),
+                frequency_offsets_hz=(-100.0, 100.0),
+                line_samples=3,
+                simulator=simulator,
+                _static_spin_major=spin_major,
+            )
+    assert Recording.paths == [False, False, True, True]
+    assert estimates[True].max_vector_error != estimates[False].max_vector_error
+    assert 0.0 < estimates[True].max_vector_error < 1e-2
+
+
+_BUILDER_FOV_M = (0.08, 0.08)
+
+
+def _builders():
+    from blochsimulator.sequence import pulseq_builders as builders
+
+    return {
+        "flash": lambda: builders.make_pulseq_flash(
+            fov_m=_BUILDER_FOV_M, matrix=(4, 4)
+        ),
+        "epi": lambda: builders.make_pulseq_epi(fov_m=_BUILDER_FOV_M, matrix=(4, 4)),
+        "csi": lambda: builders.make_pulseq_csi(
+            fov_m=_BUILDER_FOV_M,
+            matrix=(2, 2),
+            spectral_points=8,
+            spectral_bandwidth_hz=2000.0,
+            repetition_time_s=30e-3,
+        ),
+        "epsi": lambda: builders.make_pulseq_epsi_mge(
+            fov_m=_BUILDER_FOV_M, matrix=(4, 4), echoes=2
+        ),
+        "spiral": lambda: builders.make_pulseq_spiral(
+            fov_m=_BUILDER_FOV_M, matrix=(8, 8)
+        ),
+    }
+
+
+def _reconstruct(result):
+    if result.cartesian_acquisition_frames is not None:
+        return result.cartesian_acquisition_frames.reconstruct(result, 0)
+    if result.cartesian_acquisition is not None:
+        return result.cartesian_acquisition.reconstruct(result.signal)
+    if result.spectroscopic_acquisition is not None:
+        return result.spectroscopic_acquisition.reconstruct_spectra(result.signal)
+    return result.spiral_acquisition.reconstruct(result, 0)
+
+
+# Keys whose value names the path; every other key of the static run must
+# be unchanged, and the spin-major run may only add keys.
+_PATH_KEYS = {"numerical_contract", "native_sequence_kernel"}
+
+
+@pytest.mark.parametrize("name", ["flash", "epi", "csi", "epsi", "spiral"])
+def test_builders_keep_metadata_and_reconstruction(name, tmp_path):
+    from blochsimulator.sequence import load_pulseq
+
+    path = tmp_path / f"{name}.seq"
+    _builders()[name]().write(str(path), v141_compat=True)
+    program = load_pulseq(path)
+    shape = (6, 6, 1)
+    x = np.linspace(-1.0, 1.0, 6)
+    phantom = Phantom(
+        shape=shape,
+        fov=_BUILDER_FOV_M + (3e-3,),
+        t1_map=np.full(shape, 1.0),
+        t2_map=np.full(shape, 0.05),
+        pd_map=np.add.outer(1.0 + 0.2 * x, 0.1 * x)[..., None],
+    )
+    static, spin_major = _pair(phantom, program=program, checkpoints_s=())
+    assert set(static.metadata) <= set(spin_major.metadata)
+    for key, value in static.metadata.items():
+        if key not in _PATH_KEYS:
+            np.testing.assert_equal(spin_major.metadata[key], value, err_msg=key)
+    assert static.metadata["numerical_contract"] == "legacy-fast-math"
+    assert spin_major.metadata["numerical_contract"] == "float64-close"
+    _assert_close(static, spin_major)
+    image, spin_major_image = _reconstruct(static), _reconstruct(spin_major)
+    assert spin_major_image.shape == image.shape
+    assert spin_major_image.dtype == image.dtype
+    assert _relative(image, spin_major_image) < TOLERANCE

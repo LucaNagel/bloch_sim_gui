@@ -95,6 +95,16 @@ memory budget) emits `KernelFallbackWarning`, records
 `static_spin_major_fallback_reason` and runs the static kernel. The default
 is unchanged.
 
+Against the gold reference (`sequence/reference.py`, 24 probes on a
+phase-cycled sinc slice train, 1 µs RF raster) the switch is second order and
+about half as wrong as the static kernel: `2.9e-3` at 20 µs, `1.7e-4` at
+5 µs (static `5.9e-3`, `3.5e-4`). At or below the RF raster both stop
+changing: the static kernel keeps a first-order relaxation error (exact
+without relaxation), the spin-major path a smaller splitting error
+(`5e-7` with or without relaxation). `run_timestep_convergence` and
+`estimate_timestep_error` take the same private switch, so the time-step
+check measures the kernel that produces the result.
+
 ### Dynamic spectral model
 
 The dynamic kernel keeps a separate magnetization vector for every spectral
