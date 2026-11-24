@@ -37,6 +37,7 @@ from PyQt5.QtWidgets import (
 
 from ..mouse_phantom import MOUSE_TISSUE_COLORS
 from ..phantom import Phantom
+from .plot_export import install_plot_context_export, make_export_button
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 
 AXES = "xyz"
@@ -980,7 +981,9 @@ class SequenceGeometryViewer(QWidget):
         notice_layout.addWidget(self.update_button)
         self.stale_notice.hide()
         layout.addWidget(self.stale_notice)
-        grid = QGridLayout()
+        self.plot_area = QWidget()
+        grid = QGridLayout(self.plot_area)
+        grid.setContentsMargins(0, 0, 0, 0)
         self.plots = []
         self.images = []
         self.drag_handles = []
@@ -1019,6 +1022,13 @@ class SequenceGeometryViewer(QWidget):
         contrast_row = QHBoxLayout()
         contrast_row.addWidget(QLabel("Contrast"))
         contrast_row.addWidget(self.contrast_combo, 1)
+        self.export_button = make_export_button(
+            self,
+            lambda: self.plot_area,
+            "setup_geometry",
+            object_name="geometry_export_plot",
+        )
+        contrast_row.addWidget(self.export_button)
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         self.summary.setTextFormat(Qt.RichText)
@@ -1032,7 +1042,8 @@ class SequenceGeometryViewer(QWidget):
         grid.addWidget(side_panel, 1, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        layout.addLayout(grid, 1)
+        layout.addWidget(self.plot_area, 1)
+        install_plot_context_export(self.plot_area)
         self._phantom = None
         self._object_label = ""
         self._probe_position_m = None

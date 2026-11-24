@@ -47,6 +47,7 @@ from ..simulator import (
     apply_rf_carrier,
     resample_rf_pulse,
 )
+from .plot_export import make_export_button
 from .theme import set_tone
 
 
@@ -460,6 +461,13 @@ class SequenceDesigner(QGroupBox):
         zoom_layout.addWidget(self.diagram_full_button)
         zoom_layout.addWidget(self.diagram_first_tr_button)
         zoom_layout.addStretch(1)
+        self.diagram_export_button = make_export_button(
+            self,
+            lambda: self.diagram_widget,
+            "sequence_diagram",
+            object_name="sequence_diagram_export_plot",
+        )
+        zoom_layout.addWidget(self.diagram_export_button)
         layout.addLayout(zoom_layout)
         self.diagram_widget = SequenceDiagramWidget()
         self.diagram_widget.setToolTip(

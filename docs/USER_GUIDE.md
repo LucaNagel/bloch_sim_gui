@@ -389,6 +389,27 @@ increases the run time.
 | **Spin probe** | *Spin Probe → Export…* | `.nc`/`.npz` per probe + `load_spin_probes.ipynb` |
 | **Sequence** | *Export* beside *Generate sequence* | `.seq` and/or a notebook that regenerates it |
 | **Free Mode results** | *File → Export Results* | HDF5 + analysis notebook; optionally a *reproducible* notebook that re-runs the simulation |
+| **Plots / figures** | *Export plot…* button, or right-click a plot → *Export plot…* | PNG, SVG or PDF of the shown plot page; CSV/NPZ of its plotted data |
+
+### Exporting plots
+
+Every result plot has an **Export plot…** button: the sequence timeline
+(Sequence tab, next to the waveform controls), the sequence diagram in the
+designer, the Spectrum/FID/Signal views, the spin-probe views, the
+Reconstruction Explorer, Setup/Geometry, Spoiling Analysis, PSF and k-space
+tabs. It saves everything currently shown on that page — choose the format by
+the file type in the save dialog:
+
+- **PNG** — screen-resolution image; **SVG** and **PDF** — vector graphics for
+  papers and slides.
+- **CSV** — the 1D curves, two columns `<plot>__<curve>__x/__y` each (complex
+  data split into `_real`/`_imag`); a page with only an image writes that 2D
+  array instead.
+- **NPZ** — all curves and images, plus the full result arrays where a tab has
+  them (PSF/ideal PSF and k-space positions, the k-space ADC samples and
+  sampling PSF, the explorer's current view).
+
+Right-clicking any interactive plot adds the same entry for that single plot.
 
 *File → Project Explorer…* indexes folders of projects and shows what each
 contains without opening it. The default folder for all dialogs is set under

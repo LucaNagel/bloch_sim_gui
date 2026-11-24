@@ -221,6 +221,7 @@ from .spin_minimum import ZeroToMinimum, minimum_ms_from_message, spin_boxes
 from .spoiling_analysis_view import SpoilingAnalysisSnapshot, SpoilingAnalysisView
 from .kspace_view import KSpaceContext, KSpaceView
 from .psf_analysis_view import PSFAnalysisContext, PSFAnalysisView
+from .plot_export import install_plot_context_export, make_export_button
 from .plot_interaction import AXIS_ZOOM_TOOLTIP
 from .probe_viewers import SequenceProbeSpatialViewer, SequenceProbeSpectrumViewer
 from .project_export_dialog import ProjectExportNamingWidget
@@ -6530,6 +6531,13 @@ class SequenceSimulationWidget(QWidget):
         self.signal_adc_only_checkbox.toggled.connect(self._signal_adc_only_toggled)
         view_mode_row.addWidget(self.signal_adc_only_checkbox)
         view_mode_row.addStretch()
+        self.signal_export_plot_button = make_export_button(
+            self,
+            lambda: self.view_stack.currentWidget(),
+            "signal",
+            object_name="signal_export_plot",
+        )
+        view_mode_row.addWidget(self.signal_export_plot_button)
         views = HeaderTabWidget()
         self.views = views
         install_tab_bar_wheel_scroll(views)
@@ -6590,6 +6598,13 @@ class SequenceSimulationWidget(QWidget):
         self.gradient_load_toggle.toggled.connect(self._gradient_load_toggled)
         waveform_controls.addWidget(self.gradient_load_toggle)
         waveform_controls.addStretch()
+        self.sequence_export_plot_button = make_export_button(
+            self,
+            lambda: self.sequence_plot_area,
+            "sequence_waveforms",
+            object_name="sequence_export_plot",
+        )
+        waveform_controls.addWidget(self.sequence_export_plot_button)
         timeline_layout.addLayout(waveform_controls)
         self.waveform_value_summary = QLabel("No sequence waveforms")
         self.waveform_value_summary.setWordWrap(True)
@@ -6682,11 +6697,17 @@ class SequenceSimulationWidget(QWidget):
         )
         self.rf_progress_cursor.setVisible(self.live_preview_enabled)
         self.gradient_progress_cursor.setVisible(self.live_preview_enabled)
-        timeline_layout.addWidget(self.rf_plot, 3)
-        timeline_layout.addWidget(self.gradient_plot, 3)
-        timeline_layout.addWidget(self.gradient_load_warning)
-        timeline_layout.addWidget(self.gradient_load_summary)
-        timeline_layout.addWidget(self.gradient_load_plot, 2)
+        # The plots sit in their own page so "Export plot…" saves them
+        # without the controls above.
+        self.sequence_plot_area = QWidget()
+        sequence_plot_layout = QVBoxLayout(self.sequence_plot_area)
+        sequence_plot_layout.setContentsMargins(0, 0, 0, 0)
+        sequence_plot_layout.addWidget(self.rf_plot, 3)
+        sequence_plot_layout.addWidget(self.gradient_plot, 3)
+        sequence_plot_layout.addWidget(self.gradient_load_warning)
+        sequence_plot_layout.addWidget(self.gradient_load_summary)
+        sequence_plot_layout.addWidget(self.gradient_load_plot, 2)
+        timeline_layout.addWidget(self.sequence_plot_area, 1)
         self.sequence_tab_index = views.addTab(timeline, "Sequence")
         views.setTabToolTip(
             self.sequence_tab_index,
@@ -6811,6 +6832,13 @@ class SequenceSimulationWidget(QWidget):
         self.probe_export_button.setMenu(probe_export_menu)
         self.probe_export_button.setEnabled(False)
         probe_run_row.addWidget(self.probe_export_button)
+        self.probe_export_plot_button = make_export_button(
+            self,
+            lambda: self.probe_views.currentWidget(),
+            "spin_probe",
+            object_name="sequence_probe_export_plot",
+        )
+        probe_run_row.addWidget(self.probe_export_plot_button)
         probe_layout.addLayout(probe_run_row)
         self.probe_empty_hint = QLabel(
             "<b>No spin probe has run yet.</b> In the Sequence tab, set "
@@ -7091,6 +7119,8 @@ class SequenceSimulationWidget(QWidget):
         split_views.addWidget(split_signal_panel)
         split_views.setSizes([1, 1])
         self.view_stack.addWidget(split_page)
+        # Every result plot with a menu also offers "Export plot…" there.
+        install_plot_context_export(views)
 
         for view, label in (
             (self.kspace_view, self.kspace_zoom_info),
