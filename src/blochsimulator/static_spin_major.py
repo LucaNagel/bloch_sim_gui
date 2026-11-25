@@ -43,6 +43,7 @@ from .dynamic_phantom import (
 )
 from .spectral_phantom import ChemicalSpecies
 from .units import NUCLEUS_GAMMA_HZ_PER_T
+from .simulation_defaults import DEFAULT_SIMULATION_TIMESTEP_S
 
 # Each group adds one precomputed relaxation entry per plan group in C.
 MAX_RELAXATION_GROUPS = 256
@@ -289,7 +290,7 @@ def run_static_components(
     num_threads=1,
     memory_budget_bytes=None,
     checkpoints_s=(),
-    simulation_timestep_s=None,
+    simulation_timestep_s=DEFAULT_SIMULATION_TIMESTEP_S,
     spin_sampling=None,
     spoiler_mode="ideal",
     checkpoint_dtype=np.float64,

@@ -37,6 +37,7 @@ import numpy as np
 
 from .acquisition import AcquisitionDimensions, CartesianAcquisitionVolumes
 from .encoding import EncodingFrame, numeric_definition_array
+from ..simulation_defaults import DEFAULT_SIMULATION_TIMESTEP_S
 
 # Each virtual coil accumulates every spin of its run, so run cost grows with
 # the square of the source count; batches keep long sweeps linear.
@@ -148,7 +149,7 @@ def simulate_point_sources(
     sources: Sequence[PointSource],
     *,
     simulator=None,
-    simulation_timestep_s=None,
+    simulation_timestep_s=DEFAULT_SIMULATION_TIMESTEP_S,
     sequence_kernel=None,
     spoiler_mode: str = "ideal",
     progress_callback: Optional[Callable[[int, int], None]] = None,

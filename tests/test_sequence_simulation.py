@@ -1516,9 +1516,10 @@ def test_legacy_adapter_matches_existing_endpoint_solver():
     # Use the identical point coordinate as the legacy reference.
     phantom.positions[0] = position[0]
     program = SequenceProgram.from_legacy(b1, gradients, time)
+    # The native 10 us raster matches the legacy endpoint discretization.
     streamed = BlochSimulator(
         use_parallel=False, sequence_kernel="strict_reference"
-    ).simulate_sequence(program, phantom)
+    ).simulate_sequence(program, phantom, simulation_timestep_s=None)
     assert streamed.mx.item() == pytest.approx(legacy["mx"].item(), abs=1e-10)
     assert streamed.my.item() == pytest.approx(legacy["my"].item(), abs=1e-10)
     assert streamed.mz.item() == pytest.approx(legacy["mz"].item(), abs=1e-10)

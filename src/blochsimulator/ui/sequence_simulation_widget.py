@@ -272,6 +272,7 @@ from .fundamental_inputs import (
     ConfirmedComboBox,
     ConfirmedDoubleSpinBox,
 )
+from ..simulation_defaults import DEFAULT_SIMULATION_TIMESTEP_S
 
 
 # Run progress is drawn in permille so time extrapolation moves smoothly.
@@ -1390,7 +1391,7 @@ class SequenceSimulationThread(QThread):
         nucleus="C13",
         live_preview=True,
         chunk_voxels=None,
-        simulation_timestep_s=1e-6,
+        simulation_timestep_s=DEFAULT_SIMULATION_TIMESTEP_S,
         spin_sampling=None,
         spoiler_mode="ideal",
         animation_time_resolution_s=None,
@@ -1691,7 +1692,7 @@ class SequenceProbeThread(QThread):
         t1_s,
         t2_s,
         initial_magnetization=(0.0, 0.0, 1.0),
-        simulation_timestep_s=1e-6,
+        simulation_timestep_s=DEFAULT_SIMULATION_TIMESTEP_S,
         equilibrium_mz=1.0,
         ideal_spoiling=True,
     ):

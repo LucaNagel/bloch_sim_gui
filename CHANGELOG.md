@@ -6,6 +6,14 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking changes
+
+- All sequence simulation entry points default to
+  `simulation_timestep_s = 20 µs` (`DEFAULT_SIMULATION_TIMESTEP_S`), like the
+  GUI. Static calls previously used the native sequence raster (`None`) and
+  dynamic calls 1 µs. Pass `None` or a smaller step explicitly to restore the
+  old behaviour; spectrally selective and SPSP pulses need 5 µs or 1 µs.
+
 ### Added
 
 - The mouse kidney can collect urine in a renal pelvis compartment at the

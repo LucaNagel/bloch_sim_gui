@@ -24,6 +24,7 @@ from .memory import (
     resolve_memory_budget,
 )
 from .kernel_capabilities import canonical_kernel_name
+from .simulation_defaults import DEFAULT_SIMULATION_TIMESTEP_S
 
 RF_PULSE_TYPE_OPTIONS = (
     "Rectangle",
@@ -2097,7 +2098,7 @@ class BlochSimulator:
         preview_callback=None,
         cancel_callback=None,
         status_callback=None,
-        simulation_timestep_s=None,
+        simulation_timestep_s=DEFAULT_SIMULATION_TIMESTEP_S,
         sequence_kernel=None,
         spin_sampling=None,
         spoiler_mode: str = "ideal",
@@ -2362,7 +2363,7 @@ class BlochSimulator:
         preview_callback=None,
         cancel_callback=None,
         status_callback=None,
-        simulation_timestep_s=None,
+        simulation_timestep_s=DEFAULT_SIMULATION_TIMESTEP_S,
         sequence_kernel=None,
         equilibrium_mz: float = 1.0,
         ideal_spoiling: bool = True,
@@ -2521,7 +2522,7 @@ class BlochSimulator:
         preview_callback=None,
         cancel_callback=None,
         status_callback=None,
-        simulation_timestep_s=None,
+        simulation_timestep_s=DEFAULT_SIMULATION_TIMESTEP_S,
         sequence_kernel=None,
         spin_sampling=None,
         spoiler_mode: str = "ideal",
@@ -2539,8 +2540,11 @@ class BlochSimulator:
         ``signal_weighting='voxel'`` preserves the historical relative signal
         sum. ``'voxel_volume'`` additionally multiplies proton density by the
         physical voxel volume of a 3D phantom. ``simulation_timestep_s`` sets
-        the maximum compiler interval while RF is active; event boundaries and
-        ADC observation times are always retained exactly. ``sequence_kernel``
+        the maximum compiler interval while RF is active (default
+        ``DEFAULT_SIMULATION_TIMESTEP_S`` = 20 µs, the GUI default); event
+        boundaries and ADC observation times are always retained exactly.
+        ``None`` compiles on the native sequence raster only, so a long RF
+        sample becomes one interval with a large splitting error. ``sequence_kernel``
         overrides the simulator's ``"production"`` or ``"strict_reference"``
         kernel selection for this call (the old names ``"optimized"`` and
         ``"legacy"`` select ``"production"``). ``spin_sampling`` controls deterministic

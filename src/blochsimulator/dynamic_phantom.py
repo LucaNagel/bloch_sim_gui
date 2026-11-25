@@ -30,6 +30,7 @@ from .kernel_capabilities import (
     internal_dynamic_kernel,
     public_dynamic_kernel,
 )
+from .simulation_defaults import DEFAULT_SIMULATION_TIMESTEP_S
 
 # Internal dynamic path names; the public names map onto them in
 # kernel_capabilities (production -> native_parallel, numpy -> optimized).
@@ -3786,7 +3787,7 @@ def _simulate_dynamic_sequence_block(
     preview_callback=None,
     cancel_callback=None,
     status_callback=None,
-    simulation_timestep_s=1e-6,
+    simulation_timestep_s=DEFAULT_SIMULATION_TIMESTEP_S,
     signal_weighting="voxel",
     sequence_kernel="optimized",
     use_parallel=True,
@@ -5540,7 +5541,7 @@ def _simulate_dynamic_sequence_single_source(
     preview_callback=None,
     cancel_callback=None,
     status_callback=None,
-    simulation_timestep_s=1e-6,
+    simulation_timestep_s=DEFAULT_SIMULATION_TIMESTEP_S,
     signal_weighting="voxel",
     sequence_kernel="optimized",
     use_parallel=True,

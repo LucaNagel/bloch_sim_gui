@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
+from ..simulation_defaults import DEFAULT_SIMULATION_TIMESTEP_S
 from ..kernel_capabilities import GUI_KERNEL_NAMES, resolve_kernel_request
 from ..units import NUCLEUS_GAMMA_HZ_PER_T
 
@@ -25,7 +26,7 @@ SEQUENCE_TIMESTEP_PRESETS = (
     ("Custom", "custom", None),
 )
 DEFAULT_SEQUENCE_TIMESTEP_PRESET = "very_fast"
-DEFAULT_SEQUENCE_TIMESTEP_US = 20.0
+DEFAULT_SEQUENCE_TIMESTEP_US = DEFAULT_SIMULATION_TIMESTEP_S * 1e6
 SEQUENCE_TIMESTEP_TOOLTIP = (
     "Time step while RF is active. Larger steps average RF and simultaneous "
     "gradients over fewer intervals; ADC times, event boundaries and free "

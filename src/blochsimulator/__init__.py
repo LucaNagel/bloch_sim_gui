@@ -17,6 +17,7 @@ from .sequence.acquisition import (  # noqa: F401
     AcquisitionDetectionWarning,
     AcquisitionNotRecognized,
 )
+from .simulation_defaults import DEFAULT_SIMULATION_TIMESTEP_S  # noqa: F401
 from .kernel_capabilities import (  # noqa: F401
     DYNAMIC_KERNEL_NAMES,
     KERNEL_ALIASES,

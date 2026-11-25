@@ -852,7 +852,10 @@ utilization alone.
 
 Two settings trade accuracy for runtime: the RF simulation time step
 (`simulation_timestep_s`, GUI presets Accurate 1 µs, Balanced 5 µs, Fast 10 µs,
-Very fast 20 µs; the default is 20 µs)
+Very fast 20 µs; the default is 20 µs in the GUI and in every Python entry
+point, `blochsimulator.DEFAULT_SIMULATION_TIMESTEP_S`; `None` compiles on the
+native sequence raster only, where a long RF sample becomes one interval with
+a large splitting error)
 and how finely the phantom is sampled relative to the acquisition matrix. Two
 self-contained benchmarks measure both on an analytic two-container phantom
 (`benchmarks/synthetic_phantoms.py`, pyruvate/lactate, ±15 Hz B0 gradient), so
