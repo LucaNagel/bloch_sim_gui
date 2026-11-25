@@ -114,15 +114,18 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dynamic-kernel",
         choices=(
-            "optimized",
+            "production",
+            "numpy",
+            "reference",
             "native_serial",
             "native_parallel",
-            "reference",
+            "optimized",
         ),
-        default="optimized",
+        default="production",
         help=(
             "Dynamic pyruvate/lactate kernel used outside the dedicated kernel "
-            "comparison (default: optimized)."
+            "comparison (default: production; native_serial is production on "
+            "one thread)."
         ),
     )
     parser.add_argument(

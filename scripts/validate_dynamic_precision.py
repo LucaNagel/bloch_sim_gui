@@ -1,4 +1,4 @@
-"""Validate dynamic sequence kernels against the optimized Float64 oracle.
+"""Validate dynamic sequence kernels against the NumPy Float64 oracle.
 
 Inputs may be Pulseq ``.seq`` files or self-contained ``.blochproj`` projects.
 The validator reports total/species signal, phase, low-signal, time-resolved

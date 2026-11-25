@@ -8,7 +8,7 @@ physical solvers. Sequence Bloch kernels propagate ordinary independent Bloch
 states. Dynamic spectral kernels additionally retain coupled pyruvate/lactate
 states, optional product pools, and integrate conversion, polarization and
 inflow.
-Each optimized, native, or experimental result is compared with the reference
+Each production or alternative result is compared with the reference
 implementation from the same solver family: ``strict_reference`` for Sequence
 Bloch kernels and ``reference`` for dynamic spectral kernels.
 
@@ -19,13 +19,13 @@ Run from the repository root::
     python -m benchmarks.benchmark_kernels
     python -m benchmarks.benchmark_kernels --repeats 3
     python -m benchmarks.benchmark_kernels \\
-        --sequence-kernels strict_reference optimized \\
-        --dynamic-kernels reference optimized native_serial native_parallel
+        --sequence-kernels strict_reference production \\
+        --dynamic-kernels reference numpy production native_serial
 
 ``--kernel-phantom-matrix`` changes only X/Y sampling; the complete source Z
 volume remains in the simulation. Increase it to study realistic large-object
 behavior. The default dynamic ``1 x 1 x 9`` subvoxel grid normally crosses the
-threshold at which ``native_parallel`` can use multiple CPU workers.
+threshold at which ``production`` can use multiple CPU workers.
 
 Reading the output
 ------------------
@@ -108,13 +108,15 @@ SEQUENCE_KERNEL_CHOICES = tuple(
 SEQUENCE_KERNELS = ("strict_reference", "production")
 DYNAMIC_KERNELS = tuple(
     name
-    for name in (
-        "reference",
-        "optimized",
-        "native_serial",
-        "native_parallel",
-    )
+    for name in ("reference", "numpy", "production")
     if name in DYNAMIC_KERNEL_NAMES
+)
+# Old names stay selectable; native_serial runs production on one thread.
+DYNAMIC_KERNEL_CHOICES = (
+    *DYNAMIC_KERNELS,
+    "native_serial",
+    "native_parallel",
+    "optimized",
 )
 REFERENCE_KERNELS = {"sequence": "strict_reference", "dynamic": "reference"}
 DEFAULT_KERNEL_PHANTOM_MATRIX = (24, 24)
@@ -135,13 +137,20 @@ KERNEL_DESCRIPTIONS = {
         "Direct allocation-heavy NumPy two-pool implementation. It is the "
         "correctness oracle for pyruvate/lactate kinetics."
     ),
-    "dynamic/optimized": (
-        "Production NumPy two-pool path with persistent state, reusable scratch "
+    "dynamic/numpy": (
+        "NumPy two-pool path with persistent state, reusable scratch "
         "arrays, and cached kinetic, relaxation, and phase coefficients."
+    ),
+    "dynamic/production": (
+        "Float64 spin-major executor with OpenMP across spins; objects it "
+        "cannot run fall back to the NumPy path with a warning."
     ),
     "dynamic/native_serial": (
         "Float64 spin-major executor on one worker thread; objects it cannot "
         "run fall back to the NumPy path with a warning."
+    ),
+    "dynamic/optimized": (
+        "Old name of numpy: NumPy two-pool path with persistent state."
     ),
     "dynamic/native_parallel": (
         "Float64 spin-major executor with OpenMP across spins; objects it "
@@ -161,7 +170,7 @@ def add_kernel_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dynamic-kernels",
         nargs="+",
-        choices=DYNAMIC_KERNELS,
+        choices=DYNAMIC_KERNEL_CHOICES,
         default=list(DYNAMIC_KERNELS),
         help="Dynamic spectral kernels to compare (default: all).",
     )
@@ -435,7 +444,7 @@ def _run_family(
             simulator = _make_simulator(
                 args,
                 sequence_kernel=kernel if family == "sequence" else "production",
-                dynamic_kernel=kernel if family == "dynamic" else "optimized",
+                dynamic_kernel=kernel if family == "dynamic" else "production",
             )
             print_simulation_start(
                 repeat=repeat,

@@ -11,6 +11,8 @@ flow in
 > described below has been removed. Production now runs the spin-major
 > executor or, outside its coverage, the NumPy kernel. The measurements are
 > kept as a historical record.
+> Current runtimes are listed in
+> [simulation_kernels.md](simulation_kernels.md#measured-runtimes).
 
 The `optimized` path preserves the dynamic reference implementation bit for
 bit. Persistent RF-waveform blocks, the complete native plan driver, and fixed
@@ -115,12 +117,11 @@ were bit-identical.  A larger 48^3 three-repetition benchmark ran in about
 
 ## Strict native block primitives
 
-The dynamic native extension is separate from the legacy Bloch extension.
-The legacy extension still uses `-ffast-math` on supported toolchains; the
-dynamic extension is compiled with strict floating-point settings, including
-disabled fast math and disabled floating-point contraction.  This separation
-prevents a performance experiment from silently weakening the established
-bit-exact CPU contract.
+The dynamic native extension (`dynamic_spin_major_cy`) is separate from the
+static Bloch extensions. It is compiled with strict floating-point settings,
+including disabled fast math and disabled floating-point contraction, like
+`blochsimulator_strict_cy`. Only `blochsimulator_cy` (used by `simulate()`
+and `simulate_phantom`, no longer by any sequence kernel) keeps `-ffast-math`.
 
 The Cython layer normally receives coefficients that have already been
 calculated and rounded. For chunked spatial RF and transverse phase factors,
@@ -307,7 +308,7 @@ checkpoint arrays remain global requested outputs. A pre-allocation memory
 plan accounts separately for these outputs, per-parent work, and a bounded
 cache reserve.
 
-For a reproducible accuracy report of a dynamic kernel against the optimized
+For a reproducible accuracy report of a dynamic kernel against the `numpy`
 `float64` oracle, including optional 3D k-space and image metrics, run:
 
 ```bash
@@ -321,8 +322,8 @@ python scripts/validate_dynamic_precision.py \
   --output-json /tmp/dynamic_precision.json
 ```
 
-`--candidate` is repeatable and accepts `native_parallel`, `native_serial`,
-and `reference`.  Omit `--phantom` to use a small heterogeneous synthetic
+`--candidate` is repeatable and accepts `production`, `native_parallel`,
+`native_serial` (production on one thread), and `reference`.  Omit `--phantom` to use a small heterogeneous synthetic
 two-pool object.  The `--max-adc-events` option provides a shorter
 accumulation test while retaining the original RF/gradient events through the
 selected acquisition.

@@ -1105,7 +1105,7 @@ At minimum, the transport implementation should include:
 - recovery of the current local model when velocity and exchange are disabled;
 - non-negative concentrations under the supported time-step limits;
 - precursor/product balance for $k_{PL}$ and $k_{PA}$;
-- agreement between reference and optimized kernels.
+- agreement between the `reference`, `numpy` and `production` kernels.
 
 ### How to Add a New Pulse Sequence
 

@@ -330,6 +330,11 @@ def test_kernel_benchmark_defaults_cover_both_kernel_families():
 
     assert tuple(args.sequence_kernels) == SEQUENCE_KERNELS
     assert tuple(args.dynamic_kernels) == DYNAMIC_KERNELS
+    assert tuple(args.dynamic_kernels) == ("reference", "numpy", "production")
+    native_serial = build_kernel_parser().parse_args(
+        ["--dynamic-kernels", "native_serial"]
+    )
+    assert native_serial.dynamic_kernels == ["native_serial"]
     assert tuple(args.sequence_kernels) == ("strict_reference", "production")
     assert tuple(strict_args.sequence_kernels) == ("strict_reference",)
     with pytest.raises(SystemExit):
@@ -374,7 +379,7 @@ def test_kernel_benchmark_prints_physical_and_implementation_differences(capsys)
     assert "kPL conversion" in output
     assert "strict_reference: General rotation-matrix" in output
     assert "reference: Direct allocation-heavy NumPy" in output
-    assert "native_parallel: Float64 spin-major executor with OpenMP" in output
+    assert "numpy: NumPy two-pool path" in output
     assert "production: Float64 spin-major executor" in output
 
 

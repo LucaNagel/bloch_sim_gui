@@ -262,7 +262,7 @@ generated sequences). Your own sequences and phantoms can be compared with
 ``--timestep-phantom-files``. Records contain the median runtime, speed-up,
 compiled interval count, signal error, and per-metabolite errors relative to
 the total signal (``pool_<name>_error_vs_signal``). The standalone command
-uses the ``native_parallel`` dynamic kernel like the GUI.
+uses the dynamic ``production`` kernel (``native_parallel``) like the GUI.
 
 Phantom-oversampling comparison
 -------------------------------
@@ -298,9 +298,10 @@ The kernel benchmark separates the two independent execution-engine settings:
   additionally integrates kPL conversion, polarization, inflow, and dynamic
   B0 when present.
 
-By default it compares ``strict_reference`` and ``optimized`` for the ordinary
+By default it compares ``strict_reference`` and ``production`` for the ordinary
 Sequence Bloch path. For the dynamic phantom it compares ``reference``,
-``optimized``, ``native_serial``, and ``native_parallel``.
+``numpy``, and ``production``; the old name ``native_serial`` selects
+production on one thread.
 Each candidate uses the same phantom, FLASH acquisition, time step, spin grid,
 and ideal-crusher model as its family reference. The console explains every
 kernel before the simulation and reports runtime, speed-up, signal similarity,
@@ -309,13 +310,13 @@ final-state similarity, the actually used kernel, and explicit fallbacks.
 The default comparison resamples every source Z plane to a ``24x24`` X/Y grid,
 retaining the complete 3D phantom, and uses a ``16x16`` FLASH matrix. Together
 with the common ``1x1x9`` dynamic subvoxel grid, this normally exceeds the
-1,024-spin threshold at which ``native_parallel`` enables multiple workers.
+1,024-spin threshold at which ``production`` enables multiple workers.
 
 Selections and workload can be changed explicitly::
 
     python -m benchmarks.benchmark_kernels \
-      --sequence-kernels strict_reference optimized \
-      --dynamic-kernels reference optimized native_serial native_parallel \
+      --sequence-kernels strict_reference production \
+      --dynamic-kernels reference numpy production native_serial \
       --kernel-phantom-matrix 32x32 \
       --kernel-flash-matrix 16 16 \
       --kernel-subvoxel-spins 1 1 9 \

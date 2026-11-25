@@ -233,3 +233,41 @@ For routine use:
   coefficient preparation, ADC summation, and unsupported longitudinal kinetics
   can remain in NumPy, while frequent small native calls incur OpenMP overhead.
 - Dynamic state is always integrated in `float64`.
+
+## Measured runtimes
+
+Measured on 2026-11-25 on an Apple M3 (8 cores, 4 performance cores) with
+`benchmarks/benchmark_kernels.py`, profile `quick`, 3 repeats, 20 µs time
+step, 2D FLASH (16 × 16 matrix, 0.24 s sequence). Times are median simulation
+times; the speed-up is relative to the reference kernel of the same family
+(`strict_reference` for static phantoms, `reference` for dynamic phantoms).
+"All threads" lets OpenMP choose the thread count; "1 thread" sets
+`--threads 1`.
+
+Default workload: 24 × 24 × 8 static phantom; dynamic phantom with 1 × 1 × 9
+subvoxel spins.
+
+| Family | Kernel | All threads | 1 thread |
+| --- | --- | --- | --- |
+| static | `strict_reference` | 0.031 s | 0.070 s |
+| static | `production` | 0.042 s (0.8×) | 0.045 s (1.6×) |
+| dynamic | `reference` | 1.47 s | 1.50 s |
+| dynamic | `numpy` | 0.40 s (3.6×) | 0.41 s (3.7×) |
+| dynamic | `production` | 0.038 s (39×) | 0.037 s (40×) |
+
+Larger workload (`--kernel-phantom-matrix 64x64`):
+
+| Family | Kernel | All threads | 1 thread |
+| --- | --- | --- | --- |
+| static | `strict_reference` | 0.109 s | 0.360 s |
+| static | `production` | 0.068 s (1.6×) | 0.131 s (2.7×) |
+| dynamic | `reference` | 6.06 s | 6.36 s |
+| dynamic | `numpy` | 1.61 s (3.8×) | 1.79 s (3.6×) |
+| dynamic | `production` | 0.054 s (~110×) | 0.137 s (46×) |
+
+The small default workload is dominated by fixed overhead; static
+`production` with all threads is then slower than `strict_reference`. The
+dynamic kernels agree to an L2 signal similarity of 1.000000000. Static
+`production` reaches 0.99982 against `strict_reference` because the two
+kernels split the time step differently. Timings vary by a few percent
+between runs.
