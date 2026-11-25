@@ -23,10 +23,10 @@ jobs:
             # pip fall back to compiling h5py and its native HDF5 dependency.
             cibw_archs: "AMD64"
             deployment_target: ""
-          # Match the release wheel's declared macOS 14 compatibility.
-          - os: macos-14
+          # Match the release wheel's declared macOS 15 compatibility.
+          - os: macos-15
             cibw_archs: "arm64"
-            deployment_target: "14.0"
+            deployment_target: "15.0"
 
     steps:
       - uses: actions/checkout@v6

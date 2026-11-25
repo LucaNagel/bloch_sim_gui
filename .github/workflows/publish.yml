@@ -181,11 +181,11 @@ jobs:
             # wheels (notably h5py), so publish 64-bit Windows wheels only.
             cibw_archs: "AMD64"
             deployment_target: ""
-          # Pin Sonoma while the published wheel targets macOS 14. Homebrew's
+          # Pin Sequoia while the published wheel targets macOS 15. Homebrew's
           # libomp bottle must not require a newer deployment target.
-          - os: macos-14
+          - os: macos-15
             cibw_archs: "arm64"
-            deployment_target: "14.0"
+            deployment_target: "15.0"
 
     steps:
       - uses: actions/checkout@v6
@@ -250,12 +250,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-latest, windows-latest]
+        os: [macos-15, ubuntu-latest, windows-latest]
         include:
-          - os: macos-14
+          - os: macos-15
             artifact_name: BlochSimulator_macOS
             asset_ext: .zip
-            deployment_target: "14.0"
+            deployment_target: "15.0"
           - os: ubuntu-latest
             artifact_name: BlochSimulator_Linux
             asset_ext: .tar.gz
