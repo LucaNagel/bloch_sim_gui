@@ -103,9 +103,9 @@ except ImportError:  # Allow: python benchmarks/benchmark_kernels.py
 
 
 SEQUENCE_KERNEL_CHOICES = tuple(
-    name for name in ("strict_reference", "optimized") if name in SEQUENCE_KERNEL_NAMES
+    name for name in ("strict_reference", "production") if name in SEQUENCE_KERNEL_NAMES
 )
-SEQUENCE_KERNELS = ("strict_reference", "optimized")
+SEQUENCE_KERNELS = ("strict_reference", "production")
 DYNAMIC_KERNELS = tuple(
     name
     for name in (
@@ -122,9 +122,9 @@ DEFAULT_KERNEL_FLASH_MATRIX = (16, 16)
 DEFAULT_KERNEL_SUBVOXEL_SPINS = (1, 1, 9)
 
 KERNEL_DESCRIPTIONS = {
-    "sequence/optimized": (
-        "Native streaming ordinary-Bloch path with RF-free, quaternion, and "
-        "relaxation-cache fast paths; spins are distributed over CPU threads."
+    "sequence/production": (
+        "Float64 spin-major executor with OpenMP across spins; objects it "
+        "cannot run fall back to strict_reference with a warning."
     ),
     "sequence/strict_reference": (
         "General rotation-matrix and per-spin relaxation path, separately "
@@ -140,12 +140,12 @@ KERNEL_DESCRIPTIONS = {
         "arrays, and cached kinetic, relaxation, and phase coefficients."
     ),
     "dynamic/native_serial": (
-        "Optimized dynamic driver with strict compiled RF and longitudinal "
-        "blocks using one worker thread; unsupported pieces fall back explicitly."
+        "Float64 spin-major executor on one worker thread; objects it cannot "
+        "run fall back to the NumPy path with a warning."
     ),
     "dynamic/native_parallel": (
-        "Native dynamic blocks with OpenMP across spins. Small objects may use "
-        "one thread, and unsupported pieces retain the optimized NumPy path."
+        "Float64 spin-major executor with OpenMP across spins; objects it "
+        "cannot run fall back to the NumPy path with a warning."
     ),
 }
 
@@ -434,7 +434,7 @@ def _run_family(
         for kernel in ordered_kernels:
             simulator = _make_simulator(
                 args,
-                sequence_kernel=kernel if family == "sequence" else "optimized",
+                sequence_kernel=kernel if family == "sequence" else "production",
                 dynamic_kernel=kernel if family == "dynamic" else "optimized",
             )
             print_simulation_start(

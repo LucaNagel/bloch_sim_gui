@@ -109,7 +109,7 @@ def test_native_sequence_kernel_matches_reference_without_relevant_relaxation():
         checkpoints_s=checkpoints,
     )
     native = BlochSimulator(
-        use_parallel=False, sequence_kernel="legacy"
+        use_parallel=False, sequence_kernel="strict_reference"
     ).simulate_sequence_probes(
         program,
         position,

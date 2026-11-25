@@ -98,14 +98,14 @@ def _slab_phantom():
     return Phantom(shape, (0.01, 0.01, 0.04), np.ones(shape), np.full(shape, 0.1))
 
 
-LEGACY = BlochSimulator(use_parallel=False, sequence_kernel="legacy")
+LEGACY = BlochSimulator(use_parallel=False, sequence_kernel="strict_reference")
 
 
 def test_block_pulse_has_no_time_step_error():
     estimate = estimate_timestep_error(
         _block_program(), 20e-6, frequency_offsets_hz=(0.0, 150.0)
     )
-    legacy = estimate_timestep_error(
+    strict = estimate_timestep_error(
         _block_program(),
         20e-6,
         frequency_offsets_hz=(0.0, 150.0),
@@ -115,9 +115,9 @@ def test_block_pulse_has_no_time_step_error():
     assert estimate.status == "checked"
     assert estimate.reference_timestep_s == pytest.approx(5e-6)
     # Production splits free precession around each merged RF interval; the
-    # legacy kernel rotates a constant RF sample exactly.
+    # strict C kernel rotates a constant RF sample exactly.
     assert estimate.max_vector_error < 1e-5
-    assert legacy.max_vector_error < 1e-9
+    assert strict.max_vector_error < 1e-9
     assert not estimate.exceeds(TIMESTEP_ERROR_NOTE_THRESHOLD)
     assert SequenceSimulationWidget._timestep_error_note(estimate.to_metadata()) == ""
 
@@ -156,7 +156,7 @@ def test_spsp_error_shrinks_with_the_step(spsp_program):
 
     # Second order in the RF step: halving it divides the error by about four.
     assert errors[1] < errors[0] / 3
-    # Production (measured 0.78 % and 0.32 %) is below legacy and shrinks too.
+    # Production (measured 0.78 % and 0.32 %) is below the strict kernel and shrinks too.
     assert production[0] < errors[0]
     assert production[1] < production[0] / 2
 
@@ -364,7 +364,9 @@ def _run_worker(program, phantom, step_s, kernel="production"):
 
 
 def test_worker_records_and_widget_reports_spsp_error(spsp_program):
-    result, stages = _run_worker(spsp_program, _slab_phantom(), 20e-6, "legacy")
+    result, stages = _run_worker(
+        spsp_program, _slab_phantom(), 20e-6, "strict_reference"
+    )
 
     check = result.metadata["timestep_error"]
     assert check["status"] == "checked"

@@ -409,7 +409,7 @@ def test_sequence_preview_reports_cumulative_signal_and_finishes_at_one():
     previews = []
 
     result = BlochSimulator(
-        use_parallel=False, sequence_kernel="legacy"
+        use_parallel=False, sequence_kernel="strict_reference"
     ).simulate_sequence(
         program,
         phantom,
@@ -497,7 +497,7 @@ def test_sequence_simulation_reports_compile_and_chunk_status():
     messages = []
 
     result = BlochSimulator(
-        use_parallel=False, sequence_kernel="legacy"
+        use_parallel=False, sequence_kernel="strict_reference"
     ).simulate_sequence(
         program,
         phantom,
@@ -539,7 +539,7 @@ def test_spectral_progress_reports_each_chunk_across_components(
         (RFEvent(0.0, np.array([250.0]), 1e-3), ADCEvent(1e-3, 2, 1e-3)),
         duration_s=3e-3,
     )
-    simulator = BlochSimulator(use_parallel=False, sequence_kernel="legacy")
+    simulator = BlochSimulator(use_parallel=False, sequence_kernel="strict_reference")
     # With default chunking, 32^3 subspins leave room for two parent voxels.
     sampling = SpinSampling((32, 32, 32)) if chunk_voxels is None else None
     simulation_options = {
@@ -608,7 +608,7 @@ def test_default_chunks_split_long_runs_for_regular_progress():
 def test_default_chunking_reports_voxel_progress_after_leading_chunk():
     phantom = _phantom(shape=(200,), m0=(1.0, 0.0, 0.0))
     program = SequenceProgram((ADCEvent(0.0, 2, 1e-3),), duration_s=2e-3)
-    simulator = BlochSimulator(use_parallel=False, sequence_kernel="legacy")
+    simulator = BlochSimulator(use_parallel=False, sequence_kernel="strict_reference")
     updates = []
     previews = []
 
@@ -787,35 +787,34 @@ def test_optimized_sequence_kernel_matches_strict_reference(relaxation_model):
         duration_s=interval_count * raster,
     )
     simulator = BlochSimulator(use_parallel=True, num_threads=2)
-    optimized = simulator.simulate_sequence(
-        program,
-        phantom,
-        checkpoints_s=(0.0, 6 * raster, 13 * raster, interval_count * raster),
-        chunk_voxels=np.prod(shape),
-        sequence_kernel="optimized",
-    )
-    strict = simulator.simulate_sequence(
-        program,
-        phantom,
-        checkpoints_s=(0.0, 6 * raster, 13 * raster, interval_count * raster),
-        chunk_voxels=np.prod(shape),
-        sequence_kernel="strict_reference",
-    )
+    checkpoints = (0.0, 6 * raster, 13 * raster, interval_count * raster)
+    runs = {
+        name: simulator.simulate_sequence(
+            program,
+            phantom,
+            checkpoints_s=checkpoints,
+            chunk_voxels=np.prod(shape),
+            sequence_kernel=name,
+        )
+        for name in ("optimized", "legacy", "production", "strict_reference")
+    }
+    strict = runs["strict_reference"]
 
-    # "optimized" is the old name of the legacy kernel and stays accepted.
-    assert optimized.metadata["sequence_kernel"] == "legacy"
-    assert optimized.metadata["requested_sequence_kernel"] == "optimized"
-    assert optimized.metadata["effective_threads"] == 2
-    assert optimized.metadata["numerical_contract"] == "legacy-fast-math"
+    # The old names select the production kernel, bit for bit.
+    for name in ("optimized", "legacy"):
+        old = runs[name]
+        assert old.metadata["sequence_kernel"] == "production"
+        assert old.metadata["requested_sequence_kernel"] == name
+        assert old.metadata["numerical_contract"] == "float64-close"
+        for field in ("signal", "final_magnetization", "checkpoint_magnetization"):
+            np.testing.assert_array_equal(
+                getattr(old, field), getattr(runs["production"], field)
+            )
     assert strict.metadata["sequence_kernel"] == "strict_reference"
     assert strict.metadata["requested_sequence_kernel"] == "strict_reference"
     assert strict.metadata["native_sequence_kernel"] == "reference"
     assert strict.metadata["effective_threads"] == 2
     assert strict.metadata["numerical_contract"] == "strict-float64"
-    for name in ("signal", "final_magnetization", "checkpoint_magnetization"):
-        np.testing.assert_allclose(
-            getattr(optimized, name), getattr(strict, name), rtol=5e-13, atol=5e-13
-        )
 
 
 def test_invalid_sequence_kernel_is_rejected():
@@ -1518,7 +1517,7 @@ def test_legacy_adapter_matches_existing_endpoint_solver():
     phantom.positions[0] = position[0]
     program = SequenceProgram.from_legacy(b1, gradients, time)
     streamed = BlochSimulator(
-        use_parallel=False, sequence_kernel="legacy"
+        use_parallel=False, sequence_kernel="strict_reference"
     ).simulate_sequence(program, phantom)
     assert streamed.mx.item() == pytest.approx(legacy["mx"].item(), abs=1e-10)
     assert streamed.my.item() == pytest.approx(legacy["my"].item(), abs=1e-10)

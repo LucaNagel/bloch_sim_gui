@@ -716,11 +716,13 @@ evolves every subvoxel spin exactly under the actual waveform.
 
 ### Sequence Simulation Backends and Numerical Contracts
 
-The ordinary sequence solver has two separately compiled extensions. The
-historical `blochsimulator_cy` target retains its established `-ffast-math`
-build and reports `legacy-fast-math`. The validation-only
-`blochsimulator_strict_cy` target uses `-fno-fast-math` and
-`-ffp-contract=off`; select it with `sequence_kernel="strict_reference"`.
+Static production runs on the dynamic spin-major extension (below); its
+fallback and `sequence_kernel="strict_reference"` use
+`blochsimulator_strict_cy`, built with `-fno-fast-math` and
+`-ffp-contract=off`. The historical `blochsimulator_cy` target keeps its
+`-ffast-math` build and reports `legacy-fast-math`; it still serves
+`simulate()`/`simulate_phantom`, but its `simulate_sequence_chunk` binding
+(compiled from the shared `bloch_wrapper.pyx`) is no longer a sequence kernel.
 Keep the source files and object targets separate so an incremental build
 cannot accidentally reuse fast-math objects in the strict extension.
 
@@ -824,11 +826,10 @@ extend it before adding a new label or dispatch branch. `GUI_KERNEL_NAMES` in
 the same module lists the subset offered by the settings dialog, with the GUI
 default first; the dialog's combo-box constants must match it. Stored settings
 outside that subset resolve to the GUI default. Old names (`optimized`,
-`native_parallel`, `native_serial`) are aliases in `KERNEL_ALIASES`;
-`canonical_kernel_name` maps them to the public names `production`,
-`legacy`, `strict_reference`, `numpy`, and `reference` (sequence `optimized`
-maps to `legacy`, which keeps benchmarks on the old path; the settings loader
-maps a stored `optimized` to the GUI default `production`), and `internal_dynamic_kernel`
+`legacy`, `native_parallel`, `native_serial`) are aliases in
+`KERNEL_ALIASES`; `canonical_kernel_name` maps them to the public names
+`production`, `strict_reference`, `numpy`, and `reference` (sequence
+`optimized` and `legacy` map to `production`), and `internal_dynamic_kernel`
 maps a dynamic name to its internal path. `SEQUENCE_KERNEL_NAMES` and
 `DYNAMIC_KERNEL_NAMES` iterate only the public names but accept the aliases in
 `in` tests, so `benchmark_kernels.py` keeps working unchanged. The remaining

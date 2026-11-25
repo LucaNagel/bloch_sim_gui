@@ -3,7 +3,7 @@
 The static ``"production"`` kernel runs ``simulate_sequence`` and
 ``simulate_spectral_sequence`` on the dynamic spin-major executor. It is a
 float64-close path: the dynamic kernel splits free precession around the RF
-rotation, so the gap to the ``"legacy"`` fast-math kernel is a time-step
+rotation, so the gap to the ``"strict_reference"`` C kernel is a time-step
 error that shrinks with the step. The private switch ``_static_spin_major``
 forces the executor on or off.
 """
@@ -82,13 +82,13 @@ def _simulator():
 
 
 def _pair(phantom, program=None, **kwargs):
-    """Return (legacy, spin-major) results without any fallback."""
+    """Return (strict reference, spin-major) results without any fallback."""
     program = _train() if program is None else program
     kwargs.setdefault("simulation_timestep_s", STEP_S)
     kwargs.setdefault("checkpoints_s", CHECKPOINTS_S)
     simulator = _simulator()
     static = simulator.simulate_sequence(
-        program, phantom, **{"sequence_kernel": "legacy", **kwargs}
+        program, phantom, **{"sequence_kernel": "strict_reference", **kwargs}
     )
     with warnings.catch_warnings():
         warnings.simplefilter("error", KernelFallbackWarning)
@@ -126,7 +126,7 @@ def _assert_close(static, spin_major, tolerance=TOLERANCE):
         )
 
 
-def test_production_default_runs_spin_major_and_legacy_keeps_the_old_path():
+def test_production_default_runs_spin_major_and_old_names_select_it():
     simulator = _simulator()
     assert simulator.sequence_kernel == "production"
     with warnings.catch_warnings():
@@ -142,23 +142,32 @@ def test_production_default_runs_spin_major_and_legacy_keeps_the_old_path():
     assert default.metadata["numerical_contract"] == "float64-close"
     np.testing.assert_array_equal(default.signal, forced.signal)
 
-    legacy = simulator.simulate_sequence(
-        _train(), _phantom(), simulation_timestep_s=STEP_S, sequence_kernel="legacy"
+    strict = simulator.simulate_sequence(
+        _train(),
+        _phantom(),
+        simulation_timestep_s=STEP_S,
+        sequence_kernel="strict_reference",
     )
-    assert "static_spin_major" not in legacy.metadata
-    assert "progress_unit" not in legacy.metadata
-    assert legacy.metadata["sequence_kernel"] == "legacy"
-    assert legacy.metadata["numerical_contract"] == "legacy-fast-math"
-    # The old name runs exactly the old path, and so does the switch.
-    for options in (
-        {"sequence_kernel": "optimized"},
-        {"_static_spin_major": False},
-    ):
-        result = simulator.simulate_sequence(
-            _train(), _phantom(), simulation_timestep_s=STEP_S, **options
-        )
-        assert "static_spin_major" not in result.metadata
-        np.testing.assert_array_equal(result.signal, legacy.signal)
+    assert "static_spin_major" not in strict.metadata
+    assert "progress_unit" not in strict.metadata
+    assert strict.metadata["sequence_kernel"] == "strict_reference"
+    assert strict.metadata["numerical_contract"] == "strict-float64"
+    # The old names select production; the switch runs the strict C kernel.
+    for name in ("optimized", "legacy"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", KernelFallbackWarning)
+            result = simulator.simulate_sequence(
+                _train(), _phantom(), simulation_timestep_s=STEP_S, sequence_kernel=name
+            )
+        assert result.metadata["static_spin_major"] is True
+        np.testing.assert_array_equal(result.signal, default.signal)
+    switched = simulator.simulate_sequence(
+        _train(), _phantom(), simulation_timestep_s=STEP_S, _static_spin_major=False
+    )
+    assert "static_spin_major" not in switched.metadata
+    assert switched.metadata["sequence_kernel"] == "production"
+    assert switched.metadata["numerical_contract"] == "strict-float64"
+    np.testing.assert_array_equal(switched.signal, strict.signal)
 
 
 def test_production_runs_without_a_simulation_time_step():
@@ -287,7 +296,7 @@ def test_spectral_species_become_pools_and_split_into_passes():
         checkpoints_s=CHECKPOINTS_S,
     )
     static = simulator.simulate_spectral_sequence(
-        _train(), phantom, sequence_kernel="legacy", **options
+        _train(), phantom, sequence_kernel="strict_reference", **options
     )
     with warnings.catch_warnings():
         warnings.simplefilter("error", KernelFallbackWarning)
@@ -323,10 +332,10 @@ def test_relaxation_groups_beyond_the_limit_run_in_voxel_batches(monkeypatch):
     assert batched.metadata["static_spin_major"] is True
     assert batched.metadata["static_spin_major_voxel_batches"] == 2
     assert batched.metadata["static_spin_major_passes"] == 2
-    legacy = _simulator().simulate_sequence(
-        _train(), phantom, sequence_kernel="legacy", **options
+    strict = _simulator().simulate_sequence(
+        _train(), phantom, sequence_kernel="strict_reference", **options
     )
-    _assert_close(legacy, batched)
+    _assert_close(strict, batched)
 
     # One batch with every row as a group gives the same result up to the
     # order in which the batches are summed.
@@ -372,7 +381,7 @@ def test_spectral_components_beyond_the_group_limit_run_in_voxel_batches():
         checkpoints_s=CHECKPOINTS_S,
     )
     static = simulator.simulate_spectral_sequence(
-        _train(), phantom, sequence_kernel="legacy", **options
+        _train(), phantom, sequence_kernel="strict_reference", **options
     )
     with warnings.catch_warnings():
         warnings.simplefilter("error", KernelFallbackWarning)
@@ -651,7 +660,7 @@ def test_builders_keep_metadata_and_reconstruction(name, tmp_path):
     for key, value in static.metadata.items():
         if key not in _PATH_KEYS:
             np.testing.assert_equal(spin_major.metadata[key], value, err_msg=key)
-    assert static.metadata["numerical_contract"] == "legacy-fast-math"
+    assert static.metadata["numerical_contract"] == "strict-float64"
     assert spin_major.metadata["numerical_contract"] == "float64-close"
     _assert_close(static, spin_major)
     image, spin_major_image = _reconstruct(static), _reconstruct(spin_major)

@@ -1370,14 +1370,13 @@ class BlochSimulator:
         memory_policy : MemoryPolicy, optional
             Reserve-based or fixed-limit RAM policy. The process-wide GUI policy
             is used when omitted.
-        sequence_kernel : {"production", "legacy", "strict_reference"}
+        sequence_kernel : {"production", "strict_reference"}
             Native kernel used by event-based sequence simulations.
             ``"production"`` runs on the float64 spin-major executor and falls
-            back to ``"legacy"`` (the fast-math C kernel, the default before
-            the switch) for objects it cannot run. ``strict_reference`` selects
-            the separately compiled no-fast-math extension that checks the
-            legacy kernel. The old name ``"optimized"`` is an alias of
-            ``"legacy"``.
+            back to ``"strict_reference"`` (the no-fast-math C kernel) for
+            objects it cannot run. The old names ``"optimized"`` and
+            ``"legacy"`` (the removed fast-math C kernel) select
+            ``"production"``.
         dynamic_sequence_kernel : {"production", "numpy", "reference"}
             Kernel used specifically for dynamic spectral sequence simulations.
             ``"production"`` (default) is the native kernel (old names
@@ -1438,10 +1437,9 @@ class BlochSimulator:
         except StaticSpinMajorFallback as exc:
             reason = exc.reason
         # Frames: this helper, the public method, its caller.
-        fallback = "legacy" if kernel == "production" else kernel
         warnings.warn(
             "the static spin-major executor fell back to the static "
-            f"{fallback} kernel: {reason}",
+            f"strict_reference kernel: {reason}",
             KernelFallbackWarning,
             stacklevel=3,
         )
@@ -2124,7 +2122,7 @@ class BlochSimulator:
         running one. If the executor cannot run the object, a
         ``KernelFallbackWarning`` is emitted, the reason is stored in
         ``metadata["static_spin_major_fallback_reason"]``, and the
-        ``"legacy"`` kernel runs. The private switch ``_static_spin_major``
+        ``"strict_reference"`` kernel runs. The private switch ``_static_spin_major``
         (``None``: production only) forces the executor on or off.
         """
         from .sequence import SequenceSimulationResult
@@ -2543,9 +2541,9 @@ class BlochSimulator:
         physical voxel volume of a 3D phantom. ``simulation_timestep_s`` sets
         the maximum compiler interval while RF is active; event boundaries and
         ADC observation times are always retained exactly. ``sequence_kernel``
-        overrides the simulator's ``"production"``, ``"legacy"`` or
-        ``"strict_reference"`` kernel selection for this call (the old name
-        ``"optimized"`` selects ``"legacy"``). ``spin_sampling`` controls deterministic
+        overrides the simulator's ``"production"`` or ``"strict_reference"``
+        kernel selection for this call (the old names ``"optimized"`` and
+        ``"legacy"`` select ``"production"``). ``spin_sampling`` controls deterministic
         intravoxel position sampling in gradient-waveform mode.
         ``spoiler_mode='ideal'`` always uses one spin per voxel and applies
         declared transverse crushers, while ``'gradient'`` derives spoiling
@@ -2568,7 +2566,7 @@ class BlochSimulator:
         executor cannot run the object, a ``KernelFallbackWarning`` is
         emitted, the reason is stored in
         ``metadata["static_spin_major_fallback_reason"]``, and the
-        ``"legacy"`` fast-math kernel runs. The private switch
+        ``"strict_reference"`` kernel runs. The private switch
         ``_static_spin_major`` (``None``: production only) forces the
         executor on or off.
         """
@@ -2760,25 +2758,16 @@ class BlochSimulator:
                 ),
             )
 
-        native_selected_kernel = "optimized"
-        numerical_contract = "legacy-fast-math"
+        # Without a spin-major result (strict_reference, or a production
+        # fallback) the no-fast-math C kernel runs.
+        native_selected_kernel = "reference"
+        numerical_contract = "strict-float64"
         try:
-            if selected_kernel == "strict_reference":
-                from .blochsimulator_strict_cy import simulate_sequence_chunk
-
-                native_selected_kernel = "reference"
-                numerical_contract = "strict-float64"
-            else:
-                from .blochsimulator_cy import simulate_sequence_chunk
+            from .blochsimulator_strict_cy import simulate_sequence_chunk
         except ImportError as exc:
-            extension_name = (
-                "blochsimulator_strict_cy"
-                if selected_kernel == "strict_reference"
-                else "blochsimulator_cy"
-            )
             raise ImportError(
-                f"{extension_name} does not contain the streaming sequence "
-                "kernel; rebuild the extensions"
+                "blochsimulator_strict_cy does not contain the streaming "
+                "sequence kernel; rebuild the extensions"
             ) from exc
 
         if static_output is None:

@@ -43,10 +43,8 @@ def test_kernel_capabilities_report_contract_fallback_and_plan_coverage():
     assert production.fallback_supported
     assert production.numerical_contract == "float64-close"
     assert production.details["spin_major"]
-    legacy = capabilities["sequence"]["legacy"]
-    assert legacy.available
-    assert legacy.numerical_contract == "legacy-fast-math"
-    assert not legacy.fallback_supported
+    # The fast-math kernel was removed; its name is an alias of production.
+    assert "legacy" not in capabilities["sequence"]
 
     native = capabilities["dynamic"]["production"]
     assert native.available
@@ -90,7 +88,7 @@ def test_persisted_kernel_resolution_keeps_safe_fallback_only(monkeypatch):
 
 def test_gui_kernel_lists_are_api_subsets_with_cpu_defaults():
     assert GUI_KERNEL_NAMES == {
-        "sequence": ("production", "legacy", "strict_reference"),
+        "sequence": ("production", "strict_reference"),
         "dynamic": ("production",),
     }
     assert set(GUI_KERNEL_NAMES["sequence"]) <= set(SEQUENCE_KERNEL_NAMES)
@@ -99,10 +97,9 @@ def test_gui_kernel_lists_are_api_subsets_with_cpu_defaults():
 
 def test_persisted_kernels_outside_gui_lists_resolve_to_gui_defaults():
     assert resolve_kernel_request("sequence", "reference") == "production"
-    # "optimized" was the static GUI default and follows the new default;
-    # an explicit legacy choice stays.
+    # Both names of the removed fast-math kernel select production.
     assert resolve_kernel_request("sequence", "optimized") == "production"
-    assert resolve_kernel_request("sequence", "legacy") == "legacy"
+    assert resolve_kernel_request("sequence", "legacy") == "production"
     assert resolve_kernel_request("dynamic", "invalid") == "production"
     # The NumPy path is no longer offered in the GUI; old settings migrate.
     for kernel in ("native_serial", "reference", "metal_hybrid", "optimized", "numpy"):
@@ -111,15 +108,15 @@ def test_persisted_kernels_outside_gui_lists_resolve_to_gui_defaults():
 
 def test_old_kernel_names_are_aliases_of_the_public_names():
     assert KERNEL_ALIASES == {
-        "sequence": {"optimized": "legacy"},
+        "sequence": {"optimized": "production", "legacy": "production"},
         "dynamic": {
             "native_parallel": "production",
             "native_serial": "production",
             "optimized": "numpy",
         },
     }
-    assert canonical_kernel_name("sequence", "optimized") == "legacy"
-    assert canonical_kernel_name("sequence", "legacy") == "legacy"
+    assert canonical_kernel_name("sequence", "optimized") == "production"
+    assert canonical_kernel_name("sequence", "legacy") == "production"
     assert canonical_kernel_name("sequence", "strict_reference") == "strict_reference"
     assert canonical_kernel_name("dynamic", "optimized") == "numpy"
     assert canonical_kernel_name("dynamic", "native_serial") == "production"
@@ -172,7 +169,7 @@ def test_dynamic_fallback_reads_old_and_new_metadata():
 def test_kernel_name_lists_accept_old_names_in_membership_tests():
     # Scripts such as benchmarks/benchmark_kernels.py filter old names with
     # ``in``; iteration still yields only the public names.
-    assert tuple(SEQUENCE_KERNEL_NAMES) == ("production", "legacy", "strict_reference")
+    assert tuple(SEQUENCE_KERNEL_NAMES) == ("production", "strict_reference")
     assert tuple(DYNAMIC_KERNEL_NAMES) == ("production", "numpy", "reference")
     assert "optimized" in SEQUENCE_KERNEL_NAMES
     for name in ("optimized", "native_serial", "native_parallel"):

@@ -50,9 +50,11 @@ def test_suite_reports_global_limit_and_limiting_sequence_class():
             max_vector_error=1e-3,
             rms_vector_error=1e-3,
         ),
-        # The legacy kernel rotates each constant RF sample exactly; the
+        # The strict C kernel rotates each constant RF sample exactly; the
         # spin-major production kernel splits it (raster-limited error).
-        simulator=BlochSimulator(use_parallel=False, sequence_kernel="legacy"),
+        simulator=BlochSimulator(
+            use_parallel=False, sequence_kernel="strict_reference"
+        ),
     )
 
     native, native_raster, coarse = result.summary_records()

@@ -52,15 +52,13 @@ received signals are then summed.
 
 | Selection | Implementation and intended use |
 | --- | --- |
-| **Production (recommended)** — `production` | Default since this release. Runs the static object on the dynamic Float64 spin-major executor (module `blochsimulator.static_spin_major`): spectral components become pools of one run (at most six per pass, more run in passes), per-voxel T1/T2 become relaxation groups (at most 256 per run; objects with more distinct T1/T2 rows run in voxel batches), and coils, Tx maps, subvoxel spins, crushers and checkpoints keep their static semantics. It splits free precession symmetrically around the RF rotation (second order). Anything the executor cannot run falls back to the legacy kernel with a `KernelFallbackWarning` (see below). Use this for normal simulations. |
-| **Legacy fast-math (previous default)** — `legacy` | The previous native streaming C kernel (`blochsimulator_cy`, `-ffast-math`, contract `legacy-fast-math`). It propagates one spin through the complete sequence without storing a spin-by-time history, processes active spins in bounded chunks and distributes them over the CPU threads; RF-free intervals avoid the general 3×3 rotation, RF-active intervals use a quaternion rotation, and up to 64 distinct T1/T2 pairs reuse precomputed relaxation factors. It stays selectable for one release to compare old results and will then be removed. |
-| **Strict reference (validation)** — `strict_reference` | Separately compiled Float64 extension. It uses the general rotation-matrix path with per-spin/per-interval relaxation and has the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel, and spoiler semantics as the legacy kernel, but deliberately omits its fast paths. It disables fast math and floating-point contraction and reports the `strict-float64` numerical contract. It checks the legacy kernel for fast-math effects; it is not a more accurate physical model, because it uses the same time discretization. |
+| **Production (recommended)** — `production` | Default since this release. Runs the static object on the dynamic Float64 spin-major executor (module `blochsimulator.static_spin_major`): spectral components become pools of one run (at most six per pass, more run in passes), per-voxel T1/T2 become relaxation groups (at most 256 per run; objects with more distinct T1/T2 rows run in voxel batches), and coils, Tx maps, subvoxel spins, crushers and checkpoints keep their static semantics. It splits free precession symmetrically around the RF rotation (second order). Anything the executor cannot run falls back to the strict reference kernel with a `KernelFallbackWarning` (see below). Use this for normal simulations. |
+| **Strict reference (validation, fallback)** — `strict_reference` | Separately compiled Float64 streaming C kernel (`blochsimulator_strict_cy`, no fast math, no floating-point contraction, contract `strict-float64`). It propagates one spin through the complete sequence with the general rotation-matrix path and per-spin/per-interval relaxation (rotation, then relaxation; first order in the step), with the same event, ADC, checkpoint, receive-coil, transmit-field, subvoxel and spoiler semantics. It is the production fallback and an independent check of the spin-major path; it is not a more accurate physical model. |
 
-The legacy and strict reference paths implement the same Bloch propagation,
-but their floating-point operation order is not identical, so rounding-level
-differences are possible. The strict reference checks the legacy kernel, not
-the spin-major production path; both are checked against the Gold reference
-below.
+The former fast-math kernel (`legacy`) was removed after one release as the
+previous default; its binding still exists in `blochsimulator_cy` (shared
+source with the strict build) but no sequence path calls it. Production and
+strict reference are both checked against the Gold reference below.
 
 The physical reference for the static kernels is the Python Gold reference
 `blochsimulator.sequence.reference.simulate_reference_sequence`. It does not use
@@ -98,16 +96,12 @@ for a 240 µs interval with 4/s). Contrast `step_s` epoch boundaries where the
 rates change are interval breakpoints, so every interval lies inside one
 epoch.
 
-The old name `optimized` is still accepted (in Python, saved settings,
-projects, and scripts). In Python it selects `legacy`, so existing scripts and
-benchmarks keep bit-identical results; the result metadata reports
-`sequence_kernel="legacy"` and keeps the name as passed in
-`requested_sequence_kernel`. A GUI setting saved as `optimized` opens with the
-new default `production`.
-
-The production result is Float64-close to the legacy kernel, not
-bit-identical: the difference is a time-step error (about `5e-4` relative at
-20 µs with a 1 µs RF raster, `8e-6` at 1 µs).
+The old names `optimized` and `legacy` are still accepted (in Python, saved
+settings, projects, and scripts) and select `production`; the result metadata
+reports `sequence_kernel="production"` and keeps the name as passed in
+`requested_sequence_kernel`. Results of old scripts therefore change by the
+time-step difference between the old first-order kernel and production (about
+`5e-4` relative at 20 µs with a 1 µs RF raster, `8e-6` at 1 µs).
 `progress_callback(done, total)` counts plan intervals summed over passes
 instead of voxels, `chunk_voxels` is ignored, and `metadata["progress_unit"]`
 is `"intervals"`; `metadata["static_spin_major"]` is `True`. Cases the
@@ -115,14 +109,16 @@ executor cannot run (negative equilibrium Mz, a spatially varying chemical
 shift, explicit positions with several pools, more than three axes, an empty
 plan) emit
 `KernelFallbackWarning`, record `static_spin_major_fallback_reason` and run
-the legacy kernel; the GUI completion message names the reason. The private
+the strict reference kernel (metadata `sequence_kernel="production"`,
+`numerical_contract="strict-float64"`); the GUI completion message names the reason. The private
 switch `_static_spin_major` (`None` = by kernel, `True`/`False` = force) is
 kept for tests.
 
 Against the gold reference (`sequence/reference.py`, 24 probes on a
 phase-cycled sinc slice train, 1 µs RF raster) production is second order and
-about half as wrong as the legacy kernel: `2.9e-3` at 20 µs, `1.7e-4` at
-5 µs (legacy `5.9e-3`, `3.5e-4`).
+about half as wrong as the removed first-order fast-math kernel: `2.9e-3` at
+20 µs, `1.7e-4` at 5 µs (old kernel `5.9e-3`, `3.5e-4`; the strict reference
+uses the same first-order scheme).
 
 The RF-active time step bounds every RF interval. A step finer than the RF
 raster divides each RF sample into equal parts no longer than the step, so
@@ -131,7 +127,7 @@ its splitting error depends on the interval length, not on the raster, so a
 coarsely rastered pulse (for example a 2 ms sinc with 64 samples, 31 µs)
 converges with the step (`3.6e-4` at 20 µs, `2.9e-5` at 5 µs) instead of
 keeping a raster-limited error (`1.4e-3`) that the time-step check could not
-see. The legacy kernel rotates a constant sample exactly without relaxation,
+see. The strict reference rotates a constant sample exactly without relaxation,
 so subdividing changes its results only by rounding and a smaller relaxation
 error. `run_timestep_convergence` and
 `estimate_timestep_error` use the simulator's kernel, so the time-step check

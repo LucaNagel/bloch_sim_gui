@@ -236,10 +236,11 @@ fixed 0.02 s dominates, so a 10 % share actually takes about 20 %.
 
 ### Static and dynamic kernel agreement
 
-The static kernel (`simulate_sequence`, `simulate_spectral_sequence`) rotates
-exactly over each step and then relaxes. Its native build uses `-ffast-math`.
-The dynamic kernel splits free precession and relaxation symmetrically around
-the RF rotation and is built without fast math. Without exchange, both solve the
+The strict reference kernel (`sequence_kernel="strict_reference"` and the
+production fallback) rotates exactly over each step and then relaxes. It is
+built without fast math. The dynamic kernel (also used by static production)
+splits free precession and relaxation symmetrically around the RF rotation and
+is built without fast math. Without exchange, both solve the
 same Bloch equation, so their difference is a pure time-step error.
 
 `tests/test_dynamic_static_kernel_agreement.py` checks this for every GUI kernel

@@ -14,10 +14,10 @@ from typing import Mapping
 
 
 # Older names stay readable (projects, settings, scripts, benchmarks). They
-# run exactly the path they ran before; results carry the public name. The
-# static "optimized" kernel is the fast-math C kernel, now called "legacy".
+# run under their public name. The static fast-math C kernel ("optimized",
+# later "legacy") was removed; both names now select the production kernel.
 KERNEL_ALIASES = {
-    "sequence": {"optimized": "legacy"},
+    "sequence": {"optimized": "production", "legacy": "production"},
     "dynamic": {
         "native_parallel": "production",
         "native_serial": "production",
@@ -45,11 +45,10 @@ class _KernelNames(tuple):
 
 # Public kernel names: one production kernel and one reference per family.
 # The static production kernel runs on the spin-major executor and falls back
-# to the fast-math C kernel ("legacy", the previous default) for objects it
-# cannot run. strict_reference is a no-fast-math check of the legacy kernel;
+# to strict_reference (the no-fast-math C kernel) for objects it cannot run;
 # the physical static reference is sequence.reference (no kernel name).
 SEQUENCE_KERNEL_NAMES = _KernelNames(
-    ("production", "legacy", "strict_reference"), KERNEL_ALIASES["sequence"]
+    ("production", "strict_reference"), KERNEL_ALIASES["sequence"]
 )
 DYNAMIC_KERNEL_NAMES = _KernelNames(
     ("production", "numpy", "reference"), KERNEL_ALIASES["dynamic"]
@@ -71,7 +70,7 @@ _DYNAMIC_PUBLIC = {
 }
 # The settings dialog offers only these choices; the first one is the default.
 # The remaining kernels stay available from Python for benchmarks and validation.
-GUI_SEQUENCE_KERNEL_NAMES = ("production", "legacy", "strict_reference")
+GUI_SEQUENCE_KERNEL_NAMES = ("production", "strict_reference")
 GUI_DYNAMIC_KERNEL_NAMES = ("production",)
 GUI_KERNEL_NAMES = {
     "sequence": GUI_SEQUENCE_KERNEL_NAMES,
@@ -200,9 +199,6 @@ def _extension_status(module_name: str, required_attributes=()):
 
 def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
     """Detect ordinary and dynamic-native kernel capabilities."""
-    legacy_available, legacy_reason, _ = _extension_status(
-        "blochsimulator.blochsimulator_cy", ("simulate_sequence_chunk",)
-    )
     strict_available, strict_reason, _ = _extension_status(
         "blochsimulator.blochsimulator_strict_cy", ("simulate_sequence_chunk",)
     )
@@ -238,22 +234,15 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
     }
 
     sequence = {
-        # Production needs the legacy extension for its fallback.
+        # Production needs the strict extension for its fallback.
         "production": KernelCapability(
             "sequence",
             "production",
-            legacy_available,
+            strict_available,
             fallback_supported=True,
-            reason=legacy_reason,
+            reason=strict_reason,
             numerical_contract="float64-close",
             details={"spin_major": spin_available},
-        ),
-        "legacy": KernelCapability(
-            "sequence",
-            "legacy",
-            legacy_available,
-            reason=legacy_reason,
-            numerical_contract="legacy-fast-math",
         ),
         "strict_reference": KernelCapability(
             "sequence",
@@ -308,10 +297,6 @@ def resolve_kernel_request(family: str, requested: str) -> str:
     capabilities = detect_kernel_capabilities()
     if family not in capabilities:
         raise ValueError("kernel family must be 'sequence' or 'dynamic'")
-    # "optimized" was the static GUI default before the spin-major switch;
-    # a stored default follows the new default.
-    if family == "sequence" and str(requested) == "optimized":
-        return GUI_KERNEL_NAMES[family][0]
     try:
         requested = canonical_kernel_name(family, requested)
     except ValueError:

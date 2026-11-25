@@ -24,7 +24,8 @@ Results are returned per component in per-unit magnetization over that
 component's active voxels, aligned with ``get_active_properties()``.
 Progress counts plan intervals summed over passes, not voxels. Anything the
 executor cannot run raises :class:`StaticSpinMajorFallback`; callers warn
-with ``KernelFallbackWarning`` and run the ``"legacy"`` kernel instead.
+with ``KernelFallbackWarning`` and run the ``"strict_reference"`` kernel
+instead.
 """
 
 from __future__ import annotations

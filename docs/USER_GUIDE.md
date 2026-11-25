@@ -457,11 +457,9 @@ Keep the defaults (**Sequence Bloch kernel → Production**, **Dynamic spectral
 kernel → Production**). For static phantoms *Production* now runs the
 second-order spin-major executor; cases it cannot handle fall back to the old
 kernel with a warning, and the completion message names the reason.
-*Legacy fast-math* is the previous default and stays selectable for one
-release to compare old results. The *strict reference* kernel is for
-validation, not speed. Older names (`native_parallel`, `native_serial`) still
-work and run the same code; `optimized` selects *Legacy* in Python and
-*Production* in saved GUI settings.
+The *strict reference* kernel is for validation, not speed. Older names
+(`native_parallel`, `native_serial`, `optimized`, `legacy`) still work and
+run *Production*; the former fast-math *Legacy* kernel was removed.
 
 What actually drives runtime:
 

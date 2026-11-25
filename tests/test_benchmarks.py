@@ -268,7 +268,7 @@ def test_benchmark_progress_output_describes_case_before_and_after_simulation(
         profile="quick",
         repeats=2,
         timestep_us=20.0,
-        sequence_kernel="optimized",
+        sequence_kernel="production",
         dynamic_kernel="optimized",
     )
 
@@ -330,7 +330,7 @@ def test_kernel_benchmark_defaults_cover_both_kernel_families():
 
     assert tuple(args.sequence_kernels) == SEQUENCE_KERNELS
     assert tuple(args.dynamic_kernels) == DYNAMIC_KERNELS
-    assert tuple(args.sequence_kernels) == ("strict_reference", "optimized")
+    assert tuple(args.sequence_kernels) == ("strict_reference", "production")
     assert tuple(strict_args.sequence_kernels) == ("strict_reference",)
     with pytest.raises(SystemExit):
         build_kernel_parser().parse_args(["--sequence-kernels", "reference"])
@@ -374,7 +374,8 @@ def test_kernel_benchmark_prints_physical_and_implementation_differences(capsys)
     assert "kPL conversion" in output
     assert "strict_reference: General rotation-matrix" in output
     assert "reference: Direct allocation-heavy NumPy" in output
-    assert "native_parallel: Native dynamic blocks with OpenMP" in output
+    assert "native_parallel: Float64 spin-major executor with OpenMP" in output
+    assert "production: Float64 spin-major executor" in output
 
 
 @pytest.mark.parametrize("shape", [(8, 8, 8), (16, 16, 32), (32, 24, 10)])

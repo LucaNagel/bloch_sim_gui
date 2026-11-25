@@ -158,7 +158,7 @@ def run_benchmark(
     simulator = BlochSimulator(
         use_parallel=True,
         num_threads=None if int(threads) <= 0 else int(threads),
-        sequence_kernel="optimized",
+        sequence_kernel="production",
     )
     records: list[dict] = []
     total_cases = (

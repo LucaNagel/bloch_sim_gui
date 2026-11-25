@@ -17959,8 +17959,8 @@ class SequenceSimulationWidget(QWidget):
             "numpy": "NumPy",
             "reference": "Reference",
             "strict_reference": "Strict reference",
-            "legacy": "Legacy fast-math",
             # Results written before the renaming carry the old names.
+            "legacy": "Legacy fast-math",
             "optimized": "Optimized CPU",
             "native_parallel": "Native automatic",
             "native_serial": "Native serial",
@@ -18032,7 +18032,8 @@ class SequenceSimulationWidget(QWidget):
         static_reason = metadata.get("static_spin_major_fallback_reason")
         if static_reason and not metadata.get("static_spin_major"):
             details.append(
-                f"legacy kernel used, spin-major not possible: {static_reason}"
+                "strict reference kernel used, spin-major not possible: "
+                f"{static_reason}"
             )
         if fallback_used:
             details.append(

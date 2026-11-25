@@ -6,7 +6,7 @@ import pytest
 from blochsimulator import BlochSimulator
 from blochsimulator.sequence import GradientEvent, RFEvent, SequenceProgram
 
-KERNELS = ("optimized", "strict_reference")
+KERNELS = ("production", "strict_reference")
 T1_S = 25.0
 T2_S = 1.0
 ENHANCEMENT = 1.0e4
@@ -93,9 +93,13 @@ def test_normalized_hyperpolarization_matches_thermal_units(kernel):
 @pytest.mark.parametrize("kernel", KERNELS)
 def test_hyperpolarized_far_off_resonant_spin_decays_through_rf(kernel):
     # The 1 ms hard pulses have a spectral null at -3000 Hz, so the spin only
-    # relaxes; T1 recovery is applied after every RF sub-step as well.
+    # relaxes; T1 recovery is applied after every RF sub-step as well. A 20 µs
+    # step divides each pulse: production splits free precession around the
+    # RF rotation, which is only accurate for short intervals (one 1 ms
+    # interval at -3000 Hz would leave a net tip).
     program = _rf_train()
     checkpoints = np.array([0.0, program.duration_s])
+    step_s = 20e-6
 
     hp = _probe(
         program,
@@ -104,6 +108,7 @@ def test_hyperpolarized_far_off_resonant_spin_decays_through_rf(kernel):
         initial_magnetization=(0.0, 0.0, 1.0),
         equilibrium_mz=1.0 / ENHANCEMENT,
         sequence_kernel=kernel,
+        simulation_timestep_s=step_s,
     )
     thermal = _probe(
         program,
@@ -111,12 +116,13 @@ def test_hyperpolarized_far_off_resonant_spin_decays_through_rf(kernel):
         [-3000.0],
         initial_magnetization=(0.0, 0.0, 1.0),
         sequence_kernel=kernel,
+        simulation_timestep_s=step_s,
     )
 
     assert hp.mz[-1, 0, 0] == pytest.approx(
-        _hp_relaxation(program.duration_s), rel=1e-6
+        _hp_relaxation(program.duration_s), rel=1e-5
     )
-    assert thermal.mz[-1, 0, 0] == pytest.approx(1.0, abs=1e-6)
+    assert thermal.mz[-1, 0, 0] == pytest.approx(1.0, abs=1e-5)
 
 
 @pytest.mark.parametrize("kernel", KERNELS)
