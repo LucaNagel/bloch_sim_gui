@@ -6,6 +6,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.9.8] - 2026-11-25
+
 ### Breaking changes
 
 - All sequence simulation entry points default to
@@ -13,6 +15,23 @@ The project follows [Semantic Versioning](https://semver.org/).
   GUI. Static calls previously used the native sequence raster (`None`) and
   dynamic calls 1 µs. Pass `None` or a smaller step explicitly to restore the
   old behaviour; spectrally selective and SPSP pulses need 5 µs or 1 µs.
+- Kernel names are unified: static `production` and `strict_reference`,
+  dynamic `production`, `numpy` and `reference`. The old names (`optimized`,
+  `legacy`, `native_parallel`, `native_serial`) remain aliases, and saved GUI
+  settings migrate.
+- Static phantoms run on the Float64 spin-major executor by default (second
+  order, half the error of the previous kernel against the exact reference).
+  Results change slightly; cases it cannot run fall back to
+  `strict_reference` with a `KernelFallbackWarning`.
+- The static fast-math sequence kernel and the interval-wise native dynamic
+  path (`dynamic_bloch_cy`) are removed. Dynamic phantoms run on the
+  spin-major executor or the NumPy kernel.
+- Time-dependent B0 drift is removed from the GUI and the Python API
+  (`DynamicB0`). A drift stored in an older phantom or design is dropped with
+  a warning on load; the static B0 map is kept.
+- Dynamic runs reject unknown keyword options with a `TypeError`, and
+  `equilibrium_polarization > 0` without initial spin density maps raises a
+  `ValueError` (older files with that pairing load with polarization 0).
 
 ### Added
 
@@ -30,17 +49,62 @@ The project follows [Semantic Versioning](https://semver.org/).
   spectrum marks that frequency, and the image shows its spatial distribution
   ("Frequency map", on by default) for CSI spectra and EPSI echo spectra.
 - A B0 Field tab between B1 Fields and Receiver / Noise edits the B0 field of
-  any phantom, including the mouse perfusion phantom: a spatial pattern,
-  constant offsets per shape or tissue, and a drift over time for
-  time-resolved phantoms. It replaces the B0 tab of the Phantom Designer.
-  Dragging in its slice preview moves the pattern centre (cyan crosshair)
-  instead of panning the view.
+  any phantom, including the mouse perfusion phantom: a spatial pattern and
+  constant offsets per shape or tissue. It replaces the B0 tab of the Phantom
+  Designer. Dragging in its slice preview moves the pattern centre (cyan
+  crosshair) instead of panning the view.
+- PSF estimation for phase-encoded 2D CSI: the spatial PSF of the spectral
+  line and its line shape (FWHM, shift, side lobes), shown as plot 5 of the
+  PSF Analysis tab.
+- PSF results are saved as a zip with the data and an example notebook.
+  Plot 1 switches between the PSF image and the k-space weights; the ideal
+  PSF is labelled as uniform k-space weighting.
+- "Export plot…" for all result plots (PSF, k-space, Setup/Geometry,
+  Spoiling Analysis, Reconstruction Explorer, sequence timeline, signal,
+  spin probes, sequence designer diagram): PNG/SVG/PDF and the plotted data
+  as CSV/NPZ. Interactive plots also offer it in their right-click menu.
+- After each GUI run, a time-step check compares the run with a finer step on
+  a few probes (or, for dynamic phantoms, voxels of the dynamic kernel) and
+  reports the estimated error.
+- The Gold reference (`simulate_reference_sequence`) gains a Hargreaves mode,
+  several pools with exchange, a piecewise-linear source, concentrations,
+  washout, contrast relaxation and a steady-state start.
+- `DEFAULT_SIMULATION_TIMESTEP_S` is exported from `blochsimulator`.
 
 ### Changed
 
 - The Phantom tab opens the mouse perfusion phantom on its anatomy labels.
 - In the Phantom Designer, shapes have the same colour in the XY drag/resize
   view as in the live 3D preview; the selected shape is lightly shaded.
+- Changing B0, the nucleus or the sequence reference asks for confirmation in
+  Sequence Mode, Free Mode and both phantom designers; the mouse wheel no
+  longer changes them.
+- The GUI uses "." as decimal separator regardless of the OS region; the comma
+  key types "." in decimal fields.
+- Too-short SS-bSSFP TRs name the limiting scanner limit (slew rate or
+  gradient amplitude) and what the requested TR would need.
+- Sequence compilation and the dynamic plan are vectorized (dynamic SS-bSSFP
+  8x8x4 2.2 -> 0.27 s on an M3) with bit-identical results.
+- RF samples longer than the simulation time step are divided into equal parts
+  no longer than the step.
+- Contrast phantoms with more than six pools, small memory budgets and static
+  phantoms with more than 256 relaxation groups stay on the spin-major
+  executor instead of falling back.
+- Benchmarks use synthetic default phantoms and the public kernel names;
+  `docs/simulation_kernels.md` lists measured runtimes.
+
+### Fixed
+
+- Holding a B0/nucleus arrow no longer keeps stepping and asking.
+- Contrast relaxation rates change at their epoch boundaries instead of at the
+  midpoint of a long free interval.
+- PSF images scale their colours to the shown plane's peak.
+- Rounding differences between platforms in RF phase offsets (x86 Linux CI).
+- The stretched 13C EPI slice rephaser no longer fails with pypulseq on Linux.
+- Kernel fallbacks always raise a `KernelFallbackWarning`, and real acquisition
+  metadata errors are no longer swallowed.
+- RF pulse plot view, 5 ms slice-select TR, first-TR default diagram view and
+  Slice Explorer plot heights.
 
 ## [2.9.7] - 2026-11-01
 
