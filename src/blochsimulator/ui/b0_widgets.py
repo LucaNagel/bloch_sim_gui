@@ -30,7 +30,6 @@ from PyQt5.QtWidgets import (
 )
 
 from ..b0_field import B0_PATTERN_MODES, B0FieldSettings, PhantomB0Field
-from ..dynamic_phantom import TimeCurve
 from .styles import BOLD_GROUP_TITLES_STYLE
 from .volume_viewer import VolumeViewerWidget
 
@@ -49,9 +48,7 @@ class B0WorkspaceWidget(QWidget):
     """Edit the static B0 field and apply it to the current phantom.
 
     The field is an analytic spatial pattern plus a constant offset per
-    region (designer shapes or anatomy labels). A uniform drift over time is
-    not edited here; one stored with the phantom (scripting API or an older
-    project) is passed through unchanged.
+    region (designer shapes or anatomy labels).
     """
 
     phantom_updated = pyqtSignal(object)
@@ -63,8 +60,6 @@ class B0WorkspaceWidget(QWidget):
         self._updating = False
         self._settings_pending = False
         self._session_settings: Optional[B0FieldSettings] = None
-        # Drift curve stored with the phantom; the GUI does not edit it.
-        self._drift_curve_hz: Optional[TimeCurve] = None
         self._apply_timer = QTimer(self)
         self._apply_timer.setSingleShot(True)
         self._apply_timer.setInterval(120)
@@ -323,7 +318,6 @@ class B0WorkspaceWidget(QWidget):
             strength_ppm=self.strength_spin.value(),
             center=tuple(spin.value() / 100.0 for spin in self.center_spins),
             region_offsets_ppm=offsets,
-            drift_curve_hz=self._drift_curve_hz,
         )
 
     def _show_settings(self, settings: B0FieldSettings) -> None:
@@ -336,7 +330,6 @@ class B0WorkspaceWidget(QWidget):
             for spin, value in zip(self.center_spins, settings.center):
                 spin.setValue(float(value) * 100.0)
             self._populate_offsets(settings.region_offsets_ppm)
-            self._drift_curve_hz = settings.drift_curve_hz
         finally:
             self._updating = False
         self._update_pattern_info()
@@ -502,8 +495,6 @@ class B0WorkspaceWidget(QWidget):
         if stored is not None:
             self._show_settings(stored)
             status = f"Loaded the B0 field stored with {phantom.name}."
-            if stored.drift_curve_hz is not None:
-                status += " Its stored B0 drift is kept unchanged (not editable here)."
         elif session is not None and not session.is_empty():
             # A new phantom without its own field takes the workspace field,
             # as the B1 workspace does; offsets carry over by region name.
@@ -516,8 +507,6 @@ class B0WorkspaceWidget(QWidget):
                     for name, value in session.region_offsets_ppm.items()
                     if name in self.field.region_names
                 },
-                # A drift is not edited here, so it never carries over.
-                drift_curve_hz=None,
             )
             self._show_settings(carried)
             self._settings_pending = not carried.is_empty()
@@ -559,15 +548,9 @@ class B0WorkspaceWidget(QWidget):
         self._session_settings = settings
         mask = np.asarray(self.phantom.mask, dtype=bool).reshape(b0_map.shape)
         values = b0_map[mask] if np.any(mask) else b0_map.ravel()
-        drift = (
-            ""
-            if settings.drift_curve_hz is None
-            else f"; drift {min(settings.drift_curve_hz.values):g} … "
-            f"{max(settings.drift_curve_hz.values):g} Hz"
-        )
         self.apply_status.setText(
             f"Applied to {self.phantom.name}: B0 {np.min(values):.3g} … "
-            f"{np.max(values):.3g} ppm inside the phantom{drift}."
+            f"{np.max(values):.3g} ppm inside the phantom."
         )
         self._update_preview()
         self.phantom_updated.emit(self.phantom)

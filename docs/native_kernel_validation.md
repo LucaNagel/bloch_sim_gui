@@ -120,7 +120,7 @@ The NumPy reference uses four independent active-voxel blocks containing
 9,769, 9,769, 9,768, and 9,768 voxels. Each block executes the complete sequence
 with the original physical coordinates. Signals are combined in fixed block
 order; voxel states retain their original global indices. A small heterogeneous
-reference case with dynamic B0, spatial Tx, multiple coils, and subvoxel spins
+reference case with spatial Tx, multiple coils, and subvoxel spins
 checks this partition against a whole-object NumPy run: endpoint and checkpoint
 states have zero numerical difference, and the maximum signal difference is
 below $1.15\times10^{-16}$. The initial unpartitioned reference was stopped and

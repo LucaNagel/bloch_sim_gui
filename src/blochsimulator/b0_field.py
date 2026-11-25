@@ -1,8 +1,7 @@
 """Static B0 inhomogeneity applied to an existing phantom.
 
 The B0 workspace edits one field description for whichever phantom is
-current: an analytic spatial pattern, a constant offset per region and an
-optional uniform drift.  Regions are the shapes of a Phantom Designer phantom
+current: an analytic spatial pattern and a constant offset per region.  Regions are the shapes of a Phantom Designer phantom
 or the anatomy labels of an anatomical phantom such as the renal mouse.
 
 The generated field is applied on top of the phantom's own B0 map.  The
@@ -19,7 +18,6 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .dynamic_phantom import DynamicB0, DynamicSpectralPhantom, TimeCurve
 from .phantom_design import PhantomDesign, analytic_b0_pattern
 from .units import hz_to_ppm, ppm_to_hz
 
@@ -36,13 +34,12 @@ B0_METADATA_KEY = "b0_field"
 
 @dataclass
 class B0FieldSettings:
-    """Spatial pattern, per-region offsets and drift of a B0 field."""
+    """Spatial pattern and per-region offsets of a static B0 field."""
 
     mode: str = "none"
     strength_ppm: float = 0.0
     center: Tuple[float, float, float] = (0.5, 0.5, 0.5)
     region_offsets_ppm: Dict[str, float] = field(default_factory=dict)
-    drift_curve_hz: Optional[TimeCurve] = None
 
     def __post_init__(self) -> None:
         if self.mode not in {key for key, _label in B0_PATTERN_MODES}:
@@ -65,11 +62,7 @@ class B0FieldSettings:
 
     def is_empty(self) -> bool:
         """True when the settings generate no field at all."""
-        return (
-            not self.has_pattern
-            and not any(self.region_offsets_ppm.values())
-            and self.drift_curve_hz is None
-        )
+        return not self.has_pattern and not any(self.region_offsets_ppm.values())
 
     def to_dict(self) -> Dict:
         return {
@@ -77,20 +70,16 @@ class B0FieldSettings:
             "strength_ppm": self.strength_ppm,
             "center": list(self.center),
             "region_offsets_ppm": dict(self.region_offsets_ppm),
-            "drift_curve_hz": (
-                None if self.drift_curve_hz is None else self.drift_curve_hz.to_dict()
-            ),
         }
 
     @classmethod
     def from_dict(cls, data: Dict) -> "B0FieldSettings":
-        drift = data.get("drift_curve_hz")
+        # A saved "drift_curve_hz" (dynamic B0, no longer supported) is ignored.
         return cls(
             mode=str(data.get("mode", "none")),
             strength_ppm=float(data.get("strength_ppm", 0.0)),
             center=tuple(data.get("center", (0.5, 0.5, 0.5))),
             region_offsets_ppm=dict(data.get("region_offsets_ppm", {})),
-            drift_curve_hz=None if drift is None else TimeCurve.from_dict(drift),
         )
 
 
@@ -154,10 +143,6 @@ class PhantomB0Field:
         return tuple(int(count) for count in self.phantom.shape)
 
     @property
-    def supports_drift(self) -> bool:
-        return isinstance(self.phantom, DynamicSpectralPhantom)
-
-    @property
     def editable(self) -> bool:
         return not self.legacy_design
 
@@ -213,7 +198,6 @@ class PhantomB0Field:
                     name: (0.0 if item.b0_hz is not None else item.b0_ppm)
                     for name, item in zip(self.region_names, design.shapes)
                 },
-                drift_curve_hz=design.dynamic_b0_curve,
             )
             return None if settings.is_empty() else settings
         data = getattr(self.phantom, "metadata", {}).get(B0_METADATA_KEY)
@@ -223,10 +207,6 @@ class PhantomB0Field:
                 settings = B0FieldSettings.from_dict(data)
             except (KeyError, TypeError, ValueError):
                 settings = None
-        dynamic_b0 = getattr(self.phantom, "dynamic_b0", None)
-        if dynamic_b0 is not None:
-            settings = settings or B0FieldSettings()
-            settings.drift_curve_hz = dynamic_b0.offset_curve_hz
         return settings
 
     # -- field generation ----------------------------------------------
@@ -301,41 +281,13 @@ class PhantomB0Field:
                 "this phantom stores B0 offsets in Hz (legacy design); re-create "
                 "its shapes in the Phantom Designer to edit B0 here"
             )
-        if settings.drift_curve_hz is not None and not self.supports_drift:
-            raise ValueError(
-                "a B0 drift needs a time-resolved phantom; enable the kinetics "
-                "model in the Phantom Designer or use a dynamic phantom"
-            )
         new_map = self.base_map_ppm() + self.generated_map(settings)
         self._write_map_ppm(new_map)
-        if self.supports_drift:
-            self._apply_drift(settings.drift_curve_hz)
         if self.design is not None:
             self._store_in_design(settings)
         else:
-            self.phantom.metadata[B0_METADATA_KEY] = {
-                **settings.to_dict(),
-                # The drift lives in the phantom's dynamic B0 model.
-                "drift_curve_hz": None,
-            }
+            self.phantom.metadata[B0_METADATA_KEY] = settings.to_dict()
         return new_map
-
-    def _apply_drift(self, curve: Optional[TimeCurve]) -> None:
-        phantom = self.phantom
-        if curve is None:
-            phantom.dynamic_b0 = None
-            return
-        existing = phantom.dynamic_b0
-        if existing is not None:
-            existing.offset_curve_hz = curve
-            return
-        dynamic_b0 = DynamicB0(
-            offset_curve_hz=curve,
-            spatial_scale_map=np.ones(self.shape, dtype=float),
-            pool_scale=(1.0,) * len(phantom.pools),
-        )
-        dynamic_b0.validate(self.shape)
-        phantom.dynamic_b0 = dynamic_b0
 
     def _store_in_design(self, settings: B0FieldSettings) -> None:
         design = self.design
@@ -344,19 +296,11 @@ class PhantomB0Field:
         design.b0_inhomogeneity_center = tuple(settings.center)
         for name, item in zip(self.region_names, design.shapes):
             item.b0_ppm = float(settings.region_offsets_ppm.get(name, 0.0))
-        if self.supports_drift:
-            design.dynamic_b0_curve = settings.drift_curve_hz
         data = self.phantom.metadata.get("phantom_design")
         if isinstance(data, dict):
             data["b0_inhomogeneity_mode"] = design.b0_inhomogeneity_mode
             data["b0_inhomogeneity_ppm"] = design.b0_inhomogeneity_ppm
             data["b0_inhomogeneity_center"] = list(design.b0_inhomogeneity_center)
-            if self.supports_drift:
-                data["dynamic_b0_curve"] = (
-                    None
-                    if design.dynamic_b0_curve is None
-                    else design.dynamic_b0_curve.to_dict()
-                )
             for shape_data, item in zip(data.get("shapes", []), design.shapes):
                 shape_data["b0_ppm"] = item.b0_ppm
         else:

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Tuple
+import warnings
 
 import numpy as np
 
 from .spectral_phantom import ChemicalSpecies, SpectralPhantom
 from .dynamic_phantom import (
-    DynamicB0,
     DynamicSpectralPhantom,
     KineticRegionDefinition,
     PyruvateInflow,
@@ -385,7 +385,6 @@ class PhantomDesign:
     pyruvate_inflow_polarization_curve: Optional[TimeCurve] = None
     conversion_start_s: float = 0.0
     kinetics_time_offset_s: float = 0.0
-    dynamic_b0_curve: Optional[TimeCurve] = None
     temperature_k: float = 310.15
     # Observed isotope fraction; peak amplitudes are molecule concentrations.
     isotope_enrichment: float = 1.0
@@ -803,14 +802,6 @@ class PhantomDesign:
                 ),
                 conversion_start_s=float(self.conversion_start_s),
                 kinetics_time_offset_s=float(self.kinetics_time_offset_s),
-                dynamic_b0=(
-                    None
-                    if self.dynamic_b0_curve is None
-                    else DynamicB0(
-                        offset_curve_hz=self.dynamic_b0_curve,
-                        spatial_scale_map=np.ones(grid, dtype=float),
-                    )
-                ),
                 metadata={
                     "phantom_design": self.to_dict(),
                     "temperature_k": self.temperature_k,
@@ -852,6 +843,13 @@ class PhantomDesign:
         legacy_field_strength_t: float = 3.0,
         legacy_nucleus: str = "H1",
     ) -> "PhantomDesign":
+        if data.get("dynamic_b0_curve") is not None:
+            warnings.warn(
+                "the saved phantom design contains a time-dependent B0 drift; "
+                "dynamic B0 is no longer supported and the drift was dropped",
+                UserWarning,
+                stacklevel=2,
+            )
         shapes = []
         for item in data.get("shapes", []):
             peaks = []
@@ -997,11 +995,6 @@ class PhantomDesign:
             ),
             conversion_start_s=float(data.get("conversion_start_s", 0.0)),
             kinetics_time_offset_s=float(data.get("kinetics_time_offset_s", 0.0)),
-            dynamic_b0_curve=(
-                None
-                if data.get("dynamic_b0_curve") is None
-                else TimeCurve.from_dict(data["dynamic_b0_curve"])
-            ),
             simulation_fov_m=(
                 None
                 if data.get("simulation_fov_m") is None

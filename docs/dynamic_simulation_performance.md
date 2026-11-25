@@ -45,8 +45,7 @@ kernel selections:
   is the correctness oracle for the other CPU paths and is intended mainly for
   tests and small diagnostic simulations.
 - `optimized` keeps the same operation and summation order while reusing
-  state and coefficient arrays.  It supports static and dynamic B0 as well as
-  pyruvate inflow.
+  state and coefficient arrays.  It supports static B0 and pyruvate inflow.
 - `native_serial` uses compiled
   Cython primitives for longitudinal two-pool evolution and RF rotation.  The
   common Phantom Designer model with pyruvate inflow, a polarization curve,
@@ -91,8 +90,7 @@ changing the equations or floating-point evaluation order:
    Concentration-state coefficients use the same cache and their own scratch
    arrays; older builds accidentally recomputed their exponential convolution
    coefficients at every half-step.
-3. Transverse T2/phase factors are cached by duration, gradient, and dynamic-B0
-   integral.  The cache is bounded so long sequences cannot grow memory in
+3. Transverse T2/phase factors are cached by duration and gradient.  The cache is bounded so long sequences cannot grow memory in
    proportion to every interval/voxel combination.
 4. Static frequencies and gradient projections are only built on cache misses.
    Repeated EPI and bSSFP motifs therefore reuse the already rounded factors.
@@ -104,7 +102,7 @@ changing the equations or floating-point evaluation order:
 
 On a representative 64x64 EPI benchmark with a 16^3 phantom and 1,472 active
 voxels, the reference path took about 0.663 s and `optimized` about 0.127 s
-(approximately 5.24x).  A three-repetition dynamic-B0 benchmark improved from
+(approximately 5.24x).  A three-repetition dynamic-B0 benchmark (dynamic B0 has since been removed) improved from
 about 2.091 s to 0.779 s (approximately 2.68x).  The relevant result arrays
 were bit-identical.  A larger 48^3 three-repetition benchmark ran in about
 3.9 s on the development system.
@@ -155,7 +153,6 @@ supported in both interval and persistent RF blocks.
 The complete two-pool plan driver uses bounded coefficient blocks of at most
 64 MiB, reduced further by the simulation memory budget. It supports Unity,
 constant complex, and spatial Tx, delayed conversion, gradients, static B0,
-dynamic B0 through distinct exact first- and second-half integral tables,
 multiple receive coils, subvoxel sampling, ADC, ideal crushers, and
 checkpoints. Explicit source modes cover concentration-tracked polarized
 inflow, direct magnetization inflow, polarized inflow without concentration
@@ -184,7 +181,7 @@ $2.7\times10^{-16}$. The complete measurements and profiles are stored in
 
 The synthetic three-pool benchmark uses 4,096 voxels, 544 compiled intervals,
 384 ADC values, two checkpoints, two parent-voxel chunks, spatial complex Tx,
-dynamic B0, delayed concentration/polarization delivery, and simultaneous
+dynamic B0 (since removed), delayed concentration/polarization delivery, and simultaneous
 pyruvate-to-lactate and pyruvate-to-alanine conversion. After one warm-up, five
 timed repetitions gave:
 
@@ -285,7 +282,7 @@ run once per interval.
 
 ## Current limits and next performance phase
 
-All existing two-pool inflow/concentration combinations, dynamic B0, spatial
+All existing two-pool inflow/concentration combinations, spatial
 arrival delays, and existing passive precursor-to-products conversions are
 covered by bounded native plan workers. New kinetic topologies must still add
 an explicit capability gate. Supported fields are never ignored; metadata

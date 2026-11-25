@@ -238,11 +238,11 @@ def test_execution_completion_message_reports_backend_contract_and_fallback():
             "requested_sequence_kernel": "native_parallel",
             "sequence_kernel": "native_parallel",
             "native_spin_major_enabled": False,
-            "native_spin_major_fallback_reason": "dynamic B0 is unsupported",
+            "native_spin_major_fallback_reason": "memory budget is too small",
         }
     )
     assert "requested" not in slower
-    assert "spin-major kernel not used: dynamic B0 is unsupported" in slower
+    assert "spin-major kernel not used: memory budget is too small" in slower
 
     disabled = SequenceSimulationWidget._execution_completion_message(
         {

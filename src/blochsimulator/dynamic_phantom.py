@@ -515,25 +515,17 @@ class PyruvateInflow:
         return tuple(sorted(set(float(value) for value in values)))
 
 
-@dataclass
-class DynamicB0:
-    """Time-dependent B0 offset in Hz with a voxelwise scale map."""
+def _warn_dropped_dynamic_b0(header: Dict) -> None:
+    """Warn that a saved time-dependent B0 offset is no longer simulated."""
 
-    offset_curve_hz: TimeCurve
-    spatial_scale_map: np.ndarray
-    pool_scale: Tuple[float, ...] = (1.0, 1.0)
-
-    def validate(self, shape: Tuple[int, int, int]) -> None:
-        values = np.asarray(self.spatial_scale_map, dtype=np.float64)
-        if values.shape != shape or not np.all(np.isfinite(values)):
-            raise ValueError(
-                "dynamic B0 scale map must be finite and match phantom shape"
-            )
-        scales = tuple(float(value) for value in self.pool_scale)
-        if not scales or not np.all(np.isfinite(scales)):
-            raise ValueError("dynamic B0 pool scale requires finite values")
-        self.spatial_scale_map = values
-        self.pool_scale = scales
+    if header.get("dynamic_b0") is not None:
+        warnings.warn(
+            "the saved phantom contains a time-dependent B0 drift; dynamic B0 "
+            "is no longer supported and the drift was dropped (the static B0 "
+            "map is kept)",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 @dataclass
@@ -885,7 +877,6 @@ class DynamicSpectralPhantom:
     name: str = "Dynamic pyruvate/lactate phantom"
     kinetic_regions: Tuple[KineticRegionDefinition, ...] = ()
     pyruvate_inflow: Optional[PyruvateInflow] = None
-    dynamic_b0: Optional[DynamicB0] = None
     conversion_start_s: float = 0.0
     kinetics_time_offset_s: float = 0.0
     metadata: Dict = field(default_factory=dict)
@@ -1039,16 +1030,6 @@ class DynamicSpectralPhantom:
                 raise ValueError(
                     "contrast relaxation cannot be combined with inflow or washout"
                 )
-        if self.dynamic_b0 is not None:
-            self.dynamic_b0.validate(self.shape)
-            scales = tuple(self.dynamic_b0.pool_scale)
-            if len(scales) == 2 and len(self.pools) > 2:
-                scales += (1.0,) * (len(self.pools) - 2)
-            if len(scales) != len(self.pools):
-                raise ValueError(
-                    "dynamic B0 pool scale must contain one value per pool"
-                )
-            self.dynamic_b0.pool_scale = scales
         self.conversion_start_s = float(self.conversion_start_s)
         if not np.isfinite(self.conversion_start_s):
             raise ValueError("conversion start time must be finite")
@@ -1140,8 +1121,6 @@ class DynamicSpectralPhantom:
                     timeline_offset_s=-self.kinetics_time_offset_s,
                 )
             )
-        if self.dynamic_b0 is not None:
-            values.extend(self.dynamic_b0.offset_curve_hz.breakpoints_s(duration_s))
         if self.contrast_relaxation is not None:
             values.extend(
                 self.contrast_relaxation.breakpoints_s(
@@ -1525,14 +1504,6 @@ class DynamicSpectralPhantom:
                     ),
                 }
             ),
-            "dynamic_b0": (
-                None
-                if self.dynamic_b0 is None
-                else {
-                    "offset_curve_hz": self.dynamic_b0.offset_curve_hz.to_dict(),
-                    "pool_scale": self.dynamic_b0.pool_scale,
-                }
-            ),
             "voxel_washout": (
                 None if self.voxel_washout is None else self.voxel_washout.header()
             ),
@@ -1642,12 +1613,6 @@ class DynamicSpectralPhantom:
                     else tuple(f"{key}_dim_{axis}" for axis in range(np.ndim(values)))
                 )
                 data_vars[key] = (dims, values)
-        if self.dynamic_b0 is not None:
-            data_vars["dynamic_b0_scale_map"] = (
-                spatial_dims,
-                self.dynamic_b0.spatial_scale_map,
-                {"units": "dimensionless"},
-            )
         return xr.Dataset(
             data_vars=data_vars,
             coords=coords,
@@ -1665,7 +1630,6 @@ class DynamicSpectralPhantom:
                 "has_b0_map": self.b0_map is not None,
                 "has_b0_map_ppm": self.b0_map_ppm is not None,
                 "has_pyruvate_inflow": self.pyruvate_inflow is not None,
-                "has_dynamic_b0": self.dynamic_b0 is not None,
                 "coordinate_system": self.coordinate_system,
                 "affine_ijk_to_xyz_m": self.affine_ijk_to_xyz_m.reshape(-1),
                 "dynamic_header_json": json.dumps(header, default=str),
@@ -1738,16 +1702,7 @@ class DynamicSpectralPhantom:
         contrast_relaxation = ContrastRelaxation.from_saved(
             header.get("contrast_relaxation"), saved_arrays
         )
-        dynamic_b0_metadata = header.get("dynamic_b0")
-        dynamic_b0 = None
-        if dynamic_b0_metadata is not None and "dynamic_b0_scale_map" in ds:
-            dynamic_b0 = DynamicB0(
-                offset_curve_hz=TimeCurve.from_dict(
-                    dynamic_b0_metadata["offset_curve_hz"]
-                ),
-                spatial_scale_map=np.asarray(ds["dynamic_b0_scale_map"]),
-                pool_scale=tuple(dynamic_b0_metadata.get("pool_scale", (1.0, 1.0))),
-            )
+        _warn_dropped_dynamic_b0(header)
         spin_density = (
             None
             if "initial_spin_density" not in ds
@@ -1791,7 +1746,6 @@ class DynamicSpectralPhantom:
             name=str(ds.attrs.get("name", "Dynamic pyruvate/lactate phantom")),
             kinetic_regions=regions,
             pyruvate_inflow=pyruvate_inflow,
-            dynamic_b0=dynamic_b0,
             voxel_washout=voxel_washout,
             contrast_relaxation=contrast_relaxation,
             conversion_start_s=float(header.get("conversion_start_s", 0.0)),
@@ -1841,14 +1795,6 @@ class DynamicSpectralPhantom:
                     ),
                 }
             ),
-            "dynamic_b0": (
-                None
-                if self.dynamic_b0 is None
-                else {
-                    "offset_curve_hz": self.dynamic_b0.offset_curve_hz.to_dict(),
-                    "pool_scale": self.dynamic_b0.pool_scale,
-                }
-            ),
             "voxel_washout": (
                 None if self.voxel_washout is None else self.voxel_washout.header()
             ),
@@ -1888,8 +1834,6 @@ class DynamicSpectralPhantom:
             arrays.update(self.voxel_washout.arrays())
         if self.contrast_relaxation is not None:
             arrays.update(self.contrast_relaxation.arrays())
-        if self.dynamic_b0 is not None:
-            arrays["dynamic_b0_scale_map"] = self.dynamic_b0.spatial_scale_map
         for index, pool in enumerate(self.pools):
             if (
                 self.chemical_shift_maps_ppm
@@ -1966,16 +1910,7 @@ class DynamicSpectralPhantom:
         contrast_relaxation = ContrastRelaxation.from_saved(
             header.get("contrast_relaxation"), arrays
         )
-        dynamic_b0_metadata = header.get("dynamic_b0")
-        dynamic_b0 = None
-        if dynamic_b0_metadata is not None and "dynamic_b0_scale_map" in arrays:
-            dynamic_b0 = DynamicB0(
-                offset_curve_hz=TimeCurve.from_dict(
-                    dynamic_b0_metadata["offset_curve_hz"]
-                ),
-                spatial_scale_map=arrays["dynamic_b0_scale_map"],
-                pool_scale=tuple(dynamic_b0_metadata.get("pool_scale", (1.0, 1.0))),
-            )
+        _warn_dropped_dynamic_b0(header)
         spin_density = (
             None
             if "spin_density_0" not in arrays
@@ -2011,7 +1946,6 @@ class DynamicSpectralPhantom:
             name=header["name"],
             kinetic_regions=regions,
             pyruvate_inflow=pyruvate_inflow,
-            dynamic_b0=dynamic_b0,
             voxel_washout=voxel_washout,
             contrast_relaxation=contrast_relaxation,
             conversion_start_s=float(header.get("conversion_start_s", 0.0)),
@@ -3113,8 +3047,6 @@ def _spin_major_fallback_reason(
         return "more than six pools are unsupported"
     if np.dtype(real_dtype) != np.dtype(np.float64):
         return "requires float64 state"
-    if phantom.dynamic_b0 is not None:
-        return "dynamic B0 is unsupported"
     if spatial_tx:
         try:
             from .dynamic_spin_major_cy import SPATIAL_TX_SUPPORTED
@@ -3966,7 +3898,7 @@ def _simulate_dynamic_sequence_block(
             )
 
             # RF rotation is independent of inflow, concentration tracking,
-            # conversion timing, and dynamic B0. Keep that native fast path
+            # and conversion timing. Keep that native fast path
             # available even when longitudinal evolution must stay in NumPy.
             native_rf_rotation_block = apply_rf_rotation_transverse_block
             native_spatial_rf_rotation_block = (
@@ -4371,17 +4303,6 @@ def _simulate_dynamic_sequence_block(
         if sequence_kernel in {"optimized", "native_serial", "native_parallel"}
         else None
     )
-    dynamic_b0_scale = None
-    dynamic_b0_pool_scale = None
-    if phantom.dynamic_b0 is not None:
-        dynamic_b0_scale = np.asarray(
-            phantom.dynamic_b0.spatial_scale_map.ravel()[active], dtype=np.float64
-        )
-        if sampling.enabled:
-            dynamic_b0_scale = np.repeat(dynamic_b0_scale, spins_per_voxel)
-        dynamic_b0_pool_scale = np.asarray(
-            phantom.dynamic_b0.pool_scale, dtype=np.float64
-        )[:, None]
     native_spin_major_fallback_reason = None
     if sequence_kernel in {"native_serial", "native_parallel"}:
         native_spin_major_fallback_reason = _spin_major_fallback_reason(
@@ -4845,10 +4766,6 @@ def _simulate_dynamic_sequence_block(
     elif native_rf_concentration_block is None:
         native_rf_fused_fallback_reason = (
             "persistent RF blocks require coupled concentration/polarized inflow"
-        )
-    elif phantom.dynamic_b0 is not None:
-        native_rf_fused_fallback_reason = (
-            "persistent RF blocks do not yet support dynamic B0"
         )
     elif tx_classification == "constant" and constant_tx_sensitivity == (0.0 + 0.0j):
         native_rf_fused_fallback_reason = (
@@ -5396,13 +5313,11 @@ def _simulate_dynamic_sequence_block(
                 half_duration,
                 phase_duration,
                 gradient_key,
-                dynamic_integral,
             ):
                 factor_key = (
                     half_duration,
                     phase_duration,
                     gradient_key,
-                    dynamic_integral,
                 )
                 factor_group = factor_group_by_key.get(factor_key)
                 if factor_group is not None:
@@ -5420,12 +5335,6 @@ def _simulate_dynamic_sequence_block(
                         )
                         static_frequency_by_gradient[gradient_key] = static_frequencies
                     phase = static_frequencies * phase_duration
-                    if dynamic_integral is not None:
-                        phase = phase + (
-                            dynamic_b0_pool_scale
-                            * dynamic_b0_scale[None, :]
-                            * dynamic_integral
-                        )
                     prepared_factors = prepare_transverse_factors(phase, half_duration)
                     transverse_cache.put(factor_key, prepared_factors)
                 factor_values.append(prepared_factors)
@@ -5440,25 +5349,11 @@ def _simulate_dynamic_sequence_block(
                 gradient_key = tuple(
                     float(value) for value in gradient_hz_per_m[block_interval]
                 )
-                if phantom.dynamic_b0 is None:
-                    first_dynamic_integral = second_dynamic_integral = None
-                else:
-                    first_dynamic_integral = float(
-                        execution_plan.dynamic_b0_first_half_integral_hz_s[
-                            block_interval
-                        ]
-                    )
-                    second_dynamic_integral = float(
-                        execution_plan.dynamic_b0_second_half_integral_hz_s[
-                            block_interval
-                        ]
-                    )
                 first_factor_groups.append(
                     transverse_factor_group(
                         half_duration,
                         first_phase_duration,
                         gradient_key,
-                        first_dynamic_integral,
                     )
                 )
                 second_factor_groups.append(
@@ -5466,7 +5361,6 @@ def _simulate_dynamic_sequence_block(
                         half_duration,
                         second_phase_duration,
                         gradient_key,
-                        second_dynamic_integral,
                     )
                 )
 
@@ -6410,17 +6304,7 @@ def _simulate_dynamic_sequence_block(
             static_frequencies = static_pool_frequency + gradient_frequency[None, :]
 
             def phase_cycles(start_s, end_s, duration_s):
-                phase = static_frequencies * duration_s
-                if phantom.dynamic_b0 is not None:
-                    dynamic_integral = phantom.dynamic_b0.offset_curve_hz.integral(
-                        start_s, end_s
-                    )
-                    phase = phase + (
-                        dynamic_b0_pool_scale
-                        * dynamic_b0_scale[None, :]
-                        * dynamic_integral
-                    )
-                return phase
+                return static_frequencies * duration_s
 
             def source_values(start_s, end_s):
                 if inflow_curve is None:
@@ -6563,27 +6447,16 @@ def _simulate_dynamic_sequence_block(
             first_phase_duration, second_phase_duration = (
                 float(value) for value in execution_plan.interval_half_s[interval]
             )
-            if phantom.dynamic_b0 is None:
-                first_dynamic_integral = second_dynamic_integral = None
-            else:
-                first_dynamic_integral = real_type(
-                    execution_plan.dynamic_b0_first_half_integral_hz_s[interval]
-                )
-                second_dynamic_integral = real_type(
-                    execution_plan.dynamic_b0_second_half_integral_hz_s[interval]
-                )
             gradient_key = tuple(float(value) for value in gradient)
             first_transverse_key = (
                 float(half_duration),
                 float(first_phase_duration),
                 gradient_key,
-                first_dynamic_integral,
             )
             second_transverse_key = (
                 float(half_duration),
                 float(second_phase_duration),
                 gradient_key,
-                second_dynamic_integral,
             )
             first_transverse_factors = transverse_cache.get(first_transverse_key)
             second_transverse_factors = transverse_cache.get(second_transverse_key)
@@ -6593,12 +6466,6 @@ def _simulate_dynamic_sequence_block(
                 static_frequencies = static_pool_frequency + gradient_frequency[None, :]
             if first_transverse_factors is None:
                 first_phase = static_frequencies * first_phase_duration
-                if first_dynamic_integral is not None:
-                    first_phase = first_phase + (
-                        dynamic_b0_pool_scale
-                        * dynamic_b0_scale[None, :]
-                        * first_dynamic_integral
-                    )
                 first_transverse_factors = prepare_transverse_factors(
                     first_phase, half_duration
                 )
@@ -6607,12 +6474,6 @@ def _simulate_dynamic_sequence_block(
                 second_transverse_factors = first_transverse_factors
             elif second_transverse_factors is None:
                 second_phase = static_frequencies * second_phase_duration
-                if second_dynamic_integral is not None:
-                    second_phase = second_phase + (
-                        dynamic_b0_pool_scale
-                        * dynamic_b0_scale[None, :]
-                        * second_dynamic_integral
-                    )
                 second_transverse_factors = prepare_transverse_factors(
                     second_phase, half_duration
                 )
@@ -7190,7 +7051,6 @@ def _simulate_dynamic_sequence_block(
                 if phantom.pyruvate_inflow is None
                 else phantom.pyruvate_inflow.max_step_s
             ),
-            "dynamic_b0": phantom.dynamic_b0 is not None,
             "conversion_start_s": phantom.conversion_start_s,
             "kinetics_time_offset_s": phantom.kinetics_time_offset_s,
             "sequence_conversion_start_s": conversion_start_s,
@@ -7223,11 +7083,6 @@ def _simulate_dynamic_sequence_block(
                 else phantom.pyruvate_inflow.polarization_curve.to_dict()
             ),
             "equilibrium_polarization": phantom.equilibrium_polarization,
-            "dynamic_b0_curve": (
-                None
-                if phantom.dynamic_b0 is None
-                else phantom.dynamic_b0.offset_curve_hz.to_dict()
-            ),
         },
         pool_names=tuple(pool.name for pool in phantom.pools),
         species_signal=result_species_signal,
@@ -7800,11 +7655,6 @@ def _colabelled_pass_phantom(
     result.kinetic_regions = ()
     result.pyruvate_inflow = replace(phantom.pyruvate_inflow, colabelled_pools=())
     result.voxel_washout = washout_for(order, lambda name: name == source_name)
-    if phantom.dynamic_b0 is not None:
-        result.dynamic_b0 = replace(
-            phantom.dynamic_b0,
-            pool_scale=tuple(phantom.dynamic_b0.pool_scale[index] for index in order),
-        )
     return result
 
 
@@ -7876,11 +7726,6 @@ def _independent_pool_pass_phantom(
     if hasattr(phantom, "kpa_map_s_inv"):
         result.kpa_map_s_inv = np.zeros(phantom.shape, dtype=np.float64)
     result.kinetic_regions = ()
-    if phantom.dynamic_b0 is not None:
-        result.dynamic_b0 = replace(
-            phantom.dynamic_b0,
-            pool_scale=tuple(phantom.dynamic_b0.pool_scale[value] for value in order),
-        )
     return result
 
 

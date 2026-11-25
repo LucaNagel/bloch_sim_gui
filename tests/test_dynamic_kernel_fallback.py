@@ -142,13 +142,13 @@ def test_fallback_summary_covers_each_replaced_path():
             "requested_sequence_kernel": "native_parallel",
             "sequence_kernel": "native_parallel",
             "native_spin_major_enabled": False,
-            "native_spin_major_fallback_reason": "dynamic B0 is unsupported",
+            "native_spin_major_fallback_reason": "memory budget is too small",
         }
     )
     # Metadata written before the renaming is reported under the public names.
     assert slower == (
         "the production kernel ran without its spin-major executor: "
-        "dynamic B0 is unsupported"
+        "memory budget is too small"
     )
     contrast = dynamic_kernel_fallback(
         {

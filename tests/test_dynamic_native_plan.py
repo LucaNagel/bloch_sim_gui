@@ -3,7 +3,6 @@ import pytest
 
 from blochsimulator import BlochSimulator
 from blochsimulator.dynamic_phantom import (
-    DynamicB0,
     DynamicSpectralPhantom,
     PyruvateInflow,
     TimeCurve,
@@ -118,49 +117,6 @@ def test_native_plan_adc_windows_match_single_block_signal():
     np.testing.assert_array_equal(previews[-1][1], single.species_signal.sum(axis=0))
 
 
-def test_native_plan_driver_supports_dynamic_b0_half_interval_integrals():
-    phantom, program, raster = _native_plan_fixture()
-    phantom.dynamic_b0 = DynamicB0(
-        TimeCurve(
-            (0.0, 6 * raster, 12 * raster),
-            (-7.0, 9.0, 2.5),
-            "linear",
-            "hold",
-        ),
-        np.linspace(0.35, 1.15, phantom.nvoxels).reshape(phantom.shape),
-        (1.0, 0.65),
-    )
-    kwargs = dict(
-        checkpoints_s=(6 * raster, 12 * raster),
-        simulation_timestep_s=raster,
-        spoiler_mode="ideal",
-    )
-    simulator = BlochSimulator(use_parallel=False)
-    reference = simulator.simulate_dynamic_sequence(
-        program, phantom, sequence_kernel="optimized", **kwargs
-    )
-    native = simulator.simulate_dynamic_sequence(
-        program, phantom, sequence_kernel="native_serial", **kwargs
-    )
-
-    assert native.metadata["native_full_plan_enabled"] is True
-    assert native.metadata["native_full_plan_intervals"] == (
-        native.metadata["compiled_interval_count"]
-    )
-    assert native.metadata["numerical_contract"] == "float64-close"
-    for name in (
-        "signal",
-        "species_signal",
-        "final_magnetization",
-        "final_pool_magnetization",
-        "checkpoint_magnetization",
-        "checkpoint_pool_magnetization",
-    ):
-        np.testing.assert_allclose(
-            getattr(native, name), getattr(reference, name), rtol=2e-13, atol=2e-13
-        )
-
-
 def test_native_plan_driver_supports_coupled_polarized_inflow():
     phantom, program, raster = _native_plan_fixture()
     grid = np.linspace(0.0, 1.0, phantom.nvoxels).reshape(phantom.shape)
@@ -185,16 +141,6 @@ def test_native_plan_driver_supports_coupled_polarized_inflow():
         ),
         arrival_delay_map_s=2 * raster * grid,
         max_step_s=raster,
-    )
-    phantom.dynamic_b0 = DynamicB0(
-        TimeCurve(
-            (0.0, 5 * raster, 12 * raster),
-            (-4.0, 7.0, 1.0),
-            "linear",
-            "hold",
-        ),
-        0.3 + 0.9 * grid,
-        (1.0, 0.75),
     )
     phantom.tx_sensitivity_map = (0.7 + 0.35 * grid) * np.exp(1j * (-0.2 + 0.35 * grid))
     phantom.rx_sensitivity_maps = np.stack(
@@ -316,16 +262,6 @@ def test_native_plan_driver_supports_remaining_two_pool_source_models(
 def test_native_plan_driver_supports_spatial_tx_subspins_and_receive_coils():
     phantom, program, raster = _native_plan_fixture()
     grid = np.linspace(0.0, 1.0, phantom.nvoxels).reshape(phantom.shape)
-    phantom.dynamic_b0 = DynamicB0(
-        TimeCurve(
-            (0.0, 5 * raster, 12 * raster),
-            (4.0, -6.0, 3.0),
-            "linear",
-            "hold",
-        ),
-        0.4 + 0.8 * grid,
-        (1.0, 0.7),
-    )
     phantom.tx_sensitivity_map = (0.75 + 0.35 * grid) * np.exp(
         1j * (-0.15 + 0.3 * grid)
     )
@@ -415,16 +351,6 @@ def test_native_plan_driver_supports_additional_product_pool_conversion():
         ),
         arrival_delay_map_s=raster * grid,
         max_step_s=raster,
-    )
-    phantom.dynamic_b0 = DynamicB0(
-        TimeCurve(
-            (0.0, 6 * raster, 12 * raster),
-            (-4.0, 6.0, 1.5),
-            "linear",
-            "hold",
-        ),
-        0.4 + 0.7 * grid,
-        (1.0, 0.7, 1.2),
     )
     phantom.tx_sensitivity_map = (0.75 + 0.3 * grid) * np.exp(1j * (-0.2 + 0.3 * grid))
     phantom.rx_sensitivity_maps = np.stack(

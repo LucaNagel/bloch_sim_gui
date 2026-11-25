@@ -7,7 +7,6 @@ from blochsimulator import BlochSimulator
 from blochsimulator import dynamic_phantom as dynamic_module
 from blochsimulator.kernel_capabilities import KernelFallbackWarning
 from blochsimulator.dynamic_phantom import (
-    DynamicB0,
     DynamicSpectralPhantom,
     PyruvateInflow,
     TimeCurve,
@@ -438,35 +437,6 @@ def test_spin_major_runs_models_it_used_to_refuse(case):
     assert spin_major.metadata["native_spin_major_fallback_reason"] is None
     assert interval_major.metadata["native_spin_major_enabled"] is False
     _assert_close(spin_major, interval_major)
-
-
-@pytest.mark.parametrize(
-    "case, reason",
-    [
-        ("dynamic_b0", "dynamic B0 is unsupported"),
-    ],
-)
-def test_spin_major_falls_back_for_unsupported_models(case, reason):
-    phantom = _phantom(inflow="polarized", tracked=True)
-    program = _program()
-    kwargs = {}
-    if case == "dynamic_b0":
-        phantom.dynamic_b0 = DynamicB0(
-            TimeCurve((0.0, 25 * RASTER), (-3.0, 4.0), "linear", "hold"),
-            np.ones(phantom.shape),
-        )
-    elif case == "spatial_tx":
-        phantom.tx_sensitivity_map = np.linspace(0.8, 1.1, phantom.nvoxels).reshape(
-            phantom.shape
-        ) * np.exp(0.2j)
-    else:
-        kwargs["memory_budget_bytes"] = 1
-
-    result = _run(phantom, program, **kwargs)
-
-    assert result.metadata["native_spin_major_enabled"] is False
-    assert result.metadata["native_spin_major_chunks"] == 0
-    assert result.metadata["native_spin_major_fallback_reason"] == reason
 
 
 def _time_zero_program():

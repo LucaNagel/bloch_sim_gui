@@ -167,7 +167,7 @@ plus about 0.01 s per check. Before the vectorized compile it was 14–24 µs.
 
 For a `DynamicSpectralPhantom` the GUI calls `estimate_dynamic_timestep_error`
 instead of the probe check. It runs the dynamic kernel itself, with conversion,
-inflow (also co-labelled pools), washout and dynamic B0, at the chosen step and
+inflow (also co-labelled pools) and washout, at the chosen step and
 at a quarter of it. The probe check used the static kernel without any of these.
 
 Voxels do not couple, so the kernel can simulate a voxel subset of the full
@@ -175,7 +175,7 @@ phantom (private option `_voxel_indices`). Every map applies unchanged, and each
 selected voxel reproduces its full-phantom result to 1e-12.
 `dynamic_timestep_error_voxels` picks at most 256 voxels: the median and the
 extremes of each pool's off-resonance; the extremes of B1, kPL, kPA, inflow
-delivery and arrival, washout loss and the dynamic-B0 scale; one voxel per
+delivery and arrival and washout loss; one voxel per
 washout or contrast compartment; and the brightest voxel of each pool. Evenly
 spaced voxels fill the rest. Smaller phantoms are checked whole.
 
@@ -993,15 +993,13 @@ of Pulseq sequence time. `kinetics_time_offset_s` specifies the kinetics time
 that coincides with sequence `t=0`; solver breakpoints are translated by
 `t_sequence = t_kinetics - kinetics_time_offset_s`. Any translated interval
 before sequence zero is integrated as RF-free longitudinal pre-roll, producing
-the pool distribution supplied to the Pulseq simulation. Dynamic B0 remains on
-the sequence timeline and is deliberately not shifted by this kinetics offset.
+the pool distribution supplied to the Pulseq simulation.
 
-A piecewise-linear dynamic B0 curve in Hz can be combined with a voxelwise
-scale map. RF-free transverse evolution uses the exact frequency integral over
-each compiled interval. The sequence compiler merges phantom curve knots with
-Pulseq event boundaries, ADC samples, and checkpoints. Pulseq RF/ADC carrier
-offsets remain sequence properties and are not conflated with this dynamic
-object frequency.
+B0 is static: a voxelwise map that does not change over time. Time-dependent
+B0 drift was removed; a drift stored in an older phantom or design is dropped
+with a warning when it is loaded. The sequence compiler merges phantom curve
+knots (inflow, polarization) with Pulseq event boundaries, ADC samples, and
+checkpoints. Pulseq RF/ADC carrier offsets remain sequence properties.
 
 The two-pool irreversible model must pass four limiting cases: zero exchange equals the
 current independent-component solver, no-RF evolution matches the analytic

@@ -25,7 +25,6 @@ import scipy
 from benchmarks.common import result_similarity
 from blochsimulator import BlochSimulator
 from blochsimulator.dynamic_phantom import (
-    DynamicB0,
     DynamicSpectralPhantom,
     PyruvateInflow,
     TimeCurve,
@@ -70,11 +69,6 @@ def _fixture():
         TimeCurve((0.0, 0.010, 0.016), (0.8, 0.45, 0.25), "linear", "hold"),
         arrival_delay_map_s=0.001 * spatial,
         max_step_s=10 * raster,
-    )
-    phantom.dynamic_b0 = DynamicB0(
-        TimeCurve((0.0, 0.008, 0.016), (-5.0, 7.0, 1.0), "linear", "hold"),
-        0.4 + 0.7 * spatial,
-        (1.0, 0.7, 1.2),
     )
     phantom.tx_sensitivity_map = (0.75 + 0.35 * spatial) * np.exp(
         1j * (-0.15 + 0.3 * spatial)

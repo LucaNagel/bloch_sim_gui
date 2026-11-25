@@ -41,8 +41,6 @@ class DynamicExecutionPlan:
     source_rate_samples: Optional[np.ndarray]
     source_polarization_samples: Optional[np.ndarray]
     spatial_source_delays: bool
-    dynamic_b0_first_half_integral_hz_s: np.ndarray
-    dynamic_b0_second_half_integral_hz_s: np.ndarray
     action_state_indices: np.ndarray
     action_kinds: np.ndarray
     action_payload_indices: np.ndarray
@@ -61,8 +59,6 @@ class DynamicExecutionPlan:
             "rf_hz": np.complex128,
             "gradient_hz_per_m": np.float64,
             "conversion_active": np.bool_,
-            "dynamic_b0_first_half_integral_hz_s": np.float64,
-            "dynamic_b0_second_half_integral_hz_s": np.float64,
             "action_state_indices": np.int64,
             "action_kinds": np.int8,
             "action_payload_indices": np.int64,
@@ -217,13 +213,6 @@ def build_dynamic_execution_plan(compiled, phantom) -> DynamicExecutionPlan:
                 polarization_curve.interval_values_array(interval_mid_s, interval_end_s)
             )
 
-    first_dynamic_b0 = np.zeros(dt_s.size, dtype=np.float64)
-    second_dynamic_b0 = np.zeros(dt_s.size, dtype=np.float64)
-    if phantom.dynamic_b0 is not None:
-        curve = phantom.dynamic_b0.offset_curve_hz
-        first_dynamic_b0 = curve.integrals(interval_start_s, interval_mid_s)
-        second_dynamic_b0 = curve.integrals(interval_mid_s, interval_end_s)
-
     action_states, action_kinds, action_payloads = _action_table(compiled)
     segment_starts, segment_ends, segment_kinds = _segments(
         np.asarray(compiled.rf_hz), action_states
@@ -238,8 +227,6 @@ def build_dynamic_execution_plan(compiled, phantom) -> DynamicExecutionPlan:
         conversion_active,
         source_rate_samples,
         source_polarization_samples,
-        first_dynamic_b0,
-        second_dynamic_b0,
         action_states,
         action_kinds,
         action_payloads,
@@ -257,8 +244,6 @@ def build_dynamic_execution_plan(compiled, phantom) -> DynamicExecutionPlan:
         source_rate_samples=source_rate_samples,
         source_polarization_samples=source_polarization_samples,
         spatial_source_delays=spatial_source_delays,
-        dynamic_b0_first_half_integral_hz_s=first_dynamic_b0,
-        dynamic_b0_second_half_integral_hz_s=second_dynamic_b0,
         action_state_indices=action_states,
         action_kinds=action_kinds,
         action_payload_indices=action_payloads,

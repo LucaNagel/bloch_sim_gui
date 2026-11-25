@@ -6,8 +6,8 @@ Goal
 Measure speed and numerical agreement between implementations of two different
 physical solvers. Sequence Bloch kernels propagate ordinary independent Bloch
 states. Dynamic spectral kernels additionally retain coupled pyruvate/lactate
-states, optional product pools, and integrate conversion, polarization, inflow,
-and optional dynamic B0.
+states, optional product pools, and integrate conversion, polarization and
+inflow.
 Each optimized, native, or experimental result is compared with the reference
 implementation from the same solver family: ``strict_reference`` for Sequence
 Bloch kernels and ``reference`` for dynamic spectral kernels.
@@ -225,8 +225,8 @@ def print_kernel_descriptions(sequence_kernels, dynamic_kernels) -> None:
         print(f"    {kernel}: {KERNEL_DESCRIPTIONS[f'sequence/{kernel}']}", flush=True)
     print(
         "  Dynamic spectral kernels retain coupled pyruvate and lactate states, "
-        "optional product pools, and also integrate kPL conversion, polarization, "
-        "inflow, and optional dynamic B0.",
+        "optional product pools, and also integrate kPL conversion, polarization "
+        "and inflow.",
         flush=True,
     )
     for kernel in dynamic_kernels:

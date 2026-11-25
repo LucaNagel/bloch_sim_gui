@@ -741,7 +741,6 @@ def print_phantom_summary(label: str, path: Path, phantom) -> None:
         print(
             "  Dynamics: "
             f"pyruvate inflow={'yes' if phantom.pyruvate_inflow is not None else 'no'}, "
-            f"dynamic B0={'yes' if phantom.dynamic_b0 is not None else 'no'}, "
             f"start={float(phantom.conversion_start_s):g} s, "
             f"time offset={float(phantom.kinetics_time_offset_s):g} s",
             flush=True,

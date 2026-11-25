@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 from dataclasses import replace
@@ -7,7 +9,6 @@ from unittest.mock import MagicMock
 
 from blochsimulator import BlochSimulator
 from blochsimulator.dynamic_phantom import (
-    DynamicB0,
     DynamicSpectralPhantom,
     KineticRegionDefinition,
     PyruvateInflow,
@@ -622,43 +623,23 @@ def test_linear_inflow_and_conversion_conserve_added_mass_without_relaxation():
     assert final_mass == pytest.approx(2.0, rel=1e-12)
 
 
-def test_dynamic_b0_uses_integrated_frequency_phase():
-    shape = (1, 1, 1)
-    kwargs = dict(
-        shape=shape,
-        fov=(0.01, 0.01, 0.01),
-        pools=(
-            ChemicalSpecies("Pyruvate", 0.0, 30.0, 10.0),
-            ChemicalSpecies("Lactate", 12.0, 25.0, 10.0),
-        ),
-        initial_concentration_maps={
-            "Pyruvate": np.ones(shape),
-            "Lactate": np.zeros(shape),
-        },
-        kpl_map_s_inv=np.zeros(shape),
-        nucleus="C13",
-    )
-    reference = DynamicSpectralPhantom(**kwargs)
-    dynamic = DynamicSpectralPhantom(
-        **kwargs,
-        dynamic_b0=DynamicB0(
-            TimeCurve((0.0, 1.0), (0.0, 7.0), "linear", "hold"),
-            np.ones(shape),
-        ),
-    )
-    program = SequenceProgram(
-        (RFEvent(0.0, np.asarray([250000.0]), 1e-6), ADCEvent(1.0, 1, 1e-3)),
-        duration_s=1.001,
-    )
-    simulator = BlochSimulator(use_parallel=False)
+def test_loading_a_saved_dynamic_b0_drift_warns_and_drops_it(tmp_path):
+    phantom = _dynamic_phantom()
+    path = phantom.save(tmp_path / "drift.npz")
+    with np.load(path) as data:
+        arrays = {name: data[name] for name in data.files}
+    header = json.loads(str(arrays["header_json"].item()))
+    header["dynamic_b0"] = {
+        "offset_curve_hz": {"times_s": [0.0, 1.0], "values": [0.0, 5.0]}
+    }
+    arrays["header_json"] = np.asarray(json.dumps(header))
+    np.savez_compressed(path, **arrays)
 
-    reference_signal = simulator.simulate_dynamic_sequence(program, reference).signal[0]
-    dynamic_signal = simulator.simulate_dynamic_sequence(program, dynamic).signal[0]
-    phase_integral = dynamic.dynamic_b0.offset_curve_hz.integral(0.5e-6, 1.0)
+    with pytest.warns(UserWarning, match="dynamic B0 is no longer supported"):
+        loaded = DynamicSpectralPhantom.load(path)
 
-    assert dynamic_signal / reference_signal == pytest.approx(
-        np.exp(-2j * np.pi * phase_integral), rel=1e-10, abs=1e-10
-    )
+    assert not hasattr(loaded, "dynamic_b0")
+    assert np.array_equal(loaded.b0_map, phantom.b0_map)
 
 
 def test_dynamic_sequence_returns_pool_resolved_adc_and_xarray():
@@ -703,16 +684,6 @@ def test_optimized_dynamic_kernel_is_bitwise_equal_to_reference(with_drivers, kp
                 "hold",
             ),
             np.ones(phantom.shape),
-        )
-        phantom.dynamic_b0 = DynamicB0(
-            TimeCurve(
-                (0.0, 6 * raster, 12 * raster),
-                (-3.0, 5.0, 2.0),
-                "linear",
-                "hold",
-            ),
-            np.linspace(0.5, 1.0, phantom.nvoxels).reshape(phantom.shape),
-            (1.0, 0.8),
         )
     program = SequenceProgram(
         (
@@ -1038,15 +1009,13 @@ def test_native_rf_blocks_support_constant_and_spatial_tx(
 @pytest.mark.parametrize("kernel", ["native_serial", "native_parallel"])
 @pytest.mark.parametrize(
     "driver",
-    ["inflow", "dynamic_b0", "delayed_conversion", "concentration_tracking"],
+    ["inflow", "delayed_conversion", "concentration_tracking"],
 )
 def test_native_dynamic_kernel_keeps_rf_fast_path_with_driver(driver, kernel):
     phantom = _dynamic_phantom()
     curve = TimeCurve((0.0, 1e-3), (0.0, 1.0), "linear", "hold")
     if driver == "inflow":
         phantom.pyruvate_inflow = PyruvateInflow(curve, np.ones(phantom.shape))
-    elif driver == "dynamic_b0":
-        phantom.dynamic_b0 = DynamicB0(curve, np.ones(phantom.shape))
     elif driver == "delayed_conversion":
         phantom.conversion_start_s = 0.5e-3
     else:
@@ -1402,10 +1371,6 @@ def test_dynamic_driver_round_trip(tmp_path, suffix):
         np.ones(phantom.shape),
         polarization_curve=TimeCurve((-2.0, 2.0), (10000.0, 5000.0), "linear", "hold"),
     )
-    phantom.dynamic_b0 = DynamicB0(
-        TimeCurve((0.0, 2.0), (-3.0, 4.0), "linear", "hold"),
-        np.linspace(0.5, 1.0, phantom.nvoxels).reshape(phantom.shape),
-    )
 
     loaded = DynamicSpectralPhantom.load(phantom.save(tmp_path / f"drivers{suffix}"))
 
@@ -1426,12 +1391,8 @@ def test_dynamic_driver_round_trip(tmp_path, suffix):
     assert np.array_equal(
         loaded.pyruvate_inflow.delivery_map, phantom.pyruvate_inflow.delivery_map
     )
-    assert loaded.dynamic_b0.offset_curve_hz == phantom.dynamic_b0.offset_curve_hz
     assert loaded.conversion_start_s == phantom.conversion_start_s
     assert loaded.kinetics_time_offset_s == phantom.kinetics_time_offset_s
-    assert np.array_equal(
-        loaded.dynamic_b0.spatial_scale_map, phantom.dynamic_b0.spatial_scale_map
-    )
 
 
 def test_equilibrium_polarization_requires_spin_density_maps():
@@ -1703,7 +1664,7 @@ def test_phantom_design_uses_metabolite_specific_t1_for_dynamic_pools():
     assert [pool.t1 for pool in phantom.pools] == pytest.approx([30.0, 25.0])
 
 
-def test_phantom_design_builds_inflow_and_dynamic_b0_drivers():
+def test_phantom_design_builds_inflow_driver():
     design = PhantomDesign(
         shape=(2, 2, 1),
         fov_m=(0.02, 0.02, 0.01),
@@ -1711,7 +1672,6 @@ def test_phantom_design_builds_inflow_and_dynamic_b0_drivers():
         pyruvate_inflow_curve=TimeCurve((-2.0, 2.0), (0.0, 0.2), "linear", "zero"),
         conversion_start_s=-1.0,
         kinetics_time_offset_s=0.5,
-        dynamic_b0_curve=TimeCurve((0.0, 2.0), (0.0, 5.0), "linear", "hold"),
         shapes=[
             ShapeDefinition(
                 "Object",
@@ -1731,13 +1691,11 @@ def test_phantom_design_builds_inflow_and_dynamic_b0_drivers():
     assert phantom.pyruvate_inflow is not None
     assert np.all(phantom.pyruvate_inflow.delivery_map == 1.0)
     assert phantom.n_active == phantom.nvoxels
-    assert phantom.dynamic_b0 is not None
     assert phantom.conversion_start_s == -1.0
     assert phantom.kinetics_time_offset_s == 0.5
     assert restored.pyruvate_inflow_curve == design.pyruvate_inflow_curve
     assert restored.conversion_start_s == design.conversion_start_s
     assert restored.kinetics_time_offset_s == design.kinetics_time_offset_s
-    assert restored.dynamic_b0_curve == design.dynamic_b0_curve
 
 
 def test_phantom_designer_exposes_kinetic_regions_and_preview():
@@ -1768,15 +1726,12 @@ def test_phantom_designer_exposes_kinetic_regions_and_preview():
     assert spatial_call.kwargs["highlighted_region"].kind == "ellipsoid"
     assert "kPL region 1" in dialog.kinetics_spatial_preview_info.text()
     dialog.inflow_enabled.setChecked(True)
-    # The drift is edited in the B0 Field tab and passes through the design.
-    design.dynamic_b0_curve = TimeCurve((0.0, 10.0), (0.0, 5.0), "linear", "hold")
     dialog._preview()
 
     assert isinstance(dialog.phantom, DynamicSpectralPhantom)
     assert dialog.inspector.map_combo.currentText() == "kPL"
     assert dialog.phantom.kinetic_regions[0].kpl_s_inv == pytest.approx(0.05)
     assert dialog.phantom.pyruvate_inflow is not None
-    assert dialog.phantom.dynamic_b0 is not None
     dialog.close()
     app.processEvents()
 

@@ -39,13 +39,11 @@ def _compiled_sequence():
 def _phantom(*, spatial_source_delays=False):
     inflow_curve = TimeCurve((0.0, 0.3, 0.6), (1.0, 2.0, 4.0), outside="hold")
     polarization_curve = TimeCurve((0.0, 0.6), (0.25, 0.75), outside="hold")
-    b0_curve = TimeCurve((0.0, 0.6), (-2.0, 3.0), outside="hold")
     return SimpleNamespace(
         conversion_start_on_sequence_timeline_s=0.2,
         pyruvate_inflow=SimpleNamespace(has_spatial_delays=spatial_source_delays),
         inflow_curve_on_sequence_timeline=inflow_curve,
         inflow_polarization_curve_on_sequence_timeline=polarization_curve,
-        dynamic_b0=SimpleNamespace(offset_curve_hz=b0_curve),
     )
 
 
@@ -89,7 +87,7 @@ def test_execution_plan_preserves_boundary_action_order_and_segments():
     assert plan.segment_kinds.tolist() == [SEGMENT_FREE, SEGMENT_RF, SEGMENT_RF]
 
 
-def test_execution_plan_precomputes_exact_dynamic_samples_and_integrals():
+def test_execution_plan_precomputes_exact_dynamic_samples():
     phantom = _phantom()
     plan = build_dynamic_execution_plan(_compiled_sequence(), phantom)
 
@@ -104,12 +102,6 @@ def test_execution_plan_precomputes_exact_dynamic_samples_and_integrals():
         assert np.array_equal(
             plan.source_rate_samples[index, 2:4],
             phantom.inflow_curve_on_sequence_timeline.interval_values(middle, end),
-        )
-        assert plan.dynamic_b0_first_half_integral_hz_s[index] == pytest.approx(
-            phantom.dynamic_b0.offset_curve_hz.integral(start, middle), rel=0, abs=0
-        )
-        assert plan.dynamic_b0_second_half_integral_hz_s[index] == pytest.approx(
-            phantom.dynamic_b0.offset_curve_hz.integral(middle, end), rel=0, abs=0
         )
 
 

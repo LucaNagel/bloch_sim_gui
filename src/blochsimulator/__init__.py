@@ -51,7 +51,6 @@ from .phantom_design import (  # noqa: F401
 )
 from .spectral_phantom import ChemicalSpecies, SpectralPhantom  # noqa: F401
 from .dynamic_phantom import (  # noqa: F401
-    DynamicB0,
     DynamicSpectralPhantom,
     KineticRegionDefinition,
     PyruvateInflow,

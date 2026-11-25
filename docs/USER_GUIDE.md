@@ -279,9 +279,8 @@ B0 field of the current phantom, the mouse perfusion phantom included:
 - a constant offset per region: per shape for designer phantoms, per tissue
   for the mouse phantom.
 
-A uniform B0 drift over time is not edited in the GUI. It can be set from
-Python (`DynamicB0` on a time-resolved phantom); a drift stored with a phantom
-is kept unchanged by the B0 Field tab.
+B0 does not change over time. A B0 drift saved with an older phantom or
+design is dropped with a warning when it is loaded.
 
 Changes are applied to the phantom automatically and are saved with it. The
 field adds to any B0 map the phantom already has. Transmit and receive fields

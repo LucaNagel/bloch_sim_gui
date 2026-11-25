@@ -42,7 +42,6 @@ from time import perf_counter
 import numpy as np
 
 from blochsimulator.dynamic_phantom import (
-    DynamicB0,
     DynamicSpectralPhantom,
     PyruvateInflow,
 )
@@ -343,15 +342,6 @@ def make_resolution_slice(source, shape: tuple[int, int], slice_index: int):
                 ),
                 polarization_curve=source.pyruvate_inflow.polarization_curve,
             )
-        dynamic_b0 = None
-        if source.dynamic_b0 is not None:
-            dynamic_b0 = DynamicB0(
-                offset_curve_hz=source.dynamic_b0.offset_curve_hz,
-                spatial_scale_map=_resample_slice(
-                    source.dynamic_b0.spatial_scale_map, slice_index, shape
-                ),
-                pool_scale=source.dynamic_b0.pool_scale,
-            )
         return DynamicSpectralPhantom(
             shape=shape_3d,
             fov=fov_3d,
@@ -379,7 +369,6 @@ def make_resolution_slice(source, shape: tuple[int, int], slice_index: int):
             name=f"{source.name} {shape[0]}x{shape[1]} resolution slice",
             kinetic_regions=(),
             pyruvate_inflow=inflow,
-            dynamic_b0=dynamic_b0,
             conversion_start_s=source.conversion_start_s,
             kinetics_time_offset_s=source.kinetics_time_offset_s,
             metadata=metadata,
@@ -487,15 +476,6 @@ def make_resolution_volume(source, shape: tuple[int, int]):
                 ),
                 polarization_curve=source.pyruvate_inflow.polarization_curve,
             )
-        dynamic_b0 = None
-        if source.dynamic_b0 is not None:
-            dynamic_b0 = DynamicB0(
-                offset_curve_hz=source.dynamic_b0.offset_curve_hz,
-                spatial_scale_map=_resample_volume_xy(
-                    source.dynamic_b0.spatial_scale_map, shape
-                ),
-                pool_scale=source.dynamic_b0.pool_scale,
-            )
         return DynamicSpectralPhantom(
             shape=shape_3d,
             fov=fov_3d,
@@ -523,7 +503,6 @@ def make_resolution_volume(source, shape: tuple[int, int]):
             name=f"{source.name} {shape[0]}x{shape[1]}x{source.shape[2]} resolution volume",
             kinetic_regions=(),
             pyruvate_inflow=inflow,
-            dynamic_b0=dynamic_b0,
             conversion_start_s=source.conversion_start_s,
             kinetics_time_offset_s=source.kinetics_time_offset_s,
             metadata=metadata,

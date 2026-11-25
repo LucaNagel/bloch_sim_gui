@@ -660,7 +660,7 @@ def dynamic_timestep_error_voxels(
     first: per pool the median, lowest and highest off-resonance (B0 plus
     chemical shift relative to the sequence reference), the lowest and
     highest Tx sensitivity, kPL and kPA, inflow delivery and arrival delay,
-    washout loss and dynamic B0 scale, one voxel per washout and contrast
+    washout loss, one voxel per washout and contrast
     compartment and the brightest voxel per pool. Evenly spaced active
     voxels fill the rest. The indices are sorted and unique.
     """
@@ -716,8 +716,6 @@ def dynamic_timestep_error_voxels(
     contrast = getattr(phantom, "contrast_relaxation", None)
     if contrast is not None:
         one_per_group(values(contrast.compartment_map, np.int64))
-    if phantom.dynamic_b0 is not None:
-        extremes(values(phantom.dynamic_b0.spatial_scale_map))
     for pool in phantom.pools:
         density = phantom.initial_concentration_maps.get(pool.name)
         if density is not None:
@@ -743,7 +741,7 @@ def timestep_error_frequencies(
 
     The shape is ``(n_pools, n_voxels)`` over the flattened phantom: B0 plus
     the pool's chemical shift (and shift map) relative to the sequence
-    reference, as the dynamic kernel sees them before dynamic B0.
+    reference, as the dynamic kernel sees them.
     """
 
     from ..units import ppm_to_hz

@@ -3381,14 +3381,12 @@ class SpectralPhantomDesignerDialog(ExplicitAcceptDialog):
         self.design.spectral_points = self.spectral_points.value()
         self.design.supersampling_enabled = self.supersampling_enabled.isChecked()
         self.design.supersampling_factor = self.supersampling_factor.value()
-        # The B0 pattern, per-shape B0 offsets and the B0 drift are edited in
-        # the main window's B0 Field tab and pass through the design unchanged.
+        # The B0 pattern and per-shape B0 offsets are edited in the main
+        # window's B0 Field tab and pass through the design unchanged.
         dynamic_requested = (
-            self.dynamic_enabled.isChecked()
-            or self.inflow_enabled.isChecked()
-            or self.design.dynamic_b0_curve is not None
+            self.dynamic_enabled.isChecked() or self.inflow_enabled.isChecked()
         )
-        # Inflow or B0 drift need the time-resolved phantom; switching it on
+        # Inflow needs the time-resolved phantom; switching it on
         # for them must not invent a conversion rate the user never asked for.
         self._suppress_default_kpl = True
         try:

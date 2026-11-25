@@ -145,7 +145,7 @@ lactate; supported additional product pools use the same timeline and receive
 their established precursor-to-product conversion. During each compiled
 interval the solver applies a symmetric free-evolution/RF/free-evolution split:
 
-1. half an interval of T2 decay, gradient/static/dynamic-B0 phase, T1
+1. half an interval of T2 decay, gradient/static-B0 phase, T1
    relaxation, longitudinal pyruvate-to-lactate conversion, and optional
    pyruvate inflow;
 2. the RF rotation for both pools;
@@ -185,8 +185,8 @@ A stored GUI selection that is no longer offered, including an earlier
 
 | Name | Old names | Implementation and intended use |
 | --- | --- | --- |
-| **Production (recommended)** — `production` | `native_parallel`, `native_serial` | Adds OpenMP across spins to strict native primitives and bounded plan blocks. Parallel work starts at 1,024 simulated spins; smaller jobs, a simulator with `use_parallel=False`, and the old name `native_serial` use one thread. The complete bounded driver supports unity, constant complex, or spatial transmit sensitivity, static or dynamic B0, delayed conversion, ADC, crushers, receive coils, subvoxel sampling, and checkpoints. It covers direct or polarized pyruvate inflow, with or without concentration tracking, as well as concentration tracking without inflow. A separate multi-pool worker supports the existing precursor-to-product conversions, including pyruvate-to-alanine. Voxelwise arrival delays use bounded local source tables. This is the default for dynamic phantoms in the GUI and in `BlochSimulator(...)`. |
-| `numpy` (Python only) | `optimized` | Complete CPU path. It keeps the transverse state in a persistent complex array, reuses scratch buffers, caches exact longitudinal coefficients by half-step duration, and caches T2/phase factors by duration, gradient, and dynamic-B0 integral. It supports inflow, delayed conversion, concentration tracking, dynamic B0, spatial transmit sensitivity, multiple receive coils, checkpoints, and both spoiler modes. It is the safe fallback for unsupported native combinations. |
+| **Production (recommended)** — `production` | `native_parallel`, `native_serial` | Adds OpenMP across spins to strict native primitives and bounded plan blocks. Parallel work starts at 1,024 simulated spins; smaller jobs, a simulator with `use_parallel=False`, and the old name `native_serial` use one thread. The complete bounded driver supports unity, constant complex, or spatial transmit sensitivity, static B0, delayed conversion, ADC, crushers, receive coils, subvoxel sampling, and checkpoints. It covers direct or polarized pyruvate inflow, with or without concentration tracking, as well as concentration tracking without inflow. A separate multi-pool worker supports the existing precursor-to-product conversions, including pyruvate-to-alanine. Voxelwise arrival delays use bounded local source tables. This is the default for dynamic phantoms in the GUI and in `BlochSimulator(...)`. |
+| `numpy` (Python only) | `optimized` | Complete CPU path. It keeps the transverse state in a persistent complex array, reuses scratch buffers, caches exact longitudinal coefficients by half-step duration, and caches T2/phase factors by duration and gradient. It supports inflow, delayed conversion, concentration tracking, spatial transmit sensitivity, multiple receive coils, checkpoints, and both spoiler modes. It is the safe fallback for unsupported native combinations. |
 | `reference` (Python only) | — | Direct, allocation-heavy Python/NumPy formulation. It recomputes intermediate phase, relaxation, exchange, inflow, and RF arrays at each interval and is the correctness oracle for the other dynamic paths. It supports the complete model but is intended for small validation and diagnostic runs. |
 
 Old names run exactly the path they ran before, with bit-identical results.
@@ -207,7 +207,7 @@ Native selection is capability-based rather than all-or-nothing:
 
 | Active feature combination | Native RF | Native longitudinal evolution | Actual behavior |
 | --- | --- | --- | --- |
-| Two pools; no inflow or concentration tracking; unity, constant, or spatial transmit | Yes | Yes | Complete bounded native plan, including delayed conversion and static or dynamic B0 |
+| Two pools; no inflow or concentration tracking; unity, constant, or spatial transmit | Yes | Yes | Complete bounded native plan, including delayed conversion and static B0 |
 | Coupled inflow, polarization curve, and concentration tracking, with or without spatial arrival delays | Yes | Yes | Complete bounded native plan; delayed sources are prepared only for the current time/voxel block |
 | Direct or polarized inflow without concentration delivery; concentration tracking with or without inflow | Yes | Yes | Complete bounded native plan with an explicit source mode matching the established model |
 | Additional product pools and passive precursor-to-product conversion | Yes | Yes | Separate complete multi-pool plan worker; the specialized two-pool loop remains unchanged |
