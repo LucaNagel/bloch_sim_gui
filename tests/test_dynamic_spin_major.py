@@ -140,6 +140,8 @@ def test_spin_major_matches_reference_for_two_pool_models(
     assert voxel_major.metadata["native_spin_major_fallback_reason"] == (
         "disabled by request"
     )
+    # Switching the executor off runs the NumPy kernel.
+    assert voxel_major.metadata["sequence_kernel"] == "numpy"
     _assert_close(spin_major, reference)
     _assert_close(spin_major, voxel_major)
 
@@ -212,13 +214,15 @@ def test_old_extension_without_spatial_tx_capability_falls_back(monkeypatch):
     assert "installed extension" in result.metadata["native_spin_major_fallback_reason"]
 
 
-def test_stale_spin_major_extension_uses_previous_native_driver(monkeypatch):
+def test_stale_spin_major_extension_falls_back_to_numpy(monkeypatch):
     from blochsimulator import dynamic_spin_major_cy as extension
 
     monkeypatch.setattr(extension, "API_VERSION", 1)
     result = _run(_phantom(), _program())
-    assert result.metadata["sequence_kernel"] == "production"
-    assert result.metadata["dynamic_kernel_path"] == "native_serial"
+    assert result.metadata["sequence_kernel"] == "numpy"
+    assert result.metadata["native_fallback_reason"] == (
+        "spin-major executor: extension is unavailable"
+    )
     assert not result.metadata["native_spin_major_enabled"]
     assert (
         result.metadata["native_spin_major_fallback_reason"]
@@ -388,7 +392,8 @@ def test_spin_major_switch_follows_environment(monkeypatch):
     assert disabled.metadata["native_spin_major_fallback_reason"] == (
         "disabled by request"
     )
-    assert disabled.metadata["native_full_plan_enabled"] is True
+    assert disabled.metadata["native_full_plan_enabled"] is False
+    assert disabled.metadata["sequence_kernel"] == "numpy"
     assert enabled.metadata["native_spin_major_enabled"] is True
 
 
@@ -430,13 +435,12 @@ def test_spin_major_runs_models_it_used_to_refuse(case):
     program = _program()
 
     spin_major = _run(phantom, program)
-    interval_major = _run(phantom, program, _native_spin_major=False)
+    reference = _run(phantom, program, "optimized")
 
     assert spin_major.metadata["native_spin_major_enabled"] is True
     assert spin_major.metadata["native_spin_major_chunks"] > 0
     assert spin_major.metadata["native_spin_major_fallback_reason"] is None
-    assert interval_major.metadata["native_spin_major_enabled"] is False
-    _assert_close(spin_major, interval_major)
+    _assert_close(spin_major, reference)
 
 
 def _time_zero_program():

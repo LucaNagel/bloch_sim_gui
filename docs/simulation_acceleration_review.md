@@ -82,7 +82,7 @@ Quelle: [dynamischer Solver](../src/blochsimulator/dynamic_phantom.py), insbeson
 | Dynamisch `metal_hybrid` | Experimentelle Apple-GPU-Berechnung mit Float64-CPU-Stichproben und unabhängiger Validierung. Bei Nichtunterstützung oder fehlgeschlagener Prüfung wird vollständig auf CPU gerechnet. |
 
 Quellen: [C-Kernel](../src/blochsimulator/bloch_core_modified.c),
-[Cython-Kernel](../src/blochsimulator/dynamic_bloch_wrapper.pyx),
+[Cython-Kernel](../src/blochsimulator/dynamic_spin_major_wrapper.pyx) (der hier beschriebene intervallweise Kernel `dynamic_bloch_wrapper.pyx` ist inzwischen entfernt),
 [Simulator und Auswahl](../src/blochsimulator/simulator.py),
 [Metal-Anbindung](../src/blochsimulator/dynamic_metal_backend.py).
 

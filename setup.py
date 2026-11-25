@@ -123,13 +123,6 @@ extensions = [
         language="c",
     ),
     Extension(
-        "blochsimulator.dynamic_bloch_cy",
-        sources=["src/blochsimulator/dynamic_bloch_wrapper.pyx"],
-        extra_compile_args=strict_compile_args,
-        extra_link_args=strict_link_args,
-        language="c",
-    ),
-    Extension(
         "blochsimulator.dynamic_spin_major_cy",
         sources=[
             "src/blochsimulator/dynamic_spin_major_wrapper.pyx",

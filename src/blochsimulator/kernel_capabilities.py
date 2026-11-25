@@ -126,7 +126,8 @@ def dynamic_kernel_fallback(metadata: Mapping | None) -> str | None:
     """Return why a dynamic run left its requested kernel, or None.
 
     ``metadata`` is the metadata of a dynamic simulation result. A spin-major
-    executor that was switched off on purpose is not a fallback.
+    executor that was switched off on purpose is not a fallback; the run then
+    used the NumPy kernel.
     """
     metadata = dict(metadata or {})
     # Results written before the renaming carry the internal path names.
@@ -147,6 +148,9 @@ def dynamic_kernel_fallback(metadata: Mapping | None) -> str | None:
         requested_public = requested
     if requested_public != actual:
         reason = metadata.get("native_fallback_reason") or "no reason recorded"
+        if reason == f"spin-major executor: {SPIN_MAJOR_DISABLED_REASON}":
+            # Switching the executor off on purpose runs the NumPy kernel.
+            return None
         return f"requested the {requested} kernel, ran {actual}: {reason}"
     reason = metadata.get("native_spin_major_fallback_reason")
     if (
@@ -202,18 +206,13 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
     strict_available, strict_reason, _ = _extension_status(
         "blochsimulator.blochsimulator_strict_cy", ("simulate_sequence_chunk",)
     )
-    dynamic_available, dynamic_reason, dynamic_module = _extension_status(
-        "blochsimulator.dynamic_bloch_cy",
-        (
-            "apply_rf_rotation_transverse_block",
-            "run_dynamic_plan_block_no_inflow",
-        ),
-    )
-    spin_available, _, spin_module = _extension_status(
+    spin_available, spin_reason, spin_module = _extension_status(
         "blochsimulator.dynamic_spin_major_cy",
         ("run_spin_major_chunk", "propagator_values", "propagator_columns"),
     )
-    spin_available = spin_available and getattr(spin_module, "API_VERSION", None) == 9
+    if spin_available and getattr(spin_module, "API_VERSION", None) != 9:
+        spin_available = False
+        spin_reason = "compiled extension has an incompatible API version"
     dynamic_details = {
         "spin_major": spin_available,
         "spin_major_spatial_tx": bool(
@@ -235,16 +234,6 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
         "spin_major_contrast_relaxation": bool(
             spin_available
             and getattr(spin_module, "CONTRAST_RELAXATION_SUPPORTED", False)
-        ),
-        "complete_two_pool_plan": bool(
-            dynamic_module is not None
-            and hasattr(
-                dynamic_module, "apply_dynamic_rf_block_with_concentration_inflow"
-            )
-        ),
-        "complete_multi_pool_plan": bool(
-            dynamic_module is not None
-            and hasattr(dynamic_module, "run_dynamic_plan_block_multi_pool")
         ),
     }
 
@@ -278,9 +267,9 @@ def detect_kernel_capabilities() -> dict[str, dict[str, KernelCapability]]:
         "production": KernelCapability(
             "dynamic",
             "production",
-            dynamic_available,
+            spin_available,
             fallback_supported=True,
-            reason=dynamic_reason,
+            reason=spin_reason,
             numerical_contract="float64-close",
             details=dynamic_details,
         ),

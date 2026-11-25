@@ -2323,7 +2323,11 @@ def _prepare_multi_pool_longitudinal_step(
     *,
     with_source,
 ):
-    """Prepare exact precursor-to-products coefficients for one half-step."""
+    """Prepare exact precursor-to-products coefficients for one half-step.
+
+    The spin-major executor evaluates the same coefficients in C with this
+    operation order; this function is the readable reference for it.
+    """
     conversion_rates = np.asarray(conversion_rates, dtype=np.float64)
     r1 = np.asarray(r1, dtype=np.float64)
     if conversion_rates.ndim != 2 or conversion_rates.shape[0] != r1.size - 1:
@@ -3037,7 +3041,7 @@ def _spin_major_fallback_reason(
     conversion-rate maps, including inflow with per-spin arrival delays.
     Checkpoints of any supported dtype are staged in float64 and converted on
     storage; actions at state zero (ADC, checkpoint) run before the executor
-    on the initial state. Everything else keeps the existing native paths.
+    on the initial state. Everything else runs on the NumPy kernel.
     """
     if not requested:
         return SPIN_MAJOR_DISABLED_REASON
@@ -3870,79 +3874,6 @@ def _simulate_dynamic_sequence_block(
     real_type = real_dtype.type
     requested_sequence_kernel = sequence_kernel
     native_fallback_reason = None
-    native_longitudinal_fallback_reason = None
-    native_longitudinal_step = None
-    native_longitudinal_block = None
-    native_concentration_inflow_step = None
-    native_rf_concentration_block = None
-    native_rf_rotation_block = None
-    native_spatial_rf_rotation_block = None
-    native_spatial_rf_prepare = None
-    native_transverse_prepare = None
-    native_plan_driver = None
-    native_plan_inflow_driver = None
-    native_plan_multi_pool_driver = None
-    if sequence_kernel in {"native_serial", "native_parallel"}:
-        try:
-            from .dynamic_bloch_cy import (
-                apply_longitudinal_block_no_inflow,
-                apply_longitudinal_step_no_inflow,
-                apply_longitudinal_step_with_concentration_inflow,
-                apply_dynamic_rf_block_with_concentration_inflow,
-                apply_rf_rotation_transverse_block,
-                apply_spatial_rf_rotation_transverse_block,
-                prepare_spatial_rf_rotation_coefficients,
-                prepare_transverse_factors_coefficients,
-                run_dynamic_plan_block_no_inflow,
-                run_dynamic_plan_block_multi_pool,
-            )
-
-            # RF rotation is independent of inflow, concentration tracking,
-            # and conversion timing. Keep that native fast path
-            # available even when longitudinal evolution must stay in NumPy.
-            native_rf_rotation_block = apply_rf_rotation_transverse_block
-            native_spatial_rf_rotation_block = (
-                apply_spatial_rf_rotation_transverse_block
-            )
-            native_spatial_rf_prepare = prepare_spatial_rf_rotation_coefficients
-            native_transverse_prepare = prepare_transverse_factors_coefficients
-            native_plan_driver = run_dynamic_plan_block_no_inflow
-            native_plan_multi_pool_driver = run_dynamic_plan_block_multi_pool
-            native_plan_inflow_driver = apply_dynamic_rf_block_with_concentration_inflow
-            coupled_concentration_inflow = bool(
-                phantom.initial_spin_density_maps is not None
-                and inflow_curve is not None
-                and inflow_polarization_curve is not None
-            )
-            if coupled_concentration_inflow and phantom.n_species == 2:
-                native_concentration_inflow_step = (
-                    apply_longitudinal_step_with_concentration_inflow
-                )
-                if not spatial_inflow_active:
-                    native_rf_concentration_block = (
-                        apply_dynamic_rf_block_with_concentration_inflow
-                    )
-            unsupported_longitudinal_drivers = []
-            if inflow_curve is not None and not coupled_concentration_inflow:
-                unsupported_longitudinal_drivers.append("pyruvate inflow")
-            if conversion_start_s > 0.0 and not coupled_concentration_inflow:
-                unsupported_longitudinal_drivers.append("delayed conversion")
-            if (
-                phantom.initial_spin_density_maps is not None
-                and not coupled_concentration_inflow
-            ):
-                unsupported_longitudinal_drivers.append("concentration tracking")
-            if unsupported_longitudinal_drivers:
-                native_longitudinal_fallback_reason = (
-                    "native longitudinal evolution does not support "
-                    + ", ".join(unsupported_longitudinal_drivers)
-                )
-            elif not coupled_concentration_inflow:
-                native_longitudinal_step = apply_longitudinal_step_no_inflow
-                native_longitudinal_block = apply_longitudinal_block_no_inflow
-        except ImportError:
-            native_fallback_reason = "strict native extension is unavailable"
-            sequence_kernel = "optimized"
     native_spin_major_requested = _spin_major_requested(_native_spin_major)
     native_spin_major_rf_cache_requested = _spin_major_rf_cache_requested(
         _native_spin_major_rf_cache
@@ -4072,20 +4003,6 @@ def _simulate_dynamic_sequence_block(
         constant_tx_sensitivity = _constant_tx_sensitivity
     spatial_tx_active = tx_classification == "spatial"
     nonunity_tx_active = tx_classification != "unity"
-    if (
-        sequence_kernel in {"native_serial", "native_parallel"}
-        and native_longitudinal_step is None
-        and native_concentration_inflow_step is None
-        and spatial_tx_active
-        and native_spatial_rf_rotation_block is None
-    ):
-        native_fallback_reason = (
-            "spatial transmit sensitivity and dynamic longitudinal drivers "
-            "require the optimized kernel"
-        )
-        sequence_kernel = "optimized"
-        native_rf_rotation_block = None
-        native_spatial_rf_rotation_block = None
     rx_maps = getattr(phantom, "rx_sensitivity_maps", None)
     if rx_maps is None:
         rx_sensitivities = np.ones((1, parent_active_count), dtype=np.complex128)
@@ -4190,17 +4107,7 @@ def _simulate_dynamic_sequence_block(
             spin_equilibrium = np.repeat(spin_equilibrium, spins_per_voxel)
 
     def prepare_transverse_factors(phase_cycles, duration_s):
-        if not _parent_resolved_signal or native_transverse_prepare is None:
-            return _prepare_transverse_factors(phase_cycles, t2, duration_s)
-        table = native_transverse_prepare(
-            np.ascontiguousarray(phase_cycles, dtype=np.float64),
-            np.ascontiguousarray(t2[:, 0], dtype=np.float64),
-            float(duration_s),
-        )
-        return tuple(
-            np.ascontiguousarray(table[pool], dtype=np.complex128)
-            for pool in range(table.shape[0])
-        )
+        return _prepare_transverse_factors(phase_cycles, t2, duration_s)
 
     coefficient_r1 = np.asarray(
         [1.0 / pool.t1 for pool in phantom.pools], dtype=np.float64
@@ -4348,6 +4255,14 @@ def _simulate_dynamic_sequence_block(
                 else f" (spin-major: {native_spin_major_fallback_reason})"
             )
         )
+    if sequence_kernel in {"native_serial", "native_parallel"} and (
+        not native_spin_major_enabled
+    ):
+        # Without the spin-major executor the plan runs on the NumPy kernel.
+        native_fallback_reason = (
+            f"spin-major executor: {native_spin_major_fallback_reason}"
+        )
+        sequence_kernel = "optimized"
     # Spin-major ADC sums are reduced over the whole block in a fixed order,
     # so a parent-resolved block only needs one signal row.
     signal_parent_rows = 1 if native_spin_major_enabled else parent_active_count
@@ -4397,12 +4312,6 @@ def _simulate_dynamic_sequence_block(
     )
     adc_demodulation = compiled.adc_demodulation
     action_cursor = 0
-    transverse_crush_state_set = set(
-        int(value)
-        for value in (
-            compiled.transverse_crush_state_indices if spoiler_mode == "ideal" else ()
-        )
-    )
 
     def sync_transverse_to_state():
         if transverse_state is not None:
@@ -4558,14 +4467,10 @@ def _simulate_dynamic_sequence_block(
     inactive_longitudinal_regular = np.abs(coefficient_r1[0] - second_r1) > 1e-12
     inactive_regular_mode = 1 if inactive_longitudinal_regular else -1
     inactive_longitudinal_scratch = (
-        (
-            np.empty_like(kpl),
-            np.empty_like(kpl),
-            np.empty_like(kpl),
-            inactive_regular_mode,
-        )
-        if sequence_kernel == "optimized" or native_longitudinal_step is None
-        else None
+        np.empty_like(kpl),
+        np.empty_like(kpl),
+        np.empty_like(kpl),
+        inactive_regular_mode,
     )
     concentration_longitudinal_scratch = None
     inactive_concentration_longitudinal_scratch = None
@@ -4599,37 +4504,6 @@ def _simulate_dynamic_sequence_block(
         if n_simulated_spins >= native_parallel_threshold
         else 1
     )
-    native_rf_threads = native_threads if sequence_kernel == "native_parallel" else 1
-    native_longitudinal_threads = (
-        native_threads if sequence_kernel == "native_parallel" else 1
-    )
-    native_block_interval_limit = 256
-    native_block_table_limit_bytes = 8 * 1024**2
-    native_full_plan_table_limit_bytes = 64 * 1024**2
-    if memory_budget_bytes is not None:
-        native_block_table_limit_bytes = min(
-            native_block_table_limit_bytes,
-            max(0, int(memory_budget_bytes) // 16),
-        )
-        native_full_plan_table_limit_bytes = min(
-            native_full_plan_table_limit_bytes,
-            max(0, int(memory_budget_bytes) // 8),
-        )
-    native_block_enabled = native_block_table_limit_bytes >= n_simulated_spins * 8
-    if not native_block_enabled:
-        native_threads = 1
-    native_rf_available = bool(
-        native_spatial_rf_rotation_block is not None
-        if spatial_tx_active
-        else native_rf_rotation_block is not None
-    )
-    native_full_plan_source_model = bool(
-        native_plan_inflow_driver is not None
-        and (concentration_state is not None or inflow_curve is not None)
-    )
-    native_full_plan_multi_pool = bool(
-        phantom.n_species > 2 and native_plan_multi_pool_driver is not None
-    )
     if inflow_curve is None:
         native_full_plan_source_mode = 2
         native_full_plan_model = "tracked-concentration"
@@ -4642,1229 +4516,9 @@ def _simulate_dynamic_sequence_block(
     else:
         native_full_plan_source_mode = 0
         native_full_plan_model = "coupled-concentration-inflow"
-    native_full_plan_no_inflow = bool(
-        phantom.n_species == 2
-        and native_plan_driver is not None
-        and inflow_curve is None
-        and concentration_state is None
+    native_full_plan_source_model = bool(
+        concentration_state is not None or inflow_curve is not None
     )
-    if native_full_plan_multi_pool:
-        native_full_plan_bytes_per_spin = (
-            96
-            + 64 * phantom.n_species
-            + (64 if native_full_plan_source_model else 0)
-            + (64 if spatial_inflow_active else 0)
-            + (40 if spatial_tx_active else 0)
-        )
-    else:
-        native_full_plan_bytes_per_spin = (
-            (248 if spatial_tx_active else 208) + (64 if spatial_inflow_active else 0)
-            if native_full_plan_source_model
-            else (136 if spatial_tx_active else 96)
-        )
-    # Only the multi-pool plan applies voxel washout; two-pool blocks keep the
-    # per-interval native loop, which wraps every interval in washout steps.
-    native_full_plan_enabled = bool(
-        sequence_kernel in {"native_serial", "native_parallel"}
-        and (washout is None or native_full_plan_multi_pool)
-        and (
-            native_full_plan_multi_pool
-            or native_full_plan_no_inflow
-            or (
-                phantom.n_species == 2
-                and native_full_plan_source_model
-                and passive_conversion is None
-            )
-        )
-        and checkpoint_dtype == np.dtype(np.float64)
-        and native_full_plan_table_limit_bytes
-        >= n_simulated_spins * native_full_plan_bytes_per_spin
-        and not np.any(
-            execution_plan.action_state_indices[
-                execution_plan.action_kinds == ACTION_ADC
-            ]
-            == 0
-        )
-    )
-    # The spin-major executor covers multi-pool plans, including an ADC at
-    # state zero; only without it does the NumPy path take over.
-    if (
-        phantom.n_species > 2
-        and sequence_kernel in {"native_serial", "native_parallel"}
-        and not native_full_plan_enabled
-        and not native_spin_major_enabled
-    ):
-        native_fallback_reason = (
-            "the multi-pool native plan is unavailable for this precision, "
-            "memory budget, or initial-time ADC contract"
-        )
-        sequence_kernel = "optimized"
-        native_rf_available = False
-        native_rf_rotation_block = None
-        native_spatial_rf_rotation_block = None
-        native_spatial_rf_prepare = None
-        native_transverse_prepare = None
-        native_longitudinal_step = None
-        native_longitudinal_block = None
-        native_concentration_inflow_step = None
-        native_rf_concentration_block = None
-    if status_callback is not None and native_rf_available:
-        if (
-            native_longitudinal_fallback_reason is not None
-            and not native_full_plan_enabled
-        ):
-            status_callback(
-                "Using the hybrid dynamic kernel: strict native RF rotation "
-                "with optimized longitudinal kinetics ("
-                f"{native_longitudinal_fallback_reason})."
-            )
-        status_callback(
-            f"Using the strict native {tx_classification} Tx RF voxel-block "
-            f"kernel with "
-            f"{native_rf_threads} thread(s) for {n_simulated_spins:,} spins "
-            f"in {parent_active_count:,} active voxels."
-        )
-    if status_callback is not None and native_concentration_inflow_step is not None:
-        status_callback(
-            "Using fused native pyruvate/lactate concentration and inflow "
-            f"kinetics with {native_longitudinal_threads} thread(s)."
-        )
-    native_preapplied_end = 0
-    checkpoint_state_set = set(
-        int(value) for value in compiled.checkpoint_state_indices
-    )
-    native_rf_fused_spin_limit = 131072
-    native_rf_fused_interval_limit = 512
-    native_rf_fused_min_intervals = 8
-    native_rf_fused_cache_limit_bytes = 192 * 1024**2
-    if memory_budget_bytes is not None:
-        native_rf_fused_cache_limit_bytes = min(
-            native_rf_fused_cache_limit_bytes,
-            max(0, int(memory_budget_bytes) // 8),
-        )
-    native_spatial_rf_table_limit_bytes = 64 * 1024**2
-    if memory_budget_bytes is not None:
-        native_spatial_rf_table_limit_bytes = min(
-            native_spatial_rf_table_limit_bytes,
-            max(0, int(memory_budget_bytes) // 16),
-        )
-    native_spatial_rf_max_groups = (
-        native_spatial_rf_table_limit_bytes
-        // max(1, n_simulated_spins * 5 * np.dtype(np.float64).itemsize)
-        if spatial_tx_active
-        else native_rf_fused_interval_limit
-    )
-    native_rf_fused_fallback_reason = None
-    if spatial_inflow_active:
-        native_rf_fused_fallback_reason = (
-            "persistent RF blocks do not yet support voxelwise inflow arrival delays"
-        )
-    elif washout is not None:
-        native_rf_fused_fallback_reason = (
-            "persistent RF blocks do not apply per-voxel washout"
-        )
-    elif native_rf_concentration_block is None:
-        native_rf_fused_fallback_reason = (
-            "persistent RF blocks require coupled concentration/polarized inflow"
-        )
-    elif tx_classification == "constant" and constant_tx_sensitivity == (0.0 + 0.0j):
-        native_rf_fused_fallback_reason = (
-            "zero transmit sensitivity does not need persistent RF rotation"
-        )
-    elif n_simulated_spins > native_rf_fused_spin_limit:
-        native_rf_fused_fallback_reason = (
-            f"{n_simulated_spins:,} spins exceed the persistent RF block limit "
-            f"of {native_rf_fused_spin_limit:,}; full-sequence voxel chunking "
-            "is required"
-        )
-    elif native_rf_fused_cache_limit_bytes < n_simulated_spins * 64:
-        native_rf_fused_fallback_reason = (
-            "the simulation memory budget is too small for a persistent RF plan"
-        )
-    elif spatial_tx_active and native_spatial_rf_max_groups < 1:
-        native_rf_fused_fallback_reason = (
-            "the simulation memory budget is too small for one spatial RF "
-            "coefficient group"
-        )
-    native_rf_fused_enabled = native_rf_fused_fallback_reason is None
-    native_rf_fused_plan_cache = (
-        _BoundedArrayCache(native_rf_fused_cache_limit_bytes)
-        if native_rf_fused_enabled
-        else None
-    )
-    spatial_rf_cache_limit_bytes = 64 * 1024**2
-    if memory_budget_bytes is not None:
-        spatial_rf_cache_limit_bytes = min(
-            spatial_rf_cache_limit_bytes,
-            max(0, int(memory_budget_bytes) // 16),
-        )
-    spatial_rf_cache = (
-        _BoundedArrayCache(spatial_rf_cache_limit_bytes)
-        if spatial_tx_active and native_spatial_rf_rotation_block is not None
-        else None
-    )
-    spatial_rf_cache_hits = 0
-    spatial_rf_cache_misses = 0
-
-    def spatial_rf_coefficients(rf_value, duration_s):
-        nonlocal spatial_rf_cache_hits, spatial_rf_cache_misses
-        key = (complex(rf_value), float(duration_s))
-        cached = spatial_rf_cache.get(key)
-        if cached is not None:
-            spatial_rf_cache_hits += 1
-            return cached
-        spatial_rf_cache_misses += 1
-        if native_spatial_rf_prepare is None:
-            prepared = _prepare_spatial_rf_rotation(
-                rf_value, tx_sensitivity, duration_s
-            )
-        else:
-            prepared = native_spatial_rf_prepare(
-                float(complex(rf_value).real),
-                float(complex(rf_value).imag),
-                np.ascontiguousarray(tx_sensitivity, dtype=np.complex128),
-                float(duration_s),
-            )
-        return spatial_rf_cache.put(key, prepared)
-
-    native_rf_fused_preapplied_end = 0
-    native_rf_fused_blocks = 0
-    native_rf_fused_intervals = 0
-    protected_state_set = set(checkpoint_state_set)
-    protected_state_set.update(int(value) for value in compiled.adc_state_indices)
-    protected_state_set.update(transverse_crush_state_set)
-
-    def _native_rf_fused_block_end(first_interval):
-        if not native_rf_fused_enabled or native_rf_hz[first_interval] == 0.0:
-            return first_interval
-        end = first_interval
-        spatial_rf_group_keys = set()
-        hard_end = min(interval_count, first_interval + native_rf_fused_interval_limit)
-        while end < hard_end and native_rf_hz[end] != 0.0:
-            if end > first_interval and end in protected_state_set:
-                break
-            if not execution_plan.conversion_active[end]:
-                break
-            if spatial_tx_active:
-                rf_group_key = (
-                    complex(native_rf_hz[end]),
-                    float(compiled.dt_s[end]),
-                )
-                if (
-                    rf_group_key not in spatial_rf_group_keys
-                    and len(spatial_rf_group_keys) >= native_spatial_rf_max_groups
-                ):
-                    break
-                spatial_rf_group_keys.add(rf_group_key)
-            end += 1
-            if end in protected_state_set:
-                break
-        if end - first_interval < native_rf_fused_min_intervals:
-            return first_interval
-        return end
-
-    def _native_rf_fused_plan(first_interval, end_interval):
-        factor_keys = []
-        longitudinal_keys = []
-        rf_values = []
-        for block_interval in range(first_interval, end_interval):
-            dt_value = float(compiled.dt_s[block_interval])
-            first_phase, second_phase = execution_plan.interval_half_s[block_interval]
-            half_duration = dt_value / 2.0
-            gradient_key = tuple(
-                float(value) for value in gradient_hz_per_m[block_interval]
-            )
-            first_key = (
-                half_duration,
-                float(first_phase),
-                gradient_key,
-                None,
-            )
-            second_key = (
-                half_duration,
-                float(second_phase),
-                gradient_key,
-                None,
-            )
-            factor_keys.append((first_key, second_key))
-            longitudinal_keys.append((half_duration, True))
-            rf_values.append(complex(native_rf_hz[block_interval]))
-        plan_key = (
-            tuple(factor_keys),
-            tuple(longitudinal_keys),
-            tuple(rf_values),
-            tx_classification,
-        )
-        cached = native_rf_fused_plan_cache.get(plan_key)
-        if cached is not None:
-            return cached
-
-        static_frequency_by_gradient = {}
-        factor_group_by_key = {}
-        factor_values = []
-
-        def factor_group(key):
-            group = factor_group_by_key.get(key)
-            if group is not None:
-                return group
-            factors = transverse_cache.get(key)
-            if factors is None:
-                half_duration, phase_duration, gradient_key, _ = key
-                static_frequencies = static_frequency_by_gradient.get(gradient_key)
-                if static_frequencies is None:
-                    gradient = np.asarray(gradient_key, dtype=np.float64)
-                    gradient_frequency = _gradient_frequency_hz(positions, gradient)
-                    static_frequencies = (
-                        static_pool_frequency + gradient_frequency[None, :]
-                    )
-                    static_frequency_by_gradient[gradient_key] = static_frequencies
-                phase = static_frequencies * phase_duration
-                factors = prepare_transverse_factors(phase, half_duration)
-                transverse_cache.put(key, factors)
-            group = len(factor_values)
-            factor_group_by_key[key] = group
-            factor_values.append(factors)
-            return group
-
-        first_factor_groups = []
-        second_factor_groups = []
-        for first_key, second_key in factor_keys:
-            first_factor_groups.append(factor_group(first_key))
-            second_factor_groups.append(factor_group(second_key))
-        transverse_factor_table = np.ascontiguousarray(
-            np.stack(
-                [np.stack(factors, axis=0) for factors in factor_values],
-                axis=0,
-            ),
-            dtype=np.complex128,
-        )
-
-        longitudinal_group_by_key = {}
-        longitudinal_values = []
-        concentration_values = []
-        duration_by_group = []
-        regular_mode_by_group = []
-        concentration_regular_mode_by_group = []
-        longitudinal_groups = []
-        for longitudinal_key in longitudinal_keys:
-            group = longitudinal_group_by_key.get(longitudinal_key)
-            if group is None:
-                group = len(longitudinal_values)
-                longitudinal_group_by_key[longitudinal_key] = group
-                half_duration, _ = longitudinal_key
-                prepared = coefficient_cache.get(longitudinal_key)
-                if prepared is None:
-                    prepared = _prepare_longitudinal_step(
-                        coefficient_kpl,
-                        coefficient_r1[0],
-                        coefficient_r1[1],
-                        half_duration,
-                        with_source=True,
-                    )
-                    coefficient_cache.put(longitudinal_key, prepared)
-                concentration_key = (
-                    "concentration",
-                    half_duration,
-                    True,
-                )
-                concentration_prepared = coefficient_cache.get(concentration_key)
-                if concentration_prepared is None:
-                    concentration_prepared = _prepare_longitudinal_step(
-                        coefficient_kpl,
-                        0.0,
-                        0.0,
-                        half_duration,
-                        with_source=True,
-                    )
-                    coefficient_cache.put(concentration_key, concentration_prepared)
-                longitudinal_values.append(prepared)
-                concentration_values.append(concentration_prepared)
-                duration_by_group.append(half_duration)
-                regular_mode_by_group.append(regular_mode)
-                concentration_regular_mode_by_group.append(
-                    concentration_longitudinal_scratch[3]
-                )
-            longitudinal_groups.append(group)
-
-        def stacked(values, index, dtype=np.float64):
-            return np.ascontiguousarray(
-                np.stack([value[index] for value in values], axis=0),
-                dtype=dtype,
-            )
-
-        def stacked_source(values, index):
-            return np.ascontiguousarray(
-                np.stack([value[4][index] for value in values], axis=0),
-                dtype=np.float64,
-            )
-
-        rf_group_by_key = {}
-        rf_groups = []
-        rf_prepared = []
-        for index, value in zip(range(first_interval, end_interval), rf_values):
-            rf_key = (value, float(compiled.dt_s[index]))
-            group = rf_group_by_key.get(rf_key)
-            if group is None:
-                group = len(rf_prepared)
-                rf_group_by_key[rf_key] = group
-                if spatial_tx_active:
-                    prepared = spatial_rf_coefficients(value, rf_key[1])
-                else:
-                    scalar = _prepare_rf_rotation(value, rf_key[1])
-                    prepared = tuple(
-                        np.asarray([coefficient], dtype=np.float64)
-                        for coefficient in scalar
-                    )
-                rf_prepared.append(prepared)
-            rf_groups.append(group)
-        rf_coefficient_count = 4 if spatial_tx_active else 5
-        rf_tables = [
-            np.ascontiguousarray(
-                np.stack([prepared[coefficient] for prepared in rf_prepared], axis=0),
-                dtype=np.float64,
-            )
-            for coefficient in range(rf_coefficient_count)
-        ]
-        if spatial_tx_active:
-            rf_tables.append(np.zeros_like(rf_tables[0]))
-        plan = (
-            transverse_factor_table,
-            stacked(longitudinal_values, 0),
-            np.ascontiguousarray(
-                [value[1] for value in longitudinal_values], dtype=np.float64
-            ),
-            stacked(longitudinal_values, 2),
-            stacked(longitudinal_values, 3, dtype=np.bool_),
-            stacked_source(longitudinal_values, 0),
-            stacked_source(longitudinal_values, 1),
-            stacked_source(longitudinal_values, 2),
-            stacked_source(longitudinal_values, 3),
-            stacked(concentration_values, 0),
-            np.ascontiguousarray(
-                [value[1] for value in concentration_values], dtype=np.float64
-            ),
-            stacked(concentration_values, 2),
-            stacked(concentration_values, 3, dtype=np.bool_),
-            stacked_source(concentration_values, 0),
-            stacked_source(concentration_values, 1),
-            stacked_source(concentration_values, 2),
-            stacked_source(concentration_values, 3),
-            np.ascontiguousarray(duration_by_group, dtype=np.float64),
-            np.ascontiguousarray(regular_mode_by_group, dtype=np.int32),
-            np.ascontiguousarray(concentration_regular_mode_by_group, dtype=np.int32),
-            np.ascontiguousarray(longitudinal_groups, dtype=np.int32),
-            np.ascontiguousarray(first_factor_groups, dtype=np.int32),
-            np.ascontiguousarray(second_factor_groups, dtype=np.int32),
-            np.ascontiguousarray(rf_groups, dtype=np.int32),
-            *rf_tables,
-        )
-        return native_rf_fused_plan_cache.put(plan_key, plan)
-
-    def preapply_native_rf_fused_block(first_interval):
-        nonlocal native_rf_fused_preapplied_end
-        nonlocal native_rf_fused_blocks, native_rf_fused_intervals
-        end_interval = _native_rf_fused_block_end(first_interval)
-        if end_interval == first_interval:
-            native_rf_fused_preapplied_end = first_interval
-            return
-        plan = _native_rf_fused_plan(first_interval, end_interval)
-        inflow_values = [[] for _ in range(4)]
-        polarization_values = [[] for _ in range(4)]
-        interval_left = (
-            0.0
-            if first_interval == 0
-            else float(compiled.interval_end_s[first_interval - 1])
-        )
-        for block_interval in range(first_interval, end_interval):
-            dt_value = float(compiled.dt_s[block_interval])
-            interval_middle = interval_left + dt_value / 2.0
-            interval_right = float(compiled.interval_end_s[block_interval])
-            first_start, first_end, second_start, second_end = (
-                execution_plan.source_rate_samples[block_interval]
-            )
-            (
-                polarization_first_start,
-                polarization_first_end,
-                polarization_second_start,
-                polarization_second_end,
-            ) = execution_plan.source_polarization_samples[block_interval]
-            for target, value in zip(
-                inflow_values,
-                (first_start, first_end, second_start, second_end),
-            ):
-                target.append(value)
-            for target, value in zip(
-                polarization_values,
-                (
-                    polarization_first_start,
-                    polarization_first_end,
-                    polarization_second_start,
-                    polarization_second_end,
-                ),
-            ):
-                target.append(value)
-            interval_left = interval_right
-        native_rf_concentration_block(
-            state,
-            transverse_state,
-            concentration_state,
-            kpl,
-            inflow_delivery,
-            *plan,
-            *[
-                np.ascontiguousarray(values, dtype=np.float64)
-                for values in (*inflow_values, *polarization_values)
-            ],
-            phantom.equilibrium_polarization,
-            native_longitudinal_threads,
-        )
-        native_rf_fused_preapplied_end = end_interval
-        native_rf_fused_blocks += 1
-        native_rf_fused_intervals += end_interval - first_interval
-
-    if status_callback is not None and native_rf_fused_enabled:
-        status_callback(
-            "Persistent native RF waveform blocks are available as a coupled "
-            "dynamic fallback."
-        )
-    elif (
-        status_callback is not None
-        and native_rf_concentration_block is not None
-        and native_rf_fused_fallback_reason is not None
-    ):
-        status_callback(
-            "Persistent native RF waveform blocks are unavailable: "
-            f"{native_rf_fused_fallback_reason}."
-        )
-
-    def preapply_native_longitudinal_block(first_interval):
-        """Advance Mz through one RF-free, checkpoint-free bounded block."""
-        nonlocal native_preapplied_end
-        max_groups = max(
-            1,
-            native_block_table_limit_bytes // max(1, n_simulated_spins * 8),
-        )
-        end = first_interval
-        half_durations = []
-        seen_durations = set()
-        hard_end = min(interval_count, first_interval + native_block_interval_limit)
-        while end < hard_end:
-            if rf_hz[end] != 0.0:
-                break
-            half_duration = float(compiled.dt_s[end] / 2.0)
-            if half_duration not in seen_durations:
-                if len(seen_durations) >= max_groups:
-                    break
-                seen_durations.add(half_duration)
-            half_durations.append(half_duration)
-            end += 1
-            if end in checkpoint_state_set:
-                break
-        if end == first_interval:
-            native_preapplied_end = first_interval
-            return
-
-        group_by_duration = {}
-        prepared_by_group = []
-        duration_by_group = []
-        step_groups = []
-        for half_duration in half_durations:
-            group = group_by_duration.get(half_duration)
-            if group is None:
-                group = len(prepared_by_group)
-                group_by_duration[half_duration] = group
-                prepared = coefficient_cache.get(half_duration)
-                if prepared is None:
-                    prepared = _prepare_longitudinal_step(
-                        kpl,
-                        r1[0],
-                        r1[1],
-                        half_duration,
-                        with_source=False,
-                    )
-                    coefficient_cache.put(half_duration, prepared)
-                prepared_by_group.append(prepared)
-                duration_by_group.append(half_duration)
-            step_groups.extend((group, group))
-        exp_a_by_group = np.ascontiguousarray(
-            np.stack([prepared[0] for prepared in prepared_by_group]),
-            dtype=np.float64,
-        )
-        exp_b_by_group = np.ascontiguousarray(
-            [prepared[1] for prepared in prepared_by_group], dtype=np.float64
-        )
-        native_longitudinal_block(
-            state,
-            kpl,
-            exp_a_by_group,
-            exp_b_by_group,
-            prepared_by_group[0][2],
-            prepared_by_group[0][3],
-            np.ascontiguousarray(step_groups, dtype=np.int32),
-            np.ascontiguousarray(duration_by_group, dtype=np.float64),
-            regular_mode,
-            native_threads,
-        )
-        native_preapplied_end = end
-
-    native_full_plan_blocks = 0
-    native_full_plan_intervals = 0
-
-    def execute_native_full_plan():
-        nonlocal action_cursor
-        nonlocal native_rf_fused_preapplied_end
-        nonlocal native_full_plan_blocks, native_full_plan_intervals
-        if not native_full_plan_enabled or interval_count == 0:
-            return False
-
-        # The kernels accumulate per parent voxel so threads never share an
-        # output element. Only the ADC samples of the current time block are
-        # held per parent; a whole-acquisition parent array can exceed RAM.
-        if _parent_resolved_signal:
-            resolved_signal = (
-                species_signal[:, :, None, :] if n_rx_coils == 1 else species_signal
-            )
-        else:
-            reduced_signal = (
-                species_signal[:, None, :] if n_rx_coils == 1 else species_signal
-            )
-        all_adc_demodulation = np.ascontiguousarray(
-            adc_demodulation, dtype=np.complex128
-        )
-        last_preview_step = -1
-        plan_concentration_state = concentration_state
-        if (
-            native_full_plan_source_model or native_full_plan_multi_pool
-        ) and plan_concentration_state is None:
-            plan_concentration_state = np.zeros_like(state)
-        plan_inflow_delivery = inflow_delivery
-        if (
-            native_full_plan_source_model or native_full_plan_multi_pool
-        ) and plan_inflow_delivery is None:
-            plan_inflow_delivery = np.zeros(n_simulated_spins, dtype=np.float64)
-        plan_equilibrium = (
-            float(phantom.equilibrium_polarization)
-            if concentration_state is not None
-            else 0.0
-        )
-        worst_group_bytes = n_simulated_spins * native_full_plan_bytes_per_spin
-        time_block_intervals = max(
-            1,
-            min(
-                128,
-                native_full_plan_table_limit_bytes // max(1, worst_group_bytes),
-            ),
-        )
-
-        # Each block also holds a per-parent window over its ADC samples, so
-        # dense acquisitions shorten the block to keep that window bounded.
-        adc_state_indices = execution_plan.action_state_indices[
-            np.asarray(execution_plan.action_kinds) == ACTION_ADC
-        ]
-        adc_window_sample_bytes = (
-            parent_active_count * phantom.n_species * n_rx_coils * 16
-        )
-        max_block_adc_samples = max(
-            1, native_full_plan_table_limit_bytes // max(1, adc_window_sample_bytes)
-        )
-        plan_blocks = []
-        first_interval = 0
-        while first_interval < interval_count:
-            end_interval = min(interval_count, first_interval + time_block_intervals)
-            adc_start = int(
-                np.searchsorted(adc_state_indices, first_interval, side="right")
-            )
-            limit_index = adc_start + max_block_adc_samples
-            if limit_index < adc_state_indices.size:
-                end_interval = max(
-                    first_interval + 1,
-                    min(end_interval, int(adc_state_indices[limit_index]) - 1),
-                )
-            plan_blocks.append((first_interval, end_interval))
-            first_interval = end_interval
-
-        if progress_callback is not None:
-            # Start the measured run rate after table setup.
-            progress_callback(0, interval_count)
-        for first_interval, end_interval in plan_blocks:
-            if cancel_callback is not None and cancel_callback():
-                raise RuntimeError("sequence simulation cancelled")
-            factor_group_by_key = {}
-            factor_values = []
-            longitudinal_group_by_key = {}
-            longitudinal_values = []
-            concentration_values = []
-            longitudinal_kpl_values = []
-            multi_longitudinal_values = []
-            multi_concentration_values = []
-            multi_conversion_values = []
-            longitudinal_durations = []
-            longitudinal_modes = []
-            concentration_modes = []
-            rf_group_by_key = {}
-            rf_values = []
-            first_factor_groups = []
-            second_factor_groups = []
-            longitudinal_groups = []
-            rf_groups = []
-            static_frequency_by_gradient = {}
-
-            def transverse_factor_group(
-                half_duration,
-                phase_duration,
-                gradient_key,
-            ):
-                factor_key = (
-                    half_duration,
-                    phase_duration,
-                    gradient_key,
-                )
-                factor_group = factor_group_by_key.get(factor_key)
-                if factor_group is not None:
-                    return factor_group
-                factor_group = len(factor_values)
-                factor_group_by_key[factor_key] = factor_group
-                prepared_factors = transverse_cache.get(factor_key)
-                if prepared_factors is None:
-                    static_frequencies = static_frequency_by_gradient.get(gradient_key)
-                    if static_frequencies is None:
-                        gradient = np.asarray(gradient_key, dtype=np.float64)
-                        gradient_frequency = _gradient_frequency_hz(positions, gradient)
-                        static_frequencies = (
-                            static_pool_frequency + gradient_frequency[None, :]
-                        )
-                        static_frequency_by_gradient[gradient_key] = static_frequencies
-                    phase = static_frequencies * phase_duration
-                    prepared_factors = prepare_transverse_factors(phase, half_duration)
-                    transverse_cache.put(factor_key, prepared_factors)
-                factor_values.append(prepared_factors)
-                return factor_group
-
-            for block_interval in range(first_interval, end_interval):
-                half_duration = float(execution_plan.dt_s[block_interval]) / 2.0
-                first_phase_duration, second_phase_duration = (
-                    float(value)
-                    for value in execution_plan.interval_half_s[block_interval]
-                )
-                gradient_key = tuple(
-                    float(value) for value in gradient_hz_per_m[block_interval]
-                )
-                first_factor_groups.append(
-                    transverse_factor_group(
-                        half_duration,
-                        first_phase_duration,
-                        gradient_key,
-                    )
-                )
-                second_factor_groups.append(
-                    transverse_factor_group(
-                        half_duration,
-                        second_phase_duration,
-                        gradient_key,
-                    )
-                )
-
-                conversion_active = bool(
-                    execution_plan.conversion_active[block_interval]
-                )
-                longitudinal_key = (half_duration, conversion_active)
-                longitudinal_group = longitudinal_group_by_key.get(longitudinal_key)
-                if longitudinal_group is None:
-                    longitudinal_group = (
-                        len(multi_longitudinal_values)
-                        if native_full_plan_multi_pool
-                        else len(longitudinal_values)
-                    )
-                    longitudinal_group_by_key[longitudinal_key] = longitudinal_group
-                    longitudinal_durations.append(half_duration)
-                    if native_full_plan_multi_pool:
-                        interval_conversion = (
-                            multi_pool_conversion
-                            if conversion_active
-                            else np.zeros_like(multi_pool_conversion)
-                        )
-                        prepared_key = (
-                            "full-plan-multi-magnetization",
-                            half_duration,
-                            conversion_active,
-                        )
-                        prepared = coefficient_cache.get(prepared_key)
-                        if prepared is None:
-                            prepared = _prepare_multi_pool_longitudinal_step(
-                                interval_conversion,
-                                r1,
-                                half_duration,
-                                with_source=True,
-                            )
-                            coefficient_cache.put(prepared_key, prepared)
-                        concentration_key = (
-                            "full-plan-multi-concentration",
-                            half_duration,
-                            conversion_active,
-                        )
-                        concentration_prepared = coefficient_cache.get(
-                            concentration_key
-                        )
-                        if concentration_prepared is None:
-                            concentration_prepared = (
-                                _prepare_multi_pool_longitudinal_step(
-                                    interval_conversion,
-                                    np.zeros_like(r1),
-                                    half_duration,
-                                    with_source=True,
-                                )
-                            )
-                            coefficient_cache.put(
-                                concentration_key, concentration_prepared
-                            )
-                        multi_conversion_values.append(interval_conversion)
-                        multi_longitudinal_values.append(prepared)
-                        multi_concentration_values.append(concentration_prepared)
-                    else:
-                        interval_kpl = kpl if conversion_active else zero_kpl
-                        prepared_key = (
-                            "full-plan-magnetization",
-                            half_duration,
-                            conversion_active,
-                            native_full_plan_source_model,
-                        )
-                        prepared = coefficient_cache.get(prepared_key)
-                        if prepared is None:
-                            prepared = _prepare_longitudinal_step(
-                                interval_kpl,
-                                r1[0],
-                                r1[1],
-                                half_duration,
-                                with_source=native_full_plan_source_model,
-                            )
-                            coefficient_cache.put(prepared_key, prepared)
-                        regular_values = prepared[3]
-                        longitudinal_values.append(prepared)
-                        if native_full_plan_source_model:
-                            concentration_key = (
-                                "full-plan-concentration",
-                                half_duration,
-                                conversion_active,
-                            )
-                            concentration_prepared = coefficient_cache.get(
-                                concentration_key
-                            )
-                            if concentration_prepared is None:
-                                concentration_prepared = _prepare_longitudinal_step(
-                                    interval_kpl,
-                                    0.0,
-                                    0.0,
-                                    half_duration,
-                                    with_source=True,
-                                )
-                                coefficient_cache.put(
-                                    concentration_key, concentration_prepared
-                                )
-                            concentration_values.append(concentration_prepared)
-                            concentration_regular_values = concentration_prepared[3]
-                            concentration_modes.append(
-                                1
-                                if np.all(concentration_regular_values)
-                                else (
-                                    -1
-                                    if not np.any(concentration_regular_values)
-                                    else 0
-                                )
-                            )
-                        longitudinal_kpl_values.append(interval_kpl)
-                        longitudinal_modes.append(
-                            1
-                            if np.all(regular_values)
-                            else -1 if not np.any(regular_values) else 0
-                        )
-                longitudinal_groups.append(longitudinal_group)
-
-                rf_value = native_rf_hz[block_interval]
-                if rf_value == 0.0:
-                    rf_groups.append(-1)
-                else:
-                    rf_key_value = (
-                        complex(
-                            rf_hz[block_interval] if spatial_tx_active else rf_value
-                        ),
-                        float(execution_plan.dt_s[block_interval]),
-                    )
-                    rf_group = rf_group_by_key.get(rf_key_value)
-                    if rf_group is None:
-                        rf_group = len(rf_values)
-                        rf_group_by_key[rf_key_value] = rf_group
-                        if spatial_tx_active:
-                            prepared_rf = spatial_rf_coefficients(*rf_key_value)
-                        else:
-                            scalar_rf = _prepare_rf_rotation(*rf_key_value)
-                            prepared_rf = tuple(
-                                np.asarray([coefficient], dtype=np.float64)
-                                for coefficient in scalar_rf
-                            )
-                        rf_values.append(prepared_rf)
-                    rf_groups.append(rf_group)
-
-            transverse_factor_table = np.ascontiguousarray(
-                np.stack(
-                    [np.stack(value, axis=0) for value in factor_values],
-                    axis=0,
-                ),
-                dtype=np.complex128,
-            )
-
-            def stack_longitudinal(index, dtype=np.float64):
-                return np.ascontiguousarray(
-                    np.stack([value[index] for value in longitudinal_values]),
-                    dtype=dtype,
-                )
-
-            def stack_prepared(values, index, dtype=np.float64):
-                return np.ascontiguousarray(
-                    np.stack([value[index] for value in values]),
-                    dtype=dtype,
-                )
-
-            def stack_source(values, index):
-                return np.ascontiguousarray(
-                    np.stack([value[4][index] for value in values]),
-                    dtype=np.float64,
-                )
-
-            def stack_multi(values, index):
-                return np.ascontiguousarray(
-                    np.stack([value[index] for value in values]),
-                    dtype=np.float64,
-                )
-
-            def stack_multi_source(values, index):
-                return np.ascontiguousarray(
-                    np.stack([value[3][index] for value in values]),
-                    dtype=np.float64,
-                )
-
-            if rf_values:
-                coefficient_count = 4 if spatial_tx_active else 5
-                rf_tables = [
-                    np.ascontiguousarray(
-                        np.stack([value[index] for value in rf_values], axis=0),
-                        dtype=np.float64,
-                    )
-                    for index in range(coefficient_count)
-                ]
-                if spatial_tx_active:
-                    rf_tables.append(np.zeros_like(rf_tables[0]))
-            else:
-                rf_tables = [np.zeros((1, 1), dtype=np.float64) for _ in range(5)]
-
-            action_offsets = [0]
-            action_kinds = []
-            action_payloads = []
-            for block_interval in range(first_interval, end_interval):
-                state_index = block_interval + 1
-                first_action = int(
-                    np.searchsorted(
-                        execution_plan.action_state_indices,
-                        state_index,
-                        side="left",
-                    )
-                )
-                last_action = int(
-                    np.searchsorted(
-                        execution_plan.action_state_indices,
-                        state_index,
-                        side="right",
-                    )
-                )
-                action_kinds.extend(
-                    execution_plan.action_kinds[first_action:last_action]
-                )
-                action_payloads.extend(
-                    execution_plan.action_payload_indices[first_action:last_action]
-                )
-                action_offsets.append(len(action_kinds))
-
-            # ADC samples are time ordered, so one block covers a contiguous
-            # sample range. Kernels index the window with block-local payloads.
-            block_action_kinds = np.asarray(action_kinds, dtype=np.int8)
-            block_action_payloads = np.array(action_payloads, dtype=np.int64)
-            block_adc = block_action_kinds == ACTION_ADC
-            if np.any(block_adc):
-                adc_first = int(block_action_payloads[block_adc].min())
-                adc_end = int(block_action_payloads[block_adc].max()) + 1
-                block_action_payloads[block_adc] -= adc_first
-            else:
-                adc_first = adc_end = 0
-            parent_signal = np.zeros(
-                (
-                    parent_active_count,
-                    phantom.n_species,
-                    n_rx_coils,
-                    max(1, adc_end - adc_first),
-                ),
-                dtype=np.complex128,
-            )
-            kpl_table = (
-                None
-                if native_full_plan_multi_pool
-                else np.ascontiguousarray(
-                    np.stack(longitudinal_kpl_values), dtype=np.float64
-                )
-            )
-            action_arrays = (
-                np.ascontiguousarray(action_offsets, dtype=np.int32),
-                block_action_kinds,
-                block_action_payloads,
-                np.ascontiguousarray(
-                    all_adc_demodulation[adc_first : max(adc_first + 1, adc_end)]
-                ),
-                np.ascontiguousarray(rx_sensitivities, dtype=np.complex128),
-                np.ascontiguousarray(spin_signal_weights, dtype=np.float64),
-                parent_signal,
-                checkpoint_states,
-                spins_per_voxel,
-                float(signal_scale),
-                spoiler_mode == "ideal",
-            )
-            worker_threads = (
-                native_threads if sequence_kernel == "native_parallel" else 1
-            )
-            if native_full_plan_source_model or native_full_plan_multi_pool:
-                spatial_source_table = None
-                if spatial_inflow_active:
-                    spatial_source_table = np.empty(
-                        (
-                            8,
-                            end_interval - first_interval,
-                            n_simulated_spins,
-                        ),
-                        dtype=np.float64,
-                    )
-                    for local_interval, block_interval in enumerate(
-                        range(first_interval, end_interval)
-                    ):
-                        start_time = float(
-                            execution_plan.interval_start_s[block_interval]
-                        )
-                        middle_time = float(
-                            execution_plan.interval_mid_s[block_interval]
-                        )
-                        end_time = float(execution_plan.interval_end_s[block_interval])
-                        spatial_source_table[0:2, local_interval] = (
-                            _time_curve_interval_values(
-                                inflow_curve,
-                                start_time,
-                                middle_time,
-                                inflow_arrival_delay,
-                            )
-                        )
-                        spatial_source_table[2:4, local_interval] = (
-                            _time_curve_interval_values(
-                                inflow_curve,
-                                middle_time,
-                                end_time,
-                                inflow_arrival_delay,
-                            )
-                        )
-                        if inflow_polarization_curve is None:
-                            spatial_source_table[4:8, local_interval] = 1.0
-                        else:
-                            spatial_source_table[4:6, local_interval] = (
-                                _time_curve_interval_values(
-                                    inflow_polarization_curve,
-                                    start_time,
-                                    middle_time,
-                                    inflow_arrival_delay,
-                                )
-                            )
-                            spatial_source_table[6:8, local_interval] = (
-                                _time_curve_interval_values(
-                                    inflow_polarization_curve,
-                                    middle_time,
-                                    end_time,
-                                    inflow_arrival_delay,
-                                )
-                            )
-                    empty_source = np.zeros(
-                        end_interval - first_interval, dtype=np.float64
-                    )
-                    source_tables = (empty_source,) * 8
-                else:
-                    block_interval_count = end_interval - first_interval
-                    if execution_plan.source_rate_samples is None:
-                        source_samples = np.zeros(
-                            (block_interval_count, 4), dtype=np.float64
-                        )
-                    else:
-                        source_samples = execution_plan.source_rate_samples[
-                            first_interval:end_interval
-                        ]
-                    if execution_plan.source_polarization_samples is None:
-                        polarization_samples = np.ones(
-                            (block_interval_count, 4), dtype=np.float64
-                        )
-                    else:
-                        polarization_samples = (
-                            execution_plan.source_polarization_samples[
-                                first_interval:end_interval
-                            ]
-                        )
-                    source_tables = tuple(
-                        np.ascontiguousarray(samples[:, index], dtype=np.float64)
-                        for samples in (source_samples, polarization_samples)
-                        for index in range(4)
-                    )
-                if native_full_plan_multi_pool:
-                    washout_arguments = {}
-                    if washout is not None:
-                        if washout.loss is not None:
-                            washout_arguments["washout_loss"] = np.ascontiguousarray(
-                                washout.loss, dtype=np.float64
-                            )
-                        washout_compartment = washout.compartment_by_spin(
-                            n_simulated_spins
-                        )
-                        if washout_compartment is not None:
-                            block = slice(first_interval, end_interval)
-                            rows, gains = washout.source_gain_table(
-                                execution_plan.interval_start_s[block],
-                                execution_plan.interval_mid_s[block],
-                                execution_plan.interval_end_s[block],
-                                concentration_state is not None,
-                            )
-                            washout_arguments.update(
-                                washout_compartment=washout_compartment,
-                                washout_rows=rows,
-                                washout_table=gains,
-                            )
-                    native_plan_multi_pool_driver(
-                        state,
-                        transverse_state,
-                        plan_concentration_state,
-                        transverse_factor_table,
-                        np.ascontiguousarray(
-                            np.stack(multi_conversion_values), dtype=np.float64
-                        ),
-                        stack_multi(multi_longitudinal_values, 0),
-                        stack_multi(multi_longitudinal_values, 1),
-                        stack_multi(multi_longitudinal_values, 2),
-                        stack_multi_source(multi_longitudinal_values, 0),
-                        stack_multi_source(multi_longitudinal_values, 1),
-                        stack_multi_source(multi_longitudinal_values, 2),
-                        stack_multi_source(multi_longitudinal_values, 3),
-                        stack_multi(multi_concentration_values, 0),
-                        stack_multi(multi_concentration_values, 1),
-                        stack_multi(multi_concentration_values, 2),
-                        stack_multi_source(multi_concentration_values, 0),
-                        stack_multi_source(multi_concentration_values, 1),
-                        stack_multi_source(multi_concentration_values, 2),
-                        stack_multi_source(multi_concentration_values, 3),
-                        np.ascontiguousarray(longitudinal_durations, dtype=np.float64),
-                        np.ascontiguousarray(longitudinal_groups, dtype=np.int32),
-                        np.ascontiguousarray(first_factor_groups, dtype=np.int32),
-                        np.ascontiguousarray(second_factor_groups, dtype=np.int32),
-                        np.ascontiguousarray(rf_groups, dtype=np.int32),
-                        *rf_tables,
-                        *source_tables,
-                        plan_inflow_delivery,
-                        plan_equilibrium,
-                        native_full_plan_source_mode,
-                        *action_arrays,
-                        worker_threads,
-                        spatial_source_table,
-                        **washout_arguments,
-                    )
-                else:
-                    native_plan_inflow_driver(
-                        state,
-                        transverse_state,
-                        plan_concentration_state,
-                        kpl,
-                        plan_inflow_delivery,
-                        transverse_factor_table,
-                        stack_longitudinal(0),
-                        np.ascontiguousarray(
-                            [value[1] for value in longitudinal_values],
-                            dtype=np.float64,
-                        ),
-                        stack_longitudinal(2),
-                        stack_longitudinal(3, dtype=np.bool_),
-                        stack_source(longitudinal_values, 0),
-                        stack_source(longitudinal_values, 1),
-                        stack_source(longitudinal_values, 2),
-                        stack_source(longitudinal_values, 3),
-                        stack_prepared(concentration_values, 0),
-                        np.ascontiguousarray(
-                            [value[1] for value in concentration_values],
-                            dtype=np.float64,
-                        ),
-                        stack_prepared(concentration_values, 2),
-                        stack_prepared(concentration_values, 3, dtype=np.bool_),
-                        stack_source(concentration_values, 0),
-                        stack_source(concentration_values, 1),
-                        stack_source(concentration_values, 2),
-                        stack_source(concentration_values, 3),
-                        np.ascontiguousarray(longitudinal_durations, dtype=np.float64),
-                        np.ascontiguousarray(longitudinal_modes, dtype=np.int32),
-                        np.ascontiguousarray(concentration_modes, dtype=np.int32),
-                        np.ascontiguousarray(longitudinal_groups, dtype=np.int32),
-                        np.ascontiguousarray(first_factor_groups, dtype=np.int32),
-                        np.ascontiguousarray(second_factor_groups, dtype=np.int32),
-                        np.ascontiguousarray(rf_groups, dtype=np.int32),
-                        *rf_tables,
-                        *source_tables,
-                        plan_equilibrium,
-                        worker_threads,
-                        *action_arrays,
-                        kpl_table,
-                        spatial_source_table,
-                        native_full_plan_source_mode,
-                    )
-            else:
-                native_plan_driver(
-                    state,
-                    transverse_state,
-                    transverse_factor_table,
-                    kpl_table,
-                    stack_longitudinal(0),
-                    np.ascontiguousarray(
-                        [value[1] for value in longitudinal_values],
-                        dtype=np.float64,
-                    ),
-                    stack_longitudinal(2),
-                    stack_longitudinal(3, dtype=np.bool_),
-                    np.ascontiguousarray(longitudinal_durations, dtype=np.float64),
-                    np.ascontiguousarray(longitudinal_modes, dtype=np.int32),
-                    np.ascontiguousarray(longitudinal_groups, dtype=np.int32),
-                    np.ascontiguousarray(first_factor_groups, dtype=np.int32),
-                    np.ascontiguousarray(second_factor_groups, dtype=np.int32),
-                    np.ascontiguousarray(rf_groups, dtype=np.int32),
-                    *rf_tables,
-                    *action_arrays,
-                    worker_threads,
-                )
-            if adc_end > adc_first:
-                window = parent_signal[..., : adc_end - adc_first]
-                if _parent_resolved_signal:
-                    resolved_signal[..., adc_first:adc_end] += window
-                else:
-                    reduced_signal[..., adc_first:adc_end] += window.sum(axis=0)
-            native_full_plan_blocks += 1
-            native_full_plan_intervals += end_interval - first_interval
-            if progress_callback is not None:
-                progress_callback(end_interval, interval_count)
-            preview_step = end_interval // progress_stride
-            if preview_callback is not None and (
-                preview_step > last_preview_step or end_interval == interval_count
-            ):
-                last_preview_step = preview_step
-                preview_callback(
-                    end_interval / interval_count, combined_signal_snapshot()
-                )
-
-        action_cursor = execution_plan.n_actions
-        native_rf_fused_preapplied_end = interval_count
-        return True
-
     native_spin_major_chunks = 0
     native_spin_major_intervals = 0
     native_spin_major_threads = 0
@@ -5945,8 +4599,6 @@ def _simulate_dynamic_sequence_block(
 
     def execute_native_spin_major():
         nonlocal action_cursor
-        nonlocal native_rf_fused_preapplied_end
-        nonlocal native_full_plan_blocks, native_full_plan_intervals
         nonlocal native_spin_major_chunks, native_spin_major_intervals
         nonlocal native_spin_major_threads
         nonlocal native_spin_major_table_s, native_spin_major_kernel_s
@@ -6058,7 +4710,7 @@ def _simulate_dynamic_sequence_block(
             # The executor writes float64 checkpoints by payload. Each slice
             # gets slice-local payloads into a bounded float64 buffer, which
             # is converted into the requested dtype after the slice, exactly
-            # as the interval paths store their float64 state.
+            # as the NumPy kernel stores its float64 state.
             action_payloads = execution_plan.action_payload_indices.copy()
             checkpoint_bytes = phantom.n_species * n_simulated_spins * 3 * 8
             staging_bytes = _SPIN_MAJOR_CHECKPOINT_STAGING_BYTES
@@ -6197,57 +4849,26 @@ def _simulate_dynamic_sequence_block(
         rf_propagator_stats["native_spin_major_rf_propagator_stepwise_tiles"] = (
             stepwise_tiles
         )
-        native_full_plan_blocks += native_spin_major_chunks
-        native_full_plan_intervals += native_spin_major_intervals
         action_cursor = execution_plan.n_actions
-        native_rf_fused_preapplied_end = interval_count
         return True
 
     native_spin_major_executed = execute_native_spin_major()
-    native_full_plan_executed = native_spin_major_executed or execute_native_full_plan()
     if status_callback is not None and native_spin_major_executed:
         status_callback(
             "Executed dynamic free evolution, RF, ADC, crushers, and "
             f"checkpoints in {native_spin_major_chunks:,} bounded native plan "
             f"slice(s), spin-major with {native_spin_major_threads} thread(s)."
         )
-    elif status_callback is not None and native_full_plan_executed:
-        status_callback(
-            "Executed dynamic free evolution, RF, ADC, crushers, and "
-            f"checkpoints in {native_full_plan_blocks:,} bounded native plan "
-            "block(s)."
-        )
 
     contrast_rate_cache = {}
     interval_start = 0.0
-    # A native plan has already applied every interval and boundary action, so
-    # the Python interval loop only runs for the fallback paths.
-    first_python_interval = interval_count if native_full_plan_executed else 0
+    # The spin-major executor has already applied every interval and boundary
+    # action, so the Python interval loop only runs for the NumPy and
+    # reference kernels.
+    first_python_interval = interval_count if native_spin_major_executed else 0
     for interval in range(first_python_interval, interval_count):
         if cancel_callback is not None and cancel_callback():
             raise RuntimeError("sequence simulation cancelled")
-        if (
-            native_rf_fused_enabled
-            and interval >= native_rf_fused_preapplied_end
-            and native_rf_hz[interval] != 0.0
-        ):
-            preapply_native_rf_fused_block(interval)
-        if interval < native_rf_fused_preapplied_end:
-            interval_end = float(compiled.interval_end_s[interval])
-            process_boundary_actions(interval + 1)
-            interval_start = interval_end
-            if progress_callback is not None and (
-                interval % progress_stride == 0 or interval + 1 == interval_count
-            ):
-                progress_callback(interval + 1, interval_count)
-            if preview_callback is not None and (
-                interval % progress_stride == 0 or interval + 1 == interval_count
-            ):
-                preview_callback(
-                    (interval + 1) / interval_count,
-                    combined_signal_snapshot(),
-                )
-            continue
         dt = execution_plan.dt_s[interval]
         interval_end = float(execution_plan.interval_end_s[interval])
         interval_mid = float(execution_plan.interval_mid_s[interval])
@@ -6262,21 +4883,6 @@ def _simulate_dynamic_sequence_block(
         )
         interval_longitudinal_scratch = (
             longitudinal_scratch if conversion_active else inactive_longitudinal_scratch
-        )
-        if (
-            sequence_kernel == "native_parallel"
-            and native_longitudinal_block is not None
-            and native_block_enabled
-            and washout is None
-            and interval >= native_preapplied_end
-            and rf_hz[interval] == 0.0
-        ):
-            preapply_native_longitudinal_block(interval)
-        longitudinal_preapplied = (
-            sequence_kernel == "native_parallel"
-            and native_longitudinal_block is not None
-            and interval < native_preapplied_end
-            and rf_hz[interval] == 0.0
         )
         if sequence_kernel == "reference":
             gradient_frequency = _gradient_frequency_hz(positions, gradient)
@@ -6525,122 +5131,46 @@ def _simulate_dynamic_sequence_block(
                     source_mid = concentration_mid * polarization_mid
             if washout is not None:
                 washout.decay(dt / 4.0, state, concentration_state, transverse_state)
-            if native_concentration_inflow_step is not None:
-                for pool in range(phantom.n_species):
-                    transverse_state[pool] *= first_transverse_factors[pool]
-                native_concentration_inflow_step(
-                    state,
-                    concentration_state,
-                    interval_kpl,
-                    longitudinal_prepared[0],
-                    longitudinal_prepared[1],
-                    longitudinal_prepared[2],
-                    longitudinal_prepared[3],
-                    longitudinal_prepared[4][0],
-                    longitudinal_prepared[4][1],
-                    longitudinal_prepared[4][2],
-                    longitudinal_prepared[4][3],
-                    concentration_longitudinal_prepared[0],
-                    concentration_longitudinal_prepared[1],
-                    concentration_longitudinal_prepared[2],
-                    concentration_longitudinal_prepared[3],
-                    concentration_longitudinal_prepared[4][0],
-                    concentration_longitudinal_prepared[4][1],
-                    concentration_longitudinal_prepared[4][2],
-                    concentration_longitudinal_prepared[4][3],
-                    source_start,
-                    source_mid,
-                    concentration_start,
-                    concentration_mid,
-                    half_duration,
-                    phantom.equilibrium_polarization,
-                    interval_longitudinal_scratch[3],
-                    concentration_interval_scratch[3],
-                    native_longitudinal_threads,
-                )
-            elif native_longitudinal_step is None:
-                _free_step(
-                    state,
-                    first_phase,
-                    t2,
-                    interval_kpl,
-                    r1,
-                    half_duration,
-                    source_start,
-                    source_mid,
-                    transverse_factors=first_transverse_factors,
-                    longitudinal_prepared=longitudinal_prepared,
-                    transverse_state=transverse_state,
-                    longitudinal_scratch=interval_longitudinal_scratch,
-                    concentration_state=concentration_state,
-                    concentration_source_start=concentration_start,
-                    concentration_source_end=concentration_mid,
-                    concentration_longitudinal_prepared=(
-                        concentration_longitudinal_prepared
-                    ),
-                    concentration_longitudinal_scratch=(concentration_interval_scratch),
-                    equilibrium_polarization=phantom.equilibrium_polarization,
-                    passive_conversion=interval_passive_conversion,
-                )
-            else:
-                for pool in range(phantom.n_species):
-                    transverse_state[pool] *= first_transverse_factors[pool]
-                if not longitudinal_preapplied:
-                    native_longitudinal_step(
-                        state,
-                        kpl,
-                        longitudinal_prepared[0],
-                        longitudinal_prepared[1],
-                        longitudinal_prepared[2],
-                        longitudinal_prepared[3],
-                        half_duration,
-                        regular_mode,
-                    )
+            _free_step(
+                state,
+                first_phase,
+                t2,
+                interval_kpl,
+                r1,
+                half_duration,
+                source_start,
+                source_mid,
+                transverse_factors=first_transverse_factors,
+                longitudinal_prepared=longitudinal_prepared,
+                transverse_state=transverse_state,
+                longitudinal_scratch=interval_longitudinal_scratch,
+                concentration_state=concentration_state,
+                concentration_source_start=concentration_start,
+                concentration_source_end=concentration_mid,
+                concentration_longitudinal_prepared=(
+                    concentration_longitudinal_prepared
+                ),
+                concentration_longitudinal_scratch=(concentration_interval_scratch),
+                equilibrium_polarization=phantom.equilibrium_polarization,
+                passive_conversion=interval_passive_conversion,
+            )
             if washout is not None:
                 washout.add_sources(
                     interval_start, interval_mid, state, concentration_state
                 )
                 washout.decay(dt / 4.0, state, concentration_state, transverse_state)
             if rf_hz[interval] != 0.0:
-                if spatial_tx_active and native_spatial_rf_rotation_block is not None:
-                    spatial_prepared = spatial_rf_coefficients(rf_hz[interval], dt)
-                    native_spatial_rf_rotation_block(
-                        state,
-                        transverse_state,
-                        spatial_prepared[0],
-                        spatial_prepared[1],
-                        spatial_prepared[2],
-                        spatial_prepared[3],
-                        native_rf_threads,
-                    )
-                elif nonunity_tx_active and (
-                    sequence_kernel == "optimized" or spatial_tx_active
-                ):
-                    sync_transverse_to_state()
+                sync_transverse_to_state()
+                if nonunity_tx_active:
                     _rf_rotate_spatial(
                         state,
                         rf_hz[interval],
                         tx_sensitivity,
                         dt,
                     )
-                    transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
-                elif native_rf_rotation_block is None:
-                    sync_transverse_to_state()
-                    _rf_rotate(state, native_rf_hz[interval], dt)
-                    transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
                 else:
-                    rf_prepared = _prepare_rf_rotation(native_rf_hz[interval], dt)
-                    if rf_prepared is not None:
-                        native_rf_rotation_block(
-                            state,
-                            transverse_state,
-                            rf_prepared[0],
-                            rf_prepared[1],
-                            rf_prepared[2],
-                            rf_prepared[3],
-                            rf_prepared[4],
-                            native_rf_threads,
-                        )
+                    _rf_rotate(state, rf_hz[interval], dt)
+                transverse_state[:] = state[:, :, 0] + 1j * state[:, :, 1]
             if inflow_curve is not None:
                 if execution_plan.source_rate_samples is None:
                     mid_value, end_value = _time_curve_interval_values(
@@ -6681,77 +5211,29 @@ def _simulate_dynamic_sequence_block(
                     source_end = concentration_end * polarization_end
             if washout is not None:
                 washout.decay(dt / 4.0, state, concentration_state, transverse_state)
-            if native_concentration_inflow_step is not None:
-                for pool in range(phantom.n_species):
-                    transverse_state[pool] *= second_transverse_factors[pool]
-                native_concentration_inflow_step(
-                    state,
-                    concentration_state,
-                    interval_kpl,
-                    longitudinal_prepared[0],
-                    longitudinal_prepared[1],
-                    longitudinal_prepared[2],
-                    longitudinal_prepared[3],
-                    longitudinal_prepared[4][0],
-                    longitudinal_prepared[4][1],
-                    longitudinal_prepared[4][2],
-                    longitudinal_prepared[4][3],
-                    concentration_longitudinal_prepared[0],
-                    concentration_longitudinal_prepared[1],
-                    concentration_longitudinal_prepared[2],
-                    concentration_longitudinal_prepared[3],
-                    concentration_longitudinal_prepared[4][0],
-                    concentration_longitudinal_prepared[4][1],
-                    concentration_longitudinal_prepared[4][2],
-                    concentration_longitudinal_prepared[4][3],
-                    source_mid,
-                    source_end,
-                    concentration_mid,
-                    concentration_end,
-                    half_duration,
-                    phantom.equilibrium_polarization,
-                    interval_longitudinal_scratch[3],
-                    concentration_interval_scratch[3],
-                    native_longitudinal_threads,
-                )
-            elif native_longitudinal_step is None:
-                _free_step(
-                    state,
-                    second_phase,
-                    t2,
-                    interval_kpl,
-                    r1,
-                    half_duration,
-                    source_mid,
-                    source_end,
-                    transverse_factors=second_transverse_factors,
-                    longitudinal_prepared=longitudinal_prepared,
-                    transverse_state=transverse_state,
-                    longitudinal_scratch=interval_longitudinal_scratch,
-                    concentration_state=concentration_state,
-                    concentration_source_start=concentration_mid,
-                    concentration_source_end=concentration_end,
-                    concentration_longitudinal_prepared=(
-                        concentration_longitudinal_prepared
-                    ),
-                    concentration_longitudinal_scratch=(concentration_interval_scratch),
-                    equilibrium_polarization=phantom.equilibrium_polarization,
-                    passive_conversion=interval_passive_conversion,
-                )
-            else:
-                for pool in range(phantom.n_species):
-                    transverse_state[pool] *= second_transverse_factors[pool]
-                if not longitudinal_preapplied:
-                    native_longitudinal_step(
-                        state,
-                        kpl,
-                        longitudinal_prepared[0],
-                        longitudinal_prepared[1],
-                        longitudinal_prepared[2],
-                        longitudinal_prepared[3],
-                        half_duration,
-                        regular_mode,
-                    )
+            _free_step(
+                state,
+                second_phase,
+                t2,
+                interval_kpl,
+                r1,
+                half_duration,
+                source_mid,
+                source_end,
+                transverse_factors=second_transverse_factors,
+                longitudinal_prepared=longitudinal_prepared,
+                transverse_state=transverse_state,
+                longitudinal_scratch=interval_longitudinal_scratch,
+                concentration_state=concentration_state,
+                concentration_source_start=concentration_mid,
+                concentration_source_end=concentration_end,
+                concentration_longitudinal_prepared=(
+                    concentration_longitudinal_prepared
+                ),
+                concentration_longitudinal_scratch=(concentration_interval_scratch),
+                equilibrium_polarization=phantom.equilibrium_polarization,
+                passive_conversion=interval_passive_conversion,
+            )
             if washout is not None:
                 washout.add_sources(
                     interval_mid, interval_end, state, concentration_state
@@ -6791,23 +5273,11 @@ def _simulate_dynamic_sequence_block(
                 axis=3,
             )
     block_runtime_stats = {
-        "native_full_plan_blocks": native_full_plan_blocks,
-        "native_full_plan_intervals": native_full_plan_intervals,
+        "native_full_plan_blocks": native_spin_major_chunks,
+        "native_full_plan_intervals": native_spin_major_intervals,
         "native_spin_major_chunks": native_spin_major_chunks,
         "native_spin_major_intervals": native_spin_major_intervals,
         "native_spin_major_parent_blocks": int(native_spin_major_executed),
-        "native_rf_fused_blocks": native_rf_fused_blocks,
-        "native_rf_fused_intervals": native_rf_fused_intervals,
-        "native_spatial_rf_cache_hits": spatial_rf_cache_hits,
-        "native_spatial_rf_cache_misses": spatial_rf_cache_misses,
-        "native_spatial_rf_cache_bytes": (
-            spatial_rf_cache.current_bytes if spatial_rf_cache is not None else 0
-        ),
-        "native_rf_fused_cache_bytes": (
-            native_rf_fused_plan_cache.current_bytes
-            if native_rf_fused_plan_cache is not None
-            else 0
-        ),
         **rf_propagator_stats,
     }
     if _block_result_mode == "minimal":
@@ -6923,84 +5393,37 @@ def _simulate_dynamic_sequence_block(
             "sequence_kernel": sequence_kernel,
             "requested_sequence_kernel": requested_sequence_kernel,
             "numerical_contract": (
-                "float64-close"
-                if sequence_kernel in {"native_serial", "native_parallel"}
-                and (
-                    native_full_plan_executed
-                    or native_rf_fused_enabled
-                    or nonunity_tx_active
-                )
-                else "bitwise"
+                "float64-close" if native_spin_major_executed else "bitwise"
             ),
             "native_fallback_reason": native_fallback_reason,
-            "native_longitudinal_fallback_reason": (
-                None
-                if native_full_plan_executed
-                else native_longitudinal_fallback_reason
-            ),
-            "native_hybrid": bool(
-                sequence_kernel in {"native_serial", "native_parallel"}
-                and not native_full_plan_executed
-                and native_rf_available
-                and native_longitudinal_step is None
-                and native_concentration_inflow_step is None
-            ),
-            "native_longitudinal_step_enabled": bool(
-                native_longitudinal_step is not None
-                or native_concentration_inflow_step is not None
-            ),
-            "native_concentration_inflow_step_enabled": (
-                native_concentration_inflow_step is not None
-            ),
-            "native_longitudinal_block_enabled": bool(
-                sequence_kernel == "native_parallel"
-                and native_longitudinal_block is not None
-                and native_block_enabled
-            ),
             "native_parallel_threads": (
                 native_threads if sequence_kernel == "native_parallel" else 1
             ),
             "effective_threads": (
                 native_threads if sequence_kernel == "native_parallel" else 1
             ),
-            "native_rf_threads": (
-                native_rf_threads
-                if sequence_kernel in {"native_serial", "native_parallel"}
-                and native_rf_available
-                else 1
-            ),
-            "native_longitudinal_threads": (
-                native_longitudinal_threads
-                if sequence_kernel in {"native_serial", "native_parallel"}
-                and native_concentration_inflow_step is not None
-                else 1
-            ),
-            "native_rf_block_enabled": (native_rf_available),
-            "native_spatial_rf_block_enabled": bool(
-                spatial_tx_active
-                and native_spatial_rf_rotation_block is not None
-                and sequence_kernel in {"native_serial", "native_parallel"}
-            ),
-            "native_rf_fused_block_enabled": native_rf_fused_enabled,
-            "native_rf_fused_fallback_reason": native_rf_fused_fallback_reason,
-            "native_rf_fused_blocks": native_rf_fused_blocks,
-            "native_rf_fused_intervals": native_rf_fused_intervals,
-            "native_full_plan_enabled": native_full_plan_executed,
+            # The spin-major executor is the only native dynamic plan; the
+            # "full plan" keys describe its run for existing readers.
+            "native_full_plan_enabled": native_spin_major_executed,
             "native_full_plan_model": (
-                (
-                    "multi-pool-" + native_full_plan_model
-                    if native_full_plan_source_model
-                    else "multi-pool-no-inflow"
-                )
-                if native_full_plan_executed and native_full_plan_multi_pool
+                None
+                if not native_spin_major_executed
                 else (
-                    native_full_plan_model
-                    if native_full_plan_executed and native_full_plan_source_model
-                    else "no-inflow" if native_full_plan_executed else None
+                    (
+                        "multi-pool-" + native_full_plan_model
+                        if native_full_plan_source_model
+                        else "multi-pool-no-inflow"
+                    )
+                    if phantom.n_species > 2
+                    else (
+                        native_full_plan_model
+                        if native_full_plan_source_model
+                        else "no-inflow"
+                    )
                 )
             ),
-            "native_full_plan_blocks": native_full_plan_blocks,
-            "native_full_plan_intervals": native_full_plan_intervals,
+            "native_full_plan_blocks": native_spin_major_chunks,
+            "native_full_plan_intervals": native_spin_major_intervals,
             "native_spin_major_enabled": native_spin_major_executed,
             "native_spin_major_fallback_reason": native_spin_major_fallback_reason,
             "native_spin_major_chunks": native_spin_major_chunks,
@@ -7014,36 +5437,7 @@ def _simulate_dynamic_sequence_block(
             "native_spin_major_kernel_s": native_spin_major_kernel_s,
             **rf_propagator_metadata,
             **rf_propagator_stats,
-            "native_rf_fused_spin_limit": native_rf_fused_spin_limit,
-            "native_rf_fused_interval_limit": native_rf_fused_interval_limit,
-            "native_rf_fused_cache_limit_bytes": (native_rf_fused_cache_limit_bytes),
-            "native_rf_fused_cache_bytes": (
-                native_rf_fused_plan_cache.current_bytes
-                if native_rf_fused_plan_cache is not None
-                else 0
-            ),
-            "native_spatial_rf_table_limit_bytes": (
-                native_spatial_rf_table_limit_bytes
-            ),
-            "native_spatial_rf_max_groups_per_block": int(native_spatial_rf_max_groups),
-            "native_spatial_rf_cache_limit_bytes": spatial_rf_cache_limit_bytes,
-            "native_spatial_rf_cache_bytes": (
-                spatial_rf_cache.current_bytes if spatial_rf_cache is not None else 0
-            ),
-            "native_spatial_rf_cache_hits": spatial_rf_cache_hits,
-            "native_spatial_rf_cache_misses": spatial_rf_cache_misses,
-            "native_rf_fused_numerical_contract": (
-                "float64-close" if native_rf_fused_enabled else None
-            ),
             "native_parallel_threshold": native_parallel_threshold,
-            "native_block_interval_limit": native_block_interval_limit,
-            "native_block_table_limit_bytes": native_block_table_limit_bytes,
-            "native_full_plan_table_limit_bytes": (native_full_plan_table_limit_bytes),
-            "native_parallel_memory_limited": (
-                sequence_kernel == "native_parallel"
-                and native_longitudinal_block is not None
-                and not native_block_enabled
-            ),
             "pyruvate_inflow": phantom.pyruvate_inflow is not None,
             "spatial_inflow_arrival_delays": spatial_inflow_active,
             "inflow_max_step_s": (
@@ -7468,12 +5862,6 @@ def _simulate_dynamic_sequence_single_source(
         "native_spin_major_chunks": 0,
         "native_spin_major_intervals": 0,
         "native_spin_major_parent_blocks": 0,
-        "native_rf_fused_blocks": 0,
-        "native_rf_fused_intervals": 0,
-        "native_spatial_rf_cache_hits": 0,
-        "native_spatial_rf_cache_misses": 0,
-        "native_spatial_rf_cache_bytes": 0,
-        "native_rf_fused_cache_bytes": 0,
         "native_spin_major_rf_propagator_builds": 0,
         "native_spin_major_rf_propagator_applications": 0,
         "native_spin_major_rf_propagator_stepwise_segments": 0,

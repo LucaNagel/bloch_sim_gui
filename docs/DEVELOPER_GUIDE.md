@@ -724,16 +724,15 @@ build and reports `legacy-fast-math`. The validation-only
 Keep the source files and object targets separate so an incremental build
 cannot accidentally reuse fast-math objects in the strict extension.
 
-The dynamic extension `dynamic_bloch_cy` uses the strict compiler flags. Its
-backend-neutral input is the immutable Float64/Complex128
+The dynamic extension `dynamic_spin_major_cy` uses the strict compiler flags.
+Its backend-neutral input is the immutable Float64/Complex128
 `DynamicExecutionPlan` from `dynamic_execution.py`. This plan owns exact
-interval boundaries, RF and gradient samples, both dynamic-$B_0$
-half-interval integrals, conversion state, source samples, ordered boundary
-actions, and a SHA-256 fingerprint. Every backend adapter must consume this
-same plan. Dynamic integration remains Float64.
+interval boundaries, RF and gradient samples, conversion state, source
+samples, ordered boundary actions, and a SHA-256 fingerprint. Every backend
+adapter must consume this same plan. Dynamic integration remains Float64.
 
-`dynamic_spin_major_cy` is a second strict Float64 extension, selected
-automatically by the native dynamic choices for supported two-pool models.
+The spin-major executor is selected automatically by the production dynamic
+kernel for supported models; everything else runs on the NumPy kernel.
 It advances 64-spin tiles through bounded plan slices and reduces ADC sums
 over fixed work blocks. Complex spatial Tx fields are multiplied by the RF
 waveform per spin; the spatial rotation uses the same plane basis as NumPy.
@@ -752,11 +751,11 @@ store their Float64 state. Actions at state index zero (ADC, checkpoint) run
 in Python on the initial state before the executor starts; a block that keeps
 one reduced signal row sums that ADC sample over its parents.
 
-Use `BLOCHSIM_DYNAMIC_SPIN_MAJOR=0` to compare the previous native driver and
+Use `BLOCHSIM_DYNAMIC_SPIN_MAJOR=0` to run the NumPy kernel instead and
 `BLOCHSIM_DYNAMIC_SPIN_MAJOR_RF_CACHE=0` to compare uncached spin-major
 execution. Metadata beginning with `native_spin_major_` reports selection,
 fallback, timings, memory, and RF-propagator coverage. An older extension
-without spatial-Tx support safely retains the previous spatial kernel.
+without spatial-Tx support falls back to the NumPy kernel.
 
 The complete native two-pool driver is deliberately capability-gated. It
 executes free half-steps, conversion, unity/constant/spatial Tx, static or

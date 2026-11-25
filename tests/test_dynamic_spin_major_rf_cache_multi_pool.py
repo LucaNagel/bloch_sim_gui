@@ -3,8 +3,8 @@
 Repeated pulses run as cached per-spin affine propagators for two to six
 pools, also with per-spin inflow arrival delays, and pulses that differ only
 by a constant phase (RF spoiling) reuse one entry rotated about z. The
-interval-major native plan (``_native_spin_major=False``) is the reference at
-a relative error of 1e-12.
+uncached spin-major run and the NumPy kernel (``_native_spin_major=False``)
+are the references at a relative error of 1e-12.
 """
 
 import numpy as np
@@ -206,7 +206,7 @@ def _assert_equal(actual, expected):
         ),
     ],
 )
-def test_rf_cache_matches_interval_major_for_spoiled_multi_pool_plans(
+def test_rf_cache_matches_uncached_for_spoiled_multi_pool_plans(
     kernel, n_pools, inflow, tracked, max_delay_s, interpolation, outside, start
 ):
     phantom = _phantom(
@@ -225,13 +225,13 @@ def test_rf_cache_matches_interval_major_for_spoiled_multi_pool_plans(
         num_threads=3,
     )
 
-    interval_major = _run(phantom, program, kernel, _native_spin_major=False, **kwargs)
+    numpy_run = _run(phantom, program, kernel, _native_spin_major=False, **kwargs)
     stepwise = _run(
         phantom, program, kernel, _native_spin_major_rf_cache=False, **kwargs
     )
     cached = _run(phantom, program, kernel, **kwargs)
 
-    assert interval_major.metadata["native_spin_major_enabled"] is False
+    assert numpy_run.metadata["native_spin_major_enabled"] is False
     assert cached.metadata["native_spin_major_enabled"] is True
     assert _rf_cache(cached, "enabled") is True
     assert _rf_cache(cached, "fallback_reason") is None
@@ -253,7 +253,7 @@ def test_rf_cache_matches_interval_major_for_spoiled_multi_pool_plans(
     else:
         assert _rf_cache(cached, "stepwise_tiles") == 0
     assert cached.species_signal.shape[0] == n_pools
-    _assert_close(cached, interval_major)
+    _assert_close(cached, numpy_run)
     _assert_close(cached, stepwise)
 
 
@@ -277,7 +277,7 @@ def test_rf_cache_supports_spatial_tx_coils_and_slice_selection_with_delays():
         num_threads=3,
     )
 
-    interval_major = _run(
+    numpy_run = _run(
         phantom, program, "native_parallel", _native_spin_major=False, **kwargs
     )
     cached = _run(phantom, program, "native_parallel", **kwargs)
@@ -287,7 +287,7 @@ def test_rf_cache_supports_spatial_tx_coils_and_slice_selection_with_delays():
     assert _rf_cache(cached, "rotated_applications") > 0
     assert _rf_cache(cached, "stepwise_tiles") > 0
     assert cached.signal.shape[0] == 2
-    _assert_close(cached, interval_major)
+    _assert_close(cached, numpy_run)
 
 
 def test_rf_cache_keeps_pulses_with_phase_ramps_apart():
@@ -300,13 +300,13 @@ def test_rf_cache_keeps_pulses_with_phase_ramps_apart():
     phantom = _phantom(3)
     program = _program(scales)
 
-    interval_major = _run(phantom, program, _native_spin_major=False)
+    numpy_run = _run(phantom, program, _native_spin_major=False)
     cached = _run(phantom, program)
 
     assert _rf_cache(cached, "keys") == 2
     assert _rf_cache(cached, "builds") == 2
     assert _rf_cache(cached, "rotated_applications") > 0
-    _assert_close(cached, interval_major)
+    _assert_close(cached, numpy_run)
 
 
 def test_rf_phasor_requires_a_constant_phase_to_rounding():

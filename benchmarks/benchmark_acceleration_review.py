@@ -34,7 +34,7 @@ from blochsimulator.dynamic_phantom import (
 )
 from blochsimulator.sequence import ADCEvent, GradientEvent, RFEvent, SequenceProgram
 from blochsimulator.spectral_phantom import ChemicalSpecies
-import blochsimulator.dynamic_bloch_cy as cy
+import blochsimulator.dynamic_spin_major_cy as cy
 from benchmarks.common import result_similarity
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -88,35 +88,23 @@ kwargs = dict(simulation_timestep_s=20e-6)
 metadata_keys = (
     "sequence_kernel",
     "native_fallback_reason",
-    "native_rf_block_enabled",
-    "native_spatial_rf_block_enabled",
+    "native_spin_major_enabled",
+    "native_spin_major_fallback_reason",
+    "native_spin_major_threads",
     "tx_sensitivity",
     "numerical_contract",
-    "native_rf_fused_block_enabled",
-    "native_rf_fused_fallback_reason",
-    "native_rf_fused_blocks",
-    "native_rf_fused_intervals",
-    "native_rf_threads",
-    "native_longitudinal_threads",
     "compiled_interval_count",
     "n_simulated_spins",
     "native_full_plan_enabled",
     "native_full_plan_model",
     "native_full_plan_blocks",
     "native_full_plan_intervals",
-    "native_spatial_rf_cache_hits",
-    "native_spatial_rf_cache_misses",
-    "native_spatial_rf_cache_bytes",
-    "native_rf_fused_cache_bytes",
-    "native_rf_fused_numerical_contract",
     "sequence_compile_s",
     "execution_plan_build_s",
     "execution_plan_bytes",
     "execution_plan_segment_count",
     "execution_plan_action_count",
     "execution_plan_fingerprint",
-    "native_spatial_rf_table_limit_bytes",
-    "native_spatial_rf_max_groups_per_block",
 )
 info = dict(
     python=sys.version,
@@ -144,7 +132,7 @@ info = dict(
         path=cy.__file__,
         mtime_ns=os.stat(cy.__file__).st_mtime_ns,
         size_bytes=os.stat(cy.__file__).st_size,
-        numerical_contract="strict-float64",
+        numerical_contract="float64-close",
     ),
 )
 try:

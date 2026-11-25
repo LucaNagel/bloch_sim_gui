@@ -92,7 +92,7 @@ def test_validator_rejects_ideal_spoiling_with_subvoxel_request():
         )
 
 
-def test_requested_spin_major_variant_cannot_pass_on_previous_kernel(monkeypatch):
+def test_requested_spin_major_variant_cannot_pass_on_numpy_fallback(monkeypatch):
     from blochsimulator import dynamic_phantom
 
     monkeypatch.setattr(dynamic_phantom, "_spin_major_kernel", lambda: None)
@@ -104,7 +104,6 @@ def test_requested_spin_major_variant_cannot_pass_on_previous_kernel(monkeypatch
         candidates=("native_serial",),
         native_variants=True,
     )
-    assert report["candidates"]["native_serial_previous"]["gate_passed"]
     stepwise = report["candidates"]["native_serial_stepwise"]
     assert stepwise["accuracy_gate_passed"]
     assert not stepwise["requested_backend_executed"]

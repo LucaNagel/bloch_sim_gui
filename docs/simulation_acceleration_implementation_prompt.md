@@ -113,7 +113,7 @@ Eigenschaften und müssen auch getrennt berichtet werden.
 | Bereich | Bestehende Dateien und zentrale Einstiegspunkte |
 | --- | --- |
 | Dynamische Physik und Treiber | [dynamic_phantom.py](../src/blochsimulator/dynamic_phantom.py): `simulate_dynamic_sequence`, `_free_step`, `_longitudinal_step`, `_prepare_longitudinal_step`, `_rf_rotate_spatial`, RF-Blockplanung, `observe` |
-| Native dynamische Primitive | [dynamic_bloch_wrapper.pyx](../src/blochsimulator/dynamic_bloch_wrapper.pyx): RF-Rotation, gekoppelte longitudinale Schritte, persistente RF-Blöcke |
+| Native dynamische Primitive | `dynamic_bloch_wrapper.pyx` (inzwischen entfernt; Nachfolger [dynamic_spin_major_wrapper.pyx](../src/blochsimulator/dynamic_spin_major_wrapper.pyx)): RF-Rotation, gekoppelte longitudinale Schritte, persistente RF-Blöcke |
 | Gewöhnlicher C-Solver | [bloch_core_modified.c](../src/blochsimulator/bloch_core_modified.c), [bloch_wrapper.pyx](../src/blochsimulator/bloch_wrapper.pyx), [Build-Konfiguration](../setup.py) |
 | Dispatch und öffentliche API | [simulator.py](../src/blochsimulator/simulator.py): Kernelwahl, dynamische und statische Sequenzsimulation |
 | Plan, Ergebnisse, Sampling | [compiler.py](../src/blochsimulator/sequence/compiler.py), [result.py](../src/blochsimulator/sequence/result.py), [spin_sampling.py](../src/blochsimulator/sequence/spin_sampling.py), [memory.py](../src/blochsimulator/memory.py) |

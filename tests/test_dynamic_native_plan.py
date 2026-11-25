@@ -84,39 +84,6 @@ def test_native_plan_driver_executes_rf_adc_crusher_and_checkpoints():
         )
 
 
-def test_native_plan_adc_windows_match_single_block_signal():
-    phantom, program, raster = _native_plan_fixture()
-    kwargs = dict(
-        checkpoints_s=(6 * raster, 12 * raster),
-        simulation_timestep_s=raster,
-        spoiler_mode="ideal",
-        sequence_kernel="native_serial",
-        # Exercise the bounded voxel-major ADC windows in both runs.
-        _native_spin_major=False,
-    )
-    simulator = BlochSimulator(use_parallel=False)
-    single = simulator.simulate_dynamic_sequence(
-        program, phantom, memory_budget_bytes=None, **kwargs
-    )
-    previews = []
-    windowed = simulator.simulate_dynamic_sequence(
-        program,
-        phantom,
-        memory_budget_bytes=4096,
-        preview_callback=lambda fraction, signal: previews.append(
-            (fraction, signal.copy())
-        ),
-        **kwargs,
-    )
-
-    assert single.metadata["native_full_plan_blocks"] == 1
-    assert windowed.metadata["native_full_plan_enabled"] is True
-    assert windowed.metadata["native_full_plan_blocks"] > 1
-    np.testing.assert_array_equal(windowed.species_signal, single.species_signal)
-    assert previews[-1][0] == 1.0
-    np.testing.assert_array_equal(previews[-1][1], single.species_signal.sum(axis=0))
-
-
 def test_native_plan_driver_supports_coupled_polarized_inflow():
     phantom, program, raster = _native_plan_fixture()
     grid = np.linspace(0.0, 1.0, phantom.nvoxels).reshape(phantom.shape)
@@ -169,7 +136,6 @@ def test_native_plan_driver_supports_coupled_polarized_inflow():
     assert native.metadata["native_full_plan_intervals"] == 2 * (
         native.metadata["compiled_interval_count"]
     )
-    assert native.metadata["native_rf_fused_blocks"] == 0
     for name in (
         "signal",
         "species_signal",
@@ -453,7 +419,7 @@ def test_native_multi_pool_plan_without_inflow():
         )
 
 
-def test_native_multi_pool_initial_adc_runs_spin_major_or_numpy():
+def test_native_multi_pool_initial_adc_runs_spin_major():
     shape = (1, 1, 1)
     phantom = DynamicSpectralPhantom(
         shape=shape,
@@ -477,14 +443,6 @@ def test_native_multi_pool_initial_adc_runs_spin_major_or_numpy():
     reference = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
         program, phantom, sequence_kernel="optimized", simulation_timestep_s=raster
     )
-    requested_native = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
-        program,
-        phantom,
-        sequence_kernel="native_serial",
-        simulation_timestep_s=raster,
-        # Without the spin-major executor the interval paths keep this gate.
-        _native_spin_major=False,
-    )
     spin_major = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
         program, phantom, sequence_kernel="native_serial", simulation_timestep_s=raster
     )
@@ -493,19 +451,12 @@ def test_native_multi_pool_initial_adc_runs_spin_major_or_numpy():
     assert spin_major.metadata["sequence_kernel"] == "production"
     assert spin_major.metadata["native_spin_major_enabled"] is True
     assert spin_major.metadata["native_fallback_reason"] is None
-    assert requested_native.metadata["requested_sequence_kernel"] == "native_serial"
-    assert requested_native.metadata["requested_dynamic_kernel_path"] == "native_serial"
-    assert requested_native.metadata["sequence_kernel"] == "numpy"
-    assert requested_native.metadata["dynamic_kernel_path"] == "optimized"
-    assert requested_native.metadata["native_full_plan_enabled"] is False
-    assert "initial-time ADC" in requested_native.metadata["native_fallback_reason"]
     for name in (
         "signal",
         "species_signal",
         "final_magnetization",
         "final_pool_magnetization",
     ):
-        assert np.array_equal(getattr(requested_native, name), getattr(reference, name))
         np.testing.assert_allclose(
             getattr(spin_major, name),
             getattr(reference, name),

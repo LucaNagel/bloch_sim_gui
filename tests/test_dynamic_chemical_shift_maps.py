@@ -1,7 +1,7 @@
 """Voxelwise pool shifts and co-labelled inflow pools.
 
 ``chemical_shift_maps_ppm`` adds a per-voxel shift to individual pools (e.g. a
-pH-dependent resonance). The spin-major, interval-major and reference paths
+pH-dependent resonance). The spin-major, NumPy and reference paths
 must agree on it. ``PyruvateInflow.colabelled_pools`` gives a further pool the
 precursor's inflow; the superposition must equal a phantom in which that pool
 is the precursor itself.
@@ -100,12 +100,12 @@ def _assert_close(actual, expected, tolerance=1e-10):
 def test_shift_maps_agree_across_solver_paths():
     phantom = _phantom()
     reference = _run(phantom, "reference")
-    interval_major = _run(phantom, _native_spin_major=False)
+    numpy_run = _run(phantom, _native_spin_major=False)
     spin_major = _run(phantom)
     assert spin_major.metadata["native_spin_major_enabled"] is True
-    assert interval_major.metadata["native_spin_major_enabled"] is False
-    _assert_close(interval_major, reference, 1e-9)
-    _assert_close(spin_major, interval_major)
+    assert numpy_run.metadata["native_spin_major_enabled"] is False
+    _assert_close(numpy_run, reference, 1e-9)
+    _assert_close(spin_major, numpy_run)
     unshifted = _run(_phantom(shift_maps=False))
     assert not np.allclose(unshifted.species_signal[0], spin_major.species_signal[0])
 

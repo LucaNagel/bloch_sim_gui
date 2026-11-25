@@ -26,7 +26,7 @@ Implemented dynamic-solver performance paths and benchmarks are recorded in
 | 7. Cartesian acquisition/reconstruction | Complete | ADC moments, bandwidth/layout model, EPI builder, 2D FFT/coil combination, GUI controls and views |
 | 8. Spectral phantom designer/viewers | Complete | Shape ROIs, Lorentz peaks, persistence, independent-component simulation, orthogonal/3D views |
 | 9. CSI acquisition/export and physical phantom views | Complete | Explicit ky-kx-FID layout, spatial/spectral FFTs, structured export, mm axes, analytic 2D/3D B0 maps |
-| 10. Dynamic coupled species | CPU implementation complete | Regional kPL maps, inflow, pool-resolved output, optimized NumPy execution, strict native block primitives, and a native-RF/NumPy-kinetics hybrid for inflow are integrated; GPU execution remains experimental work |
+| 10. Dynamic coupled species | CPU implementation complete | Regional kPL maps, inflow, pool-resolved output, optimized NumPy execution and the strict native spin-major executor are integrated; GPU execution remains experimental work |
 | 11. Multi-Tx and WASM | Deferred | Separate follow-up milestones |
 | 12. Dynamic 3D bSSFP export | Partial | Pulseq REP/PAR labels, alternating RF offsets, timing and import roundtrip complete; exact Skinner scanner protocol still needs sequence-specific RF waveforms/parameters |
 

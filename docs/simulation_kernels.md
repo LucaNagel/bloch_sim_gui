@@ -185,7 +185,7 @@ A stored GUI selection that is no longer offered, including an earlier
 
 | Name | Old names | Implementation and intended use |
 | --- | --- | --- |
-| **Production (recommended)** — `production` | `native_parallel`, `native_serial` | Adds OpenMP across spins to strict native primitives and bounded plan blocks. Parallel work starts at 1,024 simulated spins; smaller jobs, a simulator with `use_parallel=False`, and the old name `native_serial` use one thread. The complete bounded driver supports unity, constant complex, or spatial transmit sensitivity, static B0, delayed conversion, ADC, crushers, receive coils, subvoxel sampling, and checkpoints. It covers direct or polarized pyruvate inflow, with or without concentration tracking, as well as concentration tracking without inflow. A separate multi-pool worker supports the existing precursor-to-product conversions, including pyruvate-to-alanine. Voxelwise arrival delays use bounded local source tables. This is the default for dynamic phantoms in the GUI and in `BlochSimulator(...)`. |
+| **Production (recommended)** — `production` | `native_parallel`, `native_serial` | Strict Float64 spin-major executor (`dynamic_spin_major_cy`) with OpenMP across spin tiles. Parallel work starts at 1,024 simulated spins; smaller jobs, a simulator with `use_parallel=False`, and the old name `native_serial` use one thread. It supports unity, constant complex, or spatial transmit sensitivity, static B0, delayed conversion, ADC, crushers, receive coils, subvoxel sampling, and checkpoints. It covers direct or polarized pyruvate inflow, with or without concentration tracking, concentration tracking without inflow, voxelwise arrival delays, and up to six coupled pools with the existing precursor-to-product conversions, including pyruvate-to-alanine. Combinations it does not support run on `numpy`. This is the default for dynamic phantoms in the GUI and in `BlochSimulator(...)`. |
 | `numpy` (Python only) | `optimized` | Complete CPU path. It keeps the transverse state in a persistent complex array, reuses scratch buffers, caches exact longitudinal coefficients by half-step duration, and caches T2/phase factors by duration and gradient. It supports inflow, delayed conversion, concentration tracking, spatial transmit sensitivity, multiple receive coils, checkpoints, and both spoiler modes. It is the safe fallback for unsupported native combinations. |
 | `reference` (Python only) | — | Direct, allocation-heavy Python/NumPy formulation. It recomputes intermediate phase, relaxation, exchange, inflow, and RF arrays at each interval and is the correctness oracle for the other dynamic paths. It supports the complete model but is intended for small validation and diagnostic runs. |
 
@@ -195,39 +195,24 @@ passed in `requested_sequence_kernel`, and the internal paths
 (`native_parallel`, `native_serial`, `optimized`, `reference`) in
 `dynamic_kernel_path` and `requested_dynamic_kernel_path`.
 
-The native extension receives coefficients already evaluated and rounded by
-NumPy and is built without fast math or floating-point contraction. Individual
-native primitives reproduce the NumPy operation order bit for bit. The
-persistent RF waveform block retains the same float64 integration topology but
-may change the final few bits through its compiled complex-arithmetic path; its
-result metadata reports a `float64-close` contract and it is regression-tested
-with tight tolerances.
+The spin-major executor is built without fast math or floating-point
+contraction. It keeps the Float64 integration topology of the NumPy kernel but
+may change the final few bits; its result metadata reports a `float64-close`
+contract and it is regression-tested with tight tolerances against `numpy` and
+`reference`.
 
-Native selection is capability-based rather than all-or-nothing:
-
-| Active feature combination | Native RF | Native longitudinal evolution | Actual behavior |
-| --- | --- | --- | --- |
-| Two pools; no inflow or concentration tracking; unity, constant, or spatial transmit | Yes | Yes | Complete bounded native plan, including delayed conversion and static B0 |
-| Coupled inflow, polarization curve, and concentration tracking, with or without spatial arrival delays | Yes | Yes | Complete bounded native plan; delayed sources are prepared only for the current time/voxel block |
-| Direct or polarized inflow without concentration delivery; concentration tracking with or without inflow | Yes | Yes | Complete bounded native plan with an explicit source mode matching the established model |
-| Additional product pools and passive precursor-to-product conversion | Yes | Yes | Separate complete multi-pool plan worker; the specialized two-pool loop remains unchanged |
-| Spatial transmit field with otherwise supported kinetics | Yes | Yes | Spatial native RF coefficient planes plus the applicable native longitudinal path |
-| Unsupported precision or insufficient memory | Capability-dependent | Capability-dependent | Explicit hybrid or complete fallback to `numpy` |
-| Strict native extension unavailable | No | No | Complete fallback to `numpy` |
-
-Dynamic B0 is supported in all rows and does not by itself cause a native
-fallback. It is part of the complete native plan both without inflow and with
-all existing two-pool source modes, including spatial arrival delays. To retain the established
-bitwise result for sequences that sample the unadvanced initial state, an ADC
-event exactly at time zero also stays on that interval path. Later ADC events
-remain part of the complete native plan. The spin-major executor takes such a
-sample, like any action at time zero, from the initial state before it starts
-and is not left for it. The completion status reports the
-requested and actually used path, effective CPU thread count, numerical
-contract, complete-plan model, and any fallback reason. Experimental CPU/GPU
-results remain explicitly labelled. The same machine-readable fields are
-retained in result metadata and exports, together with enabled native
-RF/longitudinal blocks and the memory-limit decision.
+Production runs either completely on the spin-major executor or completely on
+`numpy`; there is no mixed native/NumPy path. It falls back to `numpy` when the
+extension is missing or too old, when the model is outside the executor's
+coverage, or when `_native_spin_major=False` (or
+`BLOCHSIM_DYNAMIC_SPIN_MAJOR=0`) switches the executor off on purpose; only the
+first two are reported as a kernel fallback. Actions at time zero (ADC,
+checkpoint) are taken from the initial state before the executor starts. The
+completion status reports the requested and actually used path, effective CPU
+thread count, numerical contract, plan model, and any fallback reason. The
+same machine-readable fields are retained in result metadata and exports;
+`native_full_plan_*` keys are kept for compatibility and describe the
+spin-major run.
 
 Large expanded objects are divided only at parent-voxel boundaries. All
 subvoxel spins belonging to one parent remain together for the entire sequence,

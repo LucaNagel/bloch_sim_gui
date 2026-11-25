@@ -18038,15 +18038,6 @@ class SequenceSimulationWidget(QWidget):
             details.append(
                 f"fallback: {fallback_reason}" if fallback_reason else "fallback used"
             )
-        elif metadata.get("native_hybrid"):
-            partial_reason = metadata.get(
-                "native_longitudinal_fallback_reason"
-            ) or metadata.get("native_rf_fused_fallback_reason")
-            details.append(
-                f"mixed native/NumPy execution: {partial_reason}"
-                if partial_reason
-                else "mixed native/NumPy execution"
-            )
 
         detection = metadata.get("acquisition_detection")
         detection_errors = (

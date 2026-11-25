@@ -798,24 +798,14 @@ def test_native_serial_dynamic_pilot_is_bitwise_equal(kpl):
     optimized = simulator.simulate_dynamic_sequence(
         program, phantom, sequence_kernel="optimized", **kwargs
     )
-    native = simulator.simulate_dynamic_sequence(
-        program,
-        phantom,
-        sequence_kernel="native_serial",
-        # The interval RF-block path keeps the bitwise contract.
-        _native_spin_major=False,
-        **kwargs,
-    )
     spin_major = simulator.simulate_dynamic_sequence(
         program, phantom, sequence_kernel="native_serial", **kwargs
     )
 
     assert spin_major.metadata["native_spin_major_enabled"] is True
-    assert native.metadata["sequence_kernel"] == "production"
-    assert native.metadata["dynamic_kernel_path"] == "native_serial"
-    assert native.metadata["native_fallback_reason"] is None
-    assert native.metadata["native_rf_block_enabled"] is True
-    assert native.metadata["native_rf_threads"] == 1
+    assert spin_major.metadata["sequence_kernel"] == "production"
+    assert spin_major.metadata["dynamic_kernel_path"] == "native_serial"
+    assert spin_major.metadata["native_fallback_reason"] is None
     for name in (
         "signal",
         "species_signal",
@@ -824,8 +814,7 @@ def test_native_serial_dynamic_pilot_is_bitwise_equal(kpl):
         "checkpoint_magnetization",
         "checkpoint_pool_magnetization",
     ):
-        assert np.array_equal(getattr(native, name), getattr(reference, name))
-        assert np.array_equal(getattr(native, name), getattr(optimized, name))
+        assert np.array_equal(getattr(optimized, name), getattr(reference, name))
         np.testing.assert_allclose(
             getattr(spin_major, name),
             getattr(reference, name),
@@ -848,90 +837,18 @@ def test_configured_dynamic_kernel_is_used_without_call_override():
     assert result.metadata["dynamic_kernel_path"] == "native_serial"
 
 
-@pytest.mark.parametrize("num_threads", [1, 2, 4, 8])
 @pytest.mark.parametrize(
-    "rf_hz",
-    [123.4 + 56.7j, -987.6 + 1.2j, 250.0j],
-    ids=("complex-axis", "negative-x", "y-axis"),
-)
-def test_native_rf_voxel_block_is_bitwise_equal_to_numpy(num_threads, rf_hz):
-    from blochsimulator.dynamic_bloch_cy import (
-        apply_rf_rotation_transverse_block,
-    )
-    from blochsimulator.dynamic_phantom import _prepare_rf_rotation, _rf_rotate
-
-    rng = np.random.default_rng(20260722)
-    state = rng.standard_normal((2, 1728, 3))
-    expected = state.copy()
-    transverse = state[:, :, 0] + 1j * state[:, :, 1]
-    duration_s = 10e-6
-
-    _rf_rotate(expected, rf_hz, duration_s)
-    prepared = _prepare_rf_rotation(rf_hz, duration_s)
-    apply_rf_rotation_transverse_block(
-        state,
-        transverse,
-        prepared[0],
-        prepared[1],
-        prepared[2],
-        prepared[3],
-        prepared[4],
-        num_threads,
-    )
-    state[:, :, 0] = transverse.real
-    state[:, :, 1] = transverse.imag
-
-    assert np.array_equal(state, expected)
-
-
-@pytest.mark.parametrize("num_threads", [1, 4])
-def test_native_spatial_rf_voxel_block_matches_numpy_plane_basis(num_threads):
-    from blochsimulator.dynamic_bloch_cy import (
-        apply_spatial_rf_rotation_transverse_block,
-    )
-    from blochsimulator.dynamic_phantom import (
-        _prepare_spatial_rf_rotation,
-        _rf_rotate_spatial,
-    )
-
-    rng = np.random.default_rng(20260927)
-    state = rng.standard_normal((2, 1728, 3))
-    expected = state.copy()
-    transverse = np.ascontiguousarray(state[:, :, 0] + 1j * state[:, :, 1])
-    tx_storage = np.empty(2 * state.shape[1], dtype=np.complex128)
-    tx_storage[::2] = np.linspace(0.0, 1.2, state.shape[1]) * np.exp(
-        1j * np.linspace(-0.7, 0.5, state.shape[1])
-    )
-    tx_sensitivity = tx_storage[::2]
-    duration_s = 10e-6
-    rf_hz = 123.4 - 56.7j
-
-    _rf_rotate_spatial(expected, rf_hz, tx_sensitivity, duration_s)
-    prepared = _prepare_spatial_rf_rotation(rf_hz, tx_sensitivity, duration_s)
-    assert all(value.flags.c_contiguous for value in prepared)
-    apply_spatial_rf_rotation_transverse_block(
-        state, transverse, *prepared, num_threads
-    )
-    state[:, :, 0] = transverse.real
-    state[:, :, 1] = transverse.imag
-
-    np.testing.assert_allclose(state, expected, rtol=2e-15, atol=2e-15)
-
-
-@pytest.mark.parametrize(
-    ("tx_values", "classification", "fused"),
+    ("tx_values", "classification"),
     [
-        ((0.0 + 0.0j, 0.0 + 0.0j), "constant", False),
-        ((0.9 + 0.0j, 0.9 + 0.0j), "constant", True),
-        ((0.0 + 0.8j, 0.0 + 0.8j), "constant", True),
-        ((0.75 + 0.25j, 0.75 + 0.25j), "constant", True),
-        ((0.0 + 0.0j, 0.85 - 0.2j), "spatial", True),
+        ((0.0 + 0.0j, 0.0 + 0.0j), "constant"),
+        ((0.9 + 0.0j, 0.9 + 0.0j), "constant"),
+        ((0.0 + 0.8j, 0.0 + 0.8j), "constant"),
+        ((0.75 + 0.25j, 0.75 + 0.25j), "constant"),
+        ((0.0 + 0.0j, 0.85 - 0.2j), "spatial"),
     ],
     ids=("zero", "amplitude", "phase", "complex", "spatial"),
 )
-def test_native_rf_blocks_support_constant_and_spatial_tx(
-    tx_values, classification, fused
-):
+def test_native_rf_blocks_support_constant_and_spatial_tx(tx_values, classification):
     phantom = _dynamic_phantom(kpl=(0.03, 0.1))
     phantom.initial_spin_density_maps = {
         "Pyruvate": np.ones(phantom.shape),
@@ -968,8 +885,6 @@ def test_native_rf_blocks_support_constant_and_spatial_tx(
         simulation_timestep_s=5e-6,
         spin_sampling=SpinSampling((2, 1, 1)),
         spoiler_mode="gradient",
-        # Inspect the existing spatial coefficient-cache path separately.
-        _native_spin_major=False,
     )
     sampled_reference = simulator.simulate_dynamic_sequence(
         program,
@@ -984,14 +899,9 @@ def test_native_rf_blocks_support_constant_and_spatial_tx(
     assert native.metadata["sequence_kernel"] == "production"
     assert native.metadata["dynamic_kernel_path"] == "native_parallel"
     assert native.metadata["tx_sensitivity"] == classification
-    assert native.metadata["native_rf_block_enabled"] is True
-    assert native.metadata["native_rf_fused_block_enabled"] is fused
+    assert native.metadata["native_spin_major_enabled"] is True
     assert native.metadata["native_full_plan_enabled"] is True
-    assert native.metadata["native_rf_fused_blocks"] == 0
     assert native.metadata["subvoxel_spins_per_voxel"] == 2
-    if classification == "spatial":
-        assert native.metadata["native_spatial_rf_block_enabled"] is True
-        assert native.metadata["native_spatial_rf_cache_misses"] > 0
     for name in (
         "signal",
         "species_signal",
@@ -1048,9 +958,7 @@ def test_native_dynamic_kernel_keeps_rf_fast_path_with_driver(driver, kernel):
     assert native.metadata["sequence_kernel"] == "production"
     assert native.metadata["dynamic_kernel_path"] == kernel
     assert native.metadata["native_fallback_reason"] is None
-    assert native.metadata["native_rf_block_enabled"] is True
-    assert native.metadata["native_hybrid"] is False
-    assert native.metadata["native_longitudinal_fallback_reason"] is None
+    assert native.metadata["native_spin_major_enabled"] is True
     assert native.metadata["native_full_plan_enabled"] is True
     assert native.metadata["numerical_contract"] == "float64-close"
     assert any("bounded native plan" in message for message in status_messages)
@@ -1093,11 +1001,8 @@ def test_native_inflow_with_spatial_tx_uses_complete_native_plan():
     assert native.metadata["sequence_kernel"] == "production"
     assert native.metadata["dynamic_kernel_path"] == "native_parallel"
     assert native.metadata["tx_sensitivity"] == "spatial"
-    assert native.metadata["native_hybrid"] is False
-    assert native.metadata["native_rf_block_enabled"] is True
-    assert native.metadata["native_spatial_rf_block_enabled"] is True
+    assert native.metadata["native_spin_major_enabled"] is True
     assert native.metadata["native_fallback_reason"] is None
-    assert native.metadata["native_longitudinal_fallback_reason"] is None
     assert native.metadata["native_full_plan_enabled"] is True
     assert native.metadata["native_full_plan_model"] == "direct-magnetization-inflow"
     assert native.metadata["numerical_contract"] == "float64-close"
@@ -1116,7 +1021,7 @@ def test_native_inflow_with_spatial_tx_uses_complete_native_plan():
 
 
 @pytest.mark.parametrize("num_threads", [1, 2, 4, 8])
-def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
+def test_native_parallel_dynamic_kernel_matches_reference(num_threads):
     shape = (12, 12, 12)
     phantom = DynamicSpectralPhantom(
         shape=shape,
@@ -1150,24 +1055,14 @@ def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
     reference = simulator.simulate_dynamic_sequence(
         program, phantom, sequence_kernel="reference", **kwargs
     )
-    native = simulator.simulate_dynamic_sequence(
-        program,
-        phantom,
-        sequence_kernel="native_parallel",
-        # The interval RF-block path keeps the bitwise contract.
-        _native_spin_major=False,
-        **kwargs,
-    )
     spin_major = simulator.simulate_dynamic_sequence(
         program, phantom, sequence_kernel="native_parallel", **kwargs
     )
 
     assert spin_major.metadata["native_spin_major_enabled"] is True
-    assert native.metadata["sequence_kernel"] == "production"
-    assert native.metadata["dynamic_kernel_path"] == "native_parallel"
-    assert native.metadata["native_parallel_threads"] == num_threads
-    assert native.metadata["native_rf_block_enabled"] is True
-    assert native.metadata["native_rf_threads"] == num_threads
+    assert spin_major.metadata["sequence_kernel"] == "production"
+    assert spin_major.metadata["dynamic_kernel_path"] == "native_parallel"
+    assert spin_major.metadata["native_parallel_threads"] == num_threads
     for name in (
         "signal",
         "species_signal",
@@ -1176,7 +1071,6 @@ def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
         "checkpoint_magnetization",
         "checkpoint_pool_magnetization",
     ):
-        assert np.array_equal(getattr(native, name), getattr(reference, name))
         np.testing.assert_allclose(
             getattr(spin_major, name),
             getattr(reference, name),
@@ -1187,7 +1081,7 @@ def test_native_parallel_dynamic_kernel_is_bitwise_equal(num_threads):
 
 
 @pytest.mark.parametrize("num_threads", [1, 4])
-def test_native_fused_rf_block_tracks_coupled_concentration_inflow(num_threads):
+def test_native_rf_tracks_coupled_concentration_inflow(num_threads):
     phantom = _dynamic_phantom(kpl=(0.03, 0.1))
     phantom.initial_spin_density_maps = {
         "Pyruvate": np.ones(phantom.shape),
@@ -1226,14 +1120,11 @@ def test_native_fused_rf_block_tracks_coupled_concentration_inflow(num_threads):
         simulation_timestep_s=5e-6,
     )
 
-    assert native.metadata["native_concentration_inflow_step_enabled"] is True
-    assert native.metadata["native_rf_fused_block_enabled"] is True
+    assert native.metadata["native_spin_major_enabled"] is True
     assert native.metadata["native_full_plan_enabled"] is True
     assert native.metadata["native_full_plan_intervals"] == (
         native.metadata["compiled_interval_count"]
     )
-    assert native.metadata["native_rf_fused_blocks"] == 0
-    assert native.metadata["native_rf_fused_intervals"] == 0
     for name in (
         "signal",
         "species_signal",
@@ -1246,98 +1137,6 @@ def test_native_fused_rf_block_tracks_coupled_concentration_inflow(num_threads):
             rtol=2e-13,
             atol=2e-13,
         )
-
-
-def test_native_serial_fused_rf_block_keeps_one_worker(monkeypatch):
-    import blochsimulator.dynamic_bloch_cy as dynamic_bloch_cy
-
-    base = _dynamic_phantom()
-    shape = (1024, 1, 1)
-    phantom = DynamicSpectralPhantom(
-        shape=shape,
-        fov=(0.02, 0.01, 0.01),
-        pools=base.pools,
-        initial_concentration_maps={
-            "Pyruvate": np.ones(shape),
-            "Lactate": np.zeros(shape),
-        },
-        kpl_map_s_inv=np.full(shape, 0.1),
-        initial_spin_density_maps={
-            "Pyruvate": np.ones(shape),
-            "Lactate": np.full(shape, 0.05),
-        },
-        equilibrium_polarization=0.7,
-        pyruvate_inflow=PyruvateInflow(
-            TimeCurve((0.0, 1e-3), (0.2, 0.5), "linear", "hold"),
-            np.ones(shape),
-            TimeCurve((0.0, 1e-3), (0.4, 0.25), "linear", "hold"),
-        ),
-    )
-    raster = 20e-6
-    program = SequenceProgram(
-        (
-            RFEvent(0.0, np.full(12, 80.0 + 10.0j), raster),
-            ADCEvent(12 * raster, 1, raster),
-        ),
-        duration_s=13 * raster,
-    )
-    native_block = dynamic_bloch_cy.apply_dynamic_rf_block_with_concentration_inflow
-    worker_counts = []
-
-    def record_worker_count(*args):
-        worker_counts.append(args[43])
-        return native_block(*args)
-
-    monkeypatch.setattr(
-        dynamic_bloch_cy,
-        "apply_dynamic_rf_block_with_concentration_inflow",
-        record_worker_count,
-    )
-    result = BlochSimulator(use_parallel=True, num_threads=4).simulate_dynamic_sequence(
-        program,
-        phantom,
-        sequence_kernel="native_serial",
-        simulation_timestep_s=5e-6,
-        # This test inspects the voxel-major fused RF driver.
-        _native_spin_major=False,
-    )
-
-    assert worker_counts
-    assert set(worker_counts) == {1}
-    assert result.metadata["native_full_plan_enabled"] is True
-    assert result.metadata["native_rf_threads"] == 1
-    assert result.metadata["native_longitudinal_threads"] == 1
-
-
-def test_native_parallel_dynamic_kernel_respects_tiny_block_budget():
-    phantom = _dynamic_phantom()
-    program = SequenceProgram((), duration_s=1e-3)
-    simulator = BlochSimulator(use_parallel=True, num_threads=8)
-    optimized = simulator.simulate_dynamic_sequence(
-        program, phantom, sequence_kernel="optimized", checkpoints_s=(5e-4,)
-    )
-    native = simulator.simulate_dynamic_sequence(
-        program,
-        phantom,
-        sequence_kernel="native_parallel",
-        checkpoints_s=(5e-4,),
-        memory_budget_bytes=1,
-        # The interval-major blocks are under test; spin-major keeps running
-        # under a tiny budget and has its own test.
-        _native_spin_major=False,
-    )
-
-    assert native.metadata["native_parallel_memory_limited"] is True
-    assert native.metadata["native_parallel_threads"] == 1
-    for name in (
-        "signal",
-        "species_signal",
-        "final_magnetization",
-        "final_pool_magnetization",
-        "checkpoint_magnetization",
-        "checkpoint_pool_magnetization",
-    ):
-        assert np.array_equal(getattr(native, name), getattr(optimized, name))
 
 
 @pytest.mark.parametrize("suffix", [".npz", ".h5", ".nc"])

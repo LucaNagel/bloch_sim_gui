@@ -80,11 +80,12 @@ def test_native_run_and_deliberate_switch_do_not_warn():
     assert small.metadata["native_spin_major_enabled"]
     assert native.metadata["native_spin_major_enabled"]
     assert not disabled.metadata["native_spin_major_enabled"]
+    assert disabled.metadata["sequence_kernel"] == "numpy"
     assert dynamic_kernel_fallback(disabled.metadata) is None
 
 
 def test_lost_spin_major_executor_warns_at_the_call_site(monkeypatch):
-    # A missing extension forces the interval path.
+    # A missing extension runs the NumPy kernel.
     monkeypatch.setattr(dynamic_module, "_spin_major_kernel", lambda: None)
     with pytest.warns(KernelFallbackWarning, match="extension") as caught:
         result = _run("native_serial")

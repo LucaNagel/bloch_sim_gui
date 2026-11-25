@@ -396,14 +396,11 @@ def compare_kernels(
     if native_variants:
         for name in candidates:
             if name in NATIVE_KERNELS:
-                variants.extend(
+                variants.append(
                     (
-                        (name + "_previous", name, {"_native_spin_major": False}),
-                        (
-                            name + "_stepwise",
-                            name,
-                            {"_native_spin_major_rf_cache": False},
-                        ),
+                        name + "_stepwise",
+                        name,
+                        {"_native_spin_major_rf_cache": False},
                     )
                 )
     for label, kernel, extra in variants:
@@ -431,13 +428,9 @@ def compare_kernels(
         spin_major = bool(candidate.metadata.get("native_spin_major_enabled"))
         if label.endswith("_stepwise"):
             backend_match = backend_match and spin_major
-        elif label.endswith("_previous"):
-            backend_match = backend_match and not spin_major
         fallback_reason = candidate.metadata.get("native_fallback_reason") or (
             candidate.metadata.get("native_spin_major_fallback_reason")
         )
-        if fallback_reason == "disabled by request":
-            fallback_reason = None
         report["candidates"][label] = {
             "runtime_seconds": runtime,
             "speedup_vs_reference": (

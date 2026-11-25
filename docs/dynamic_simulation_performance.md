@@ -6,6 +6,12 @@ pyruvate/lactate sequence simulator.  It complements the physical model in
 flow in
 [sequence_simulation_architecture.md](sequence_simulation_architecture.md).
 
+> **Note:** the interval-major native driver (`dynamic_bloch_cy`, persistent
+> RF blocks, the voxel-major complete plan and the multi-pool plan worker)
+> described below has been removed. Production now runs the spin-major
+> executor or, outside its coverage, the NumPy kernel. The measurements are
+> kept as a historical record.
+
 The `optimized` path preserves the dynamic reference implementation bit for
 bit. Persistent RF-waveform blocks, the complete native plan driver, and fixed
 parent-voxel reduction use the same Float64 integration topology but may change

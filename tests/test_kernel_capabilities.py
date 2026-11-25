@@ -52,8 +52,6 @@ def test_kernel_capabilities_report_contract_fallback_and_plan_coverage():
     assert native.available
     assert native.fallback_supported
     assert native.numerical_contract == "float64-close"
-    assert native.details["complete_two_pool_plan"]
-    assert native.details["complete_multi_pool_plan"]
     assert native.details["spin_major"]
     assert native.details["spin_major_spatial_tx"]
 

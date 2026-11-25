@@ -1,10 +1,9 @@
 """Spin-major executor for N-pool phantoms and spatially delayed inflow.
 
-The interval-major native plan (``_native_spin_major=False``) is the reference:
-its multi-pool driver for three or more pools and its spatial source tables for
-per-voxel inflow arrival delays. The acceptance bound for the spin-major path
-is a relative error of 1e-9; the comparisons below use the tighter 1e-12 of
-the two-pool spin-major tests.
+The NumPy kernel is the reference for three or more pools and for per-voxel
+inflow arrival delays. The acceptance bound for the spin-major path is a
+relative error of 1e-9; the comparisons below use the tighter 1e-12 of the
+two-pool spin-major tests.
 """
 
 import numpy as np
@@ -156,14 +155,6 @@ def _assert_spin_major(result):
     )
 
 
-def _assert_interval_major(result):
-    assert result.metadata["native_spin_major_enabled"] is False
-    assert result.metadata["native_spin_major_fallback_reason"] == (
-        "disabled by request"
-    )
-    assert result.metadata["native_full_plan_enabled"] is True
-
-
 @pytest.mark.parametrize("kernel", ["native_serial", "native_parallel"])
 @pytest.mark.parametrize(
     "n_pools, inflow, tracked, conversion_start",
@@ -188,14 +179,11 @@ def test_spin_major_matches_multi_pool_plan(
     kwargs = dict(use_parallel=kernel == "native_parallel", num_threads=2)
 
     reference = _run(phantom, program, "optimized")
-    interval_major = _run(phantom, program, kernel, _native_spin_major=False, **kwargs)
     spin_major = _run(phantom, program, kernel, **kwargs)
 
     _assert_spin_major(spin_major)
-    _assert_interval_major(interval_major)
-    assert interval_major.metadata["native_full_plan_model"].startswith("multi-pool-")
+    assert spin_major.metadata["native_full_plan_model"].startswith("multi-pool-")
     assert spin_major.species_signal.shape[0] == n_pools
-    _assert_close(spin_major, interval_major)
     _assert_close(spin_major, reference)
 
 
@@ -222,14 +210,11 @@ def test_spin_major_matches_spatial_inflow_plan(
     program = _program()
 
     reference = _run(phantom, program, "optimized")
-    interval_major = _run(phantom, program, _native_spin_major=False)
     spin_major = _run(phantom, program)
 
     _assert_spin_major(spin_major)
-    _assert_interval_major(interval_major)
-    for result in (interval_major, spin_major):
+    for result in (reference, spin_major):
         assert result.metadata["spatial_inflow_arrival_delays"] is True
-    _assert_close(spin_major, interval_major)
     _assert_close(spin_major, reference)
 
 
@@ -274,20 +259,10 @@ def test_spin_major_spatial_inflow_over_tiles_with_tx_and_coils(
     parallel = dict(use_parallel=True, num_threads=3)
 
     reference = _run(phantom, program, "optimized", **kwargs)
-    interval_major = _run(
-        phantom,
-        program,
-        "native_parallel",
-        _native_spin_major=False,
-        **parallel,
-        **kwargs,
-    )
     spin_major = _run(phantom, program, "native_parallel", **parallel, **kwargs)
 
     assert spin_major.metadata["native_spin_major_enabled"] is True
     assert spin_major.metadata["native_spin_major_parent_blocks"] == 2
-    _assert_interval_major(interval_major)
-    _assert_close(spin_major, interval_major)
     _assert_close(spin_major, reference)
 
 
@@ -418,17 +393,13 @@ def test_native_kernels_apply_voxel_washout_like_the_reference(
     kwargs = dict(use_parallel=kernel == "native_parallel", num_threads=2)
 
     reference = _run(phantom, program, "reference")
-    interval_major = _run(phantom, program, kernel, _native_spin_major=False, **kwargs)
     spin_major = _run(phantom, program, kernel, **kwargs)
 
     _assert_spin_major(spin_major)
-    for result in (interval_major, spin_major):
-        assert result.metadata["sequence_kernel"] == "production"
-        assert result.metadata["dynamic_kernel_path"] == kernel
-        assert result.metadata["native_fallback_reason"] is None
-    assert interval_major.metadata["native_full_plan_enabled"] is (n_pools > 2)
+    assert spin_major.metadata["sequence_kernel"] == "production"
+    assert spin_major.metadata["dynamic_kernel_path"] == kernel
+    assert spin_major.metadata["native_fallback_reason"] is None
     _assert_close(spin_major, reference, 1e-10)
-    _assert_close(interval_major, reference, 1e-10)
     # The washout must matter at this scale, or the comparison proves nothing.
     plain = _phantom(n_pools, inflow=inflow, tracked=tracked)
     unwashed = _run(plain, program, "optimized")

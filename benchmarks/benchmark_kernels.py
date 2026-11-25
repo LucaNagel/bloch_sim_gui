@@ -362,10 +362,7 @@ def _kernel_record(
             "dynamic_frame_interval_s": (
                 args.kernel_dynamic_frame_interval_s if family == "dynamic" else 0.0
             ),
-            "native_rf_block_enabled": metadata.get("native_rf_block_enabled"),
-            "native_rf_fused_block_enabled": metadata.get(
-                "native_rf_fused_block_enabled"
-            ),
+            "native_spin_major_enabled": metadata.get("native_spin_major_enabled"),
             "native_parallel_threads": metadata.get("native_parallel_threads"),
             "actual_backend": metadata.get("actual_backend"),
         }

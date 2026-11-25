@@ -1016,14 +1016,12 @@ magnetization. Peak storage scales with voxel state, requested checkpoint
 states, coil maps, and `Nthread x Ncoil x Nadc` thread-local ADC accumulators.
 Chunk boundaries are also the cancellation and progress-reporting boundaries.
 
-The coupled dynamic solver has reference, allocation-reusing NumPy, strict
-native serial, and strict native OpenMP execution paths.  The native extension
-uses separate non-fast-math compiler flags and consumes NumPy-prepared
-coefficients so the NumPy (`numpy`) CPU outputs remain bit-identical.  Its principal
-RF-intensive speed-up comes from applying one Rodrigues rotation directly to
-the complete contiguous two-pool voxel block, avoiding repeated NumPy state
-synchronization and temporary arrays.  ADC sums retain their original voxel
-order.  Detailed kernel behavior, limits, and representative measurements are
+The coupled dynamic solver has reference, allocation-reusing NumPy, and
+production execution paths.  Production runs the strict Float64 spin-major
+executor (`dynamic_spin_major_cy`, non-fast-math compiler flags) serially or
+with OpenMP across spin tiles; models it does not cover run on NumPy.  ADC
+sums are reduced over fixed work blocks, so results do not depend on the
+thread count.  Detailed kernel behavior, limits, and representative measurements are
 recorded in
 [dynamic_simulation_performance.md](dynamic_simulation_performance.md).
 

@@ -572,7 +572,6 @@ def test_mouse_solver_bladder_signal_is_t1_attenuated_and_kernels_agree():
         "optimized": ("optimized", {}),
         "native_serial": ("native_serial", {}),
         "native_parallel": ("native_parallel", {}),
-        "interval_major": ("native_serial", {"_native_spin_major": False}),
     }
     results = {
         name: BlochSimulator(
@@ -595,15 +594,13 @@ def test_mouse_solver_bladder_signal_is_t1_attenuated_and_kernels_agree():
             atol=1e-12 * np.max(np.abs(reference)),
         )
     # The native kernels apply the washout themselves instead of falling back.
-    for name in ("native_serial", "native_parallel", "interval_major"):
+    for name in ("native_serial", "native_parallel"):
         native = results[name].metadata
         assert native["dynamic_kernel_path"] == runs[name][0]
         assert native["sequence_kernel"] == "production"
         assert native["native_fallback_reason"] is None
-    for name in ("native_serial", "native_parallel"):
-        assert results[name].metadata["native_spin_major_enabled"] is True
-        assert results[name].metadata["native_spin_major_fallback_reason"] is None
-    assert results["interval_major"].metadata["native_full_plan_enabled"] is True
+        assert native["native_spin_major_enabled"] is True
+        assert native["native_spin_major_fallback_reason"] is None
 
     # No RF reaches the lumen in this check: compare the bladder against the
     # source convolution with T1 relaxation toward the thermal level.
