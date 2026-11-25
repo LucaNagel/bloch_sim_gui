@@ -1350,7 +1350,7 @@ class BlochSimulator:
         memory_limit_bytes: Optional[int] = None,
         memory_policy: Optional[MemoryPolicy] = None,
         sequence_kernel: str = "production",
-        dynamic_sequence_kernel: str = "numpy",
+        dynamic_sequence_kernel: str = "production",
     ):
         """
         Initialize the Bloch simulator.
@@ -1378,9 +1378,9 @@ class BlochSimulator:
             the separately compiled no-fast-math extension that checks the
             legacy kernel. The old name ``"optimized"`` is an alias of
             ``"legacy"``.
-        dynamic_sequence_kernel : {"numpy", "production", "reference"}
+        dynamic_sequence_kernel : {"production", "numpy", "reference"}
             Kernel used specifically for dynamic spectral sequence simulations.
-            ``"production"`` is the native kernel (old names
+            ``"production"`` (default) is the native kernel (old names
             ``"native_parallel"`` and, with one thread, ``"native_serial"``);
             ``"numpy"`` is the NumPy validation path (old name ``"optimized"``).
         """

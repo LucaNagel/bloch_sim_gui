@@ -284,7 +284,11 @@ def test_dynamic_sequence_reports_intermediate_live_previews():
     )
     previews = []
 
-    result = BlochSimulator(use_parallel=False).simulate_dynamic_sequence(
+    # NumPy previews every interval; production previews per time slice, and
+    # this four-interval program fits in one slice.
+    result = BlochSimulator(
+        use_parallel=False, dynamic_sequence_kernel="numpy"
+    ).simulate_dynamic_sequence(
         program,
         phantom,
         preview_callback=lambda fraction, signal: previews.append(
@@ -1349,6 +1353,9 @@ def test_native_parallel_dynamic_kernel_respects_tiny_block_budget():
         sequence_kernel="native_parallel",
         checkpoints_s=(5e-4,),
         memory_budget_bytes=1,
+        # The interval-major blocks are under test; spin-major keeps running
+        # under a tiny budget and has its own test.
+        _native_spin_major=False,
     )
 
     assert native.metadata["native_parallel_memory_limited"] is True

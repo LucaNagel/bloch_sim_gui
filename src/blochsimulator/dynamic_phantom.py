@@ -3172,6 +3172,27 @@ def _spin_major_slice_limits(
     return interval_limit, adc_limit
 
 
+def _spin_major_slice_plan(
+    memory_budget_bytes, n_rx_coils, n_threads, n_pools=2, spatial_inflow=False
+):
+    """Return (interval limit, ADC limit, threads, memory limited) of the executor.
+
+    A budget too small for every requested thread drops threads until the
+    slice limits fit. Below the working set of one thread the executor runs
+    one thread with single-interval, single-ADC slices, so the budget never
+    makes spin-major fall back to another kernel. Thread count and slice size
+    do not change results.
+    """
+    requested = max(1, int(n_threads))
+    for threads in range(requested, 0, -1):
+        limits = _spin_major_slice_limits(
+            memory_budget_bytes, n_rx_coils, threads, n_pools, spatial_inflow
+        )
+        if limits is not None:
+            return limits[0], limits[1], threads, threads < requested
+    return 1, 1, 1, True
+
+
 def _spin_major_slice_end(
     first_interval,
     interval_count,
@@ -4376,15 +4397,13 @@ def _simulate_dynamic_sequence_block(
         sequence_kernel in {"native_serial", "native_parallel"}
         and native_spin_major_fallback_reason is None
     ):
-        native_spin_major_limits = _spin_major_slice_limits(
+        native_spin_major_limits = _spin_major_slice_plan(
             memory_budget_bytes,
             n_rx_coils,
             max(1, int(num_threads)) if use_parallel else 1,
             phantom.n_species,
             spatial_inflow_active,
         )
-        if native_spin_major_limits is None:
-            native_spin_major_fallback_reason = "memory budget is too small"
     native_spin_major_enabled = bool(
         sequence_kernel in {"native_serial", "native_parallel"}
         and native_spin_major_fallback_reason is None
@@ -6057,8 +6076,11 @@ def _simulate_dynamic_sequence_block(
         adc_states = execution_plan.action_state_indices[
             execution_plan.action_kinds == ACTION_ADC
         ]
-        interval_limit, adc_limit = native_spin_major_limits
-        worker_threads = native_threads if sequence_kernel == "native_parallel" else 1
+        interval_limit, adc_limit, budget_threads, _ = native_spin_major_limits
+        worker_threads = min(
+            budget_threads,
+            native_threads if sequence_kernel == "native_parallel" else 1,
+        )
         native_spin_major_threads = worker_threads
         if phantom.n_species == 1:
             conversion = np.zeros((0, n_simulated_spins), dtype=np.float64)
@@ -7123,6 +7145,9 @@ def _simulate_dynamic_sequence_block(
             "native_spin_major_chunks": native_spin_major_chunks,
             "native_spin_major_intervals": native_spin_major_intervals,
             "native_spin_major_threads": native_spin_major_threads,
+            "native_spin_major_memory_limited": bool(
+                native_spin_major_enabled and native_spin_major_limits[3]
+            ),
             "native_spin_major_tile_spins": native_spin_major_tile_spins,
             "native_spin_major_table_s": native_spin_major_table_s,
             "native_spin_major_kernel_s": native_spin_major_kernel_s,
@@ -7384,21 +7409,6 @@ def _simulate_dynamic_sequence_single_source(
             spatial_tx=global_tx_classification == "spatial",
             execution_plan=execution_plan,
         )
-        if (
-            spin_major_unplanned_reason is None
-            and _spin_major_slice_limits(
-                memory_budget_bytes,
-                n_rx_coils,
-                max(1, int(num_threads)) if use_parallel else 1,
-                phantom.n_species,
-                bool(
-                    phantom.pyruvate_inflow is not None
-                    and phantom.pyruvate_inflow.has_spatial_delays
-                ),
-            )
-            is None
-        ):
-            spin_major_unplanned_reason = "memory budget is too small"
         spin_major_planned = spin_major_unplanned_reason is None
     if getattr(phantom, "requires_spin_major", False) and not spin_major_planned:
         raise _SpinMajorRequired(
@@ -7817,8 +7827,9 @@ def _independent_pool_passes(phantom: DynamicSpectralPhantom, sequence_kernel):
 
     Without inflow, washout and conversion the pools never exchange
     magnetization, so each populated pool can run alone. Contrast rates act
-    on pool 0, so contrast phantoms always run one pass per populated pool.
-    Phantoms with more pools than the spin-major kernel supports run passes
+    on pool 0, so contrast phantoms run one pass per populated pool; a
+    phantom whose only populated pool is pool 0 runs whole unless it has
+    more pools than the spin-major kernel supports. Such phantoms run passes
     on the native kernels, where each pass fits it.
     """
     if phantom.pyruvate_inflow is not None or _washout_active(phantom):
@@ -7831,12 +7842,10 @@ def _independent_pool_passes(phantom: DynamicSpectralPhantom, sequence_kernel):
     populated = _populated_pools(phantom)
     if not populated:
         return None
+    too_many_pools = phantom.n_species > _SPIN_MAJOR_MAX_POOLS
     if phantom.contrast_relaxation is not None:
-        return None if populated == [0] else populated
-    if phantom.n_species > _SPIN_MAJOR_MAX_POOLS and sequence_kernel in {
-        "native_serial",
-        "native_parallel",
-    }:
+        return None if populated == [0] and not too_many_pools else populated
+    if too_many_pools and sequence_kernel in {"native_serial", "native_parallel"}:
         return populated
     return None
 
@@ -7875,8 +7884,11 @@ def _independent_pool_pass_phantom(
     return result
 
 
-def _run_superposed_passes(program, pass_phantoms, kwargs):
-    """Run single-source passes with combined progress and preview."""
+def _run_superposed_passes(program, pass_phantoms, kwargs, pass_options=None):
+    """Run single-source passes with combined progress and preview.
+
+    ``pass_options`` optionally holds one dict of extra keywords per pass.
+    """
     progress_callback = kwargs.pop("progress_callback", None)
     preview_callback = kwargs.pop("preview_callback", None)
     count = len(pass_phantoms)
@@ -7884,6 +7896,8 @@ def _run_superposed_passes(program, pass_phantoms, kwargs):
     results = []
     for pass_index, pass_phantom in enumerate(pass_phantoms):
         pass_kwargs = dict(kwargs)
+        if pass_options is not None:
+            pass_kwargs.update(pass_options[pass_index])
         if progress_callback is not None:
 
             def pass_progress(done, total, _index=pass_index):
@@ -8058,7 +8072,7 @@ def _run_dynamic_sequence(program, phantom: DynamicSpectralPhantom, kwargs):
     """
     requested = kwargs.get("sequence_kernel")
     if requested is None:
-        requested = "numpy"
+        requested = "production"
     internal = internal_dynamic_kernel(requested)
     result = _run_dynamic_sequence_passes(
         program, phantom, {**kwargs, "sequence_kernel": internal}

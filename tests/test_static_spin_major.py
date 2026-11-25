@@ -25,10 +25,8 @@ from blochsimulator.sequence.model import (
 )
 from blochsimulator.sequence.spin_sampling import SpinSampling
 from blochsimulator.spectral_phantom import ChemicalSpecies, SpectralPhantom
-from blochsimulator.static_spin_major import (
-    StaticSpinMajorFallback,
-    run_static_components,
-)
+from blochsimulator import static_spin_major as static_spin_major_module
+from blochsimulator.static_spin_major import run_static_components
 
 pytest.importorskip("blochsimulator.dynamic_spin_major_cy")
 
@@ -306,33 +304,89 @@ def test_spectral_species_become_pools_and_split_into_passes():
     assert "static_spin_major" not in static.metadata
 
 
-def test_relaxation_groups_beyond_the_limit_fall_back_with_a_reason():
+def test_relaxation_groups_beyond_the_limit_run_in_voxel_batches(monkeypatch):
     shape = (300,)
     grid = np.linspace(0.0, 1.0, shape[0])
     phantom = Phantom(
         shape=shape,
         fov=(0.03,),
         t1_map=1.0 + grid,
-        t2_map=np.full(shape, 0.05),
+        t2_map=0.04 + 0.02 * grid[::-1],
+        b0_map=-30.0 + 60.0 * grid,
     )
-    program = SequenceProgram(
-        (
-            RFEvent(0.0, np.full(10, 500.0), 10e-6),
-            ADCEvent(2e-4, 4, 20e-6),
-        ),
-        5e-4,
-    )
-    with pytest.warns(KernelFallbackWarning, match="relaxation groups") as caught:
-        result = _simulator().simulate_sequence(
-            program, phantom, simulation_timestep_s=STEP_S, _static_spin_major=True
+    options = dict(simulation_timestep_s=STEP_S, checkpoints_s=CHECKPOINTS_S)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", KernelFallbackWarning)
+        batched = _simulator().simulate_sequence(
+            _train(), phantom, _static_spin_major=True, **options
         )
-    assert caught[0].filename == __file__
-    assert result.metadata["static_spin_major"] is False
-    assert "relaxation groups" in result.metadata["static_spin_major_fallback_reason"]
-    reference = _simulator().simulate_sequence(
-        program, phantom, simulation_timestep_s=STEP_S, sequence_kernel="legacy"
+    assert batched.metadata["static_spin_major"] is True
+    assert batched.metadata["static_spin_major_voxel_batches"] == 2
+    assert batched.metadata["static_spin_major_passes"] == 2
+    legacy = _simulator().simulate_sequence(
+        _train(), phantom, sequence_kernel="legacy", **options
     )
-    np.testing.assert_array_equal(result.signal, reference.signal)
+    _assert_close(legacy, batched)
+
+    # One batch with every row as a group gives the same result up to the
+    # order in which the batches are summed.
+    monkeypatch.setattr(static_spin_major_module, "MAX_RELAXATION_GROUPS", 1000)
+    whole = _simulator().simulate_sequence(
+        _train(), phantom, _static_spin_major=True, **options
+    )
+    assert whole.metadata["static_spin_major_voxel_batches"] == 1
+    np.testing.assert_array_equal(
+        whole.final_magnetization, batched.final_magnetization
+    )
+    np.testing.assert_array_equal(
+        whole.checkpoint_magnetization, batched.checkpoint_magnetization
+    )
+    assert _relative(whole.signal, batched.signal) < 1e-12
+
+
+def test_spectral_components_beyond_the_group_limit_run_in_voxel_batches():
+    shape = (12, 12, 3)
+    grid = np.linspace(0.0, 1.0, int(np.prod(shape))).reshape(shape)
+    species = [
+        ChemicalSpecies(f"S{index}", 10.0 * index, 1.0 + 0.1 * index, 0.05)
+        for index in range(7)
+    ]
+    # A per-voxel T2* map gives every voxel its own relaxation row.
+    phantom = SpectralPhantom(
+        shape=shape,
+        fov=(0.03, 0.03, 0.01),
+        species=species,
+        concentration_maps={
+            item.name: (1.0 + index) * (0.5 + grid)
+            for index, item in enumerate(species)
+        },
+        t2_star_map=0.02 + 0.03 * grid,
+        field_strength=3.0,
+        nucleus="C13",
+    )
+    simulator = _simulator()
+    options = dict(
+        field_strength_t=3.0,
+        nucleus="C13",
+        simulation_timestep_s=STEP_S,
+        checkpoints_s=CHECKPOINTS_S,
+    )
+    static = simulator.simulate_spectral_sequence(
+        _train(), phantom, sequence_kernel="legacy", **options
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", KernelFallbackWarning)
+        spin_major = simulator.simulate_spectral_sequence(
+            _train(), phantom, _static_spin_major=True, **options
+        )
+    assert spin_major.metadata["static_spin_major_voxel_batches"] == 2
+    assert spin_major.metadata["static_spin_major_passes"] == 4
+    _assert_close(static, spin_major)
+    assert _relative(static.species_signal, spin_major.species_signal) < TOLERANCE
+    assert (
+        _relative(static.final_pool_magnetization, spin_major.final_pool_magnetization)
+        < TOLERANCE
+    )
 
 
 @pytest.mark.parametrize(
@@ -356,15 +410,17 @@ def test_fallbacks_warn_at_the_call_site(options, match):
     assert result.metadata["static_spin_major_fallback_reason"]
 
 
-def test_memory_budget_below_one_spin_tile_falls_back():
-    with pytest.raises(StaticSpinMajorFallback, match="memory budget"):
-        run_static_components(
-            _train(repetitions=1),
-            [("static", _phantom())],
-            use_parallel=False,
-            memory_budget_bytes=1,
-            simulation_timestep_s=STEP_S,
-        )
+def test_memory_budget_below_one_spin_tile_still_runs_spin_major():
+    kwargs = dict(use_parallel=False, simulation_timestep_s=STEP_S)
+    tiny, tiny_metadata = run_static_components(
+        _train(repetitions=1), [("static", _phantom())], memory_budget_bytes=1, **kwargs
+    )
+    free, _ = run_static_components(
+        _train(repetitions=1), [("static", _phantom())], **kwargs
+    )
+    assert tiny_metadata["native_spin_major_enabled"] is True
+    np.testing.assert_array_equal(tiny[0].signal, free[0].signal)
+    np.testing.assert_array_equal(tiny[0].final_active, free[0].final_active)
 
 
 def test_equilibrium_scalar_and_map():

@@ -10,6 +10,7 @@ from blochsimulator import (
     KernelFallbackWarning,
     dynamic_kernel_fallback,
 )
+from blochsimulator import dynamic_phantom as dynamic_module
 from blochsimulator.dynamic_phantom import (
     DynamicSpectralPhantom,
     simulate_dynamic_sequence,
@@ -82,11 +83,11 @@ def test_native_run_and_deliberate_switch_do_not_warn():
     assert dynamic_kernel_fallback(disabled.metadata) is None
 
 
-def test_lost_spin_major_executor_warns_at_the_call_site():
-    pytest.importorskip("blochsimulator.dynamic_spin_major_cy")
-    # A memory budget below one spin tile still forces the interval path.
-    with pytest.warns(KernelFallbackWarning, match="memory budget") as caught:
-        result = _run("native_serial", memory_budget_bytes=1)
+def test_lost_spin_major_executor_warns_at_the_call_site(monkeypatch):
+    # A missing extension forces the interval path.
+    monkeypatch.setattr(dynamic_module, "_spin_major_kernel", lambda: None)
+    with pytest.warns(KernelFallbackWarning, match="extension") as caught:
+        result = _run("native_serial")
     assert not result.metadata["native_spin_major_enabled"]
     assert "spin-major" in str(caught[0].message)
 
@@ -96,22 +97,21 @@ def test_lost_spin_major_executor_warns_at_the_call_site():
             _phantom(),
             sequence_kernel="native_serial",
             simulation_timestep_s=RASTER,
-            memory_budget_bytes=1,
         )
     assert caught[0].filename == __file__
 
     # The reference and NumPy kernels have no faster path to lose.
     with warnings.catch_warnings():
         warnings.simplefilter("error", KernelFallbackWarning)
-        _run("optimized", memory_budget_bytes=1)
+        _run("optimized")
 
 
-def test_fallback_can_be_turned_into_an_error():
-    pytest.importorskip("blochsimulator.dynamic_spin_major_cy")
+def test_fallback_can_be_turned_into_an_error(monkeypatch):
+    monkeypatch.setattr(dynamic_module, "_spin_major_kernel", lambda: None)
     with warnings.catch_warnings():
         warnings.simplefilter("error", KernelFallbackWarning)
         with pytest.raises(KernelFallbackWarning):
-            _run("native_serial", memory_budget_bytes=1)
+            _run("native_serial")
 
 
 def test_fallback_summary_covers_each_replaced_path():

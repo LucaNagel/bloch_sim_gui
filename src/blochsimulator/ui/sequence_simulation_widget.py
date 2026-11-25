@@ -1505,7 +1505,7 @@ class SequenceSimulationThread(QThread):
             checker = BlochSimulator(
                 use_parallel=False,
                 dynamic_sequence_kernel=getattr(
-                    self.simulator, "dynamic_sequence_kernel", "numpy"
+                    self.simulator, "dynamic_sequence_kernel", "production"
                 ),
             )
             estimate = estimate_dynamic_timestep_error(

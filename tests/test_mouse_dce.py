@@ -316,8 +316,13 @@ def test_spgr_steady_state_matches_the_analytic_signal_with_contrast():
             for name, values in phantom.initial_spin_density_maps.items()
         }
         density.initial_concentration_maps = dict(density.initial_spin_density_maps)
-        signal = _run(density, _spgr(300), "native_serial").signal
-        return abs(np.asarray(signal).reshape(300, -1)[-1].sum())
+        result = _run(density, _spgr(300), "native_serial")
+        # Eight water pools exceed the spin-major pool limit; the populated
+        # pool still runs spin-major in its own pass.
+        assert phantom.n_species > dynamic_module._SPIN_MAJOR_MAX_POOLS
+        assert result.metadata["native_spin_major_enabled"] is True
+        assert "contrast_kernel_fallback_from" not in result.metadata
+        return abs(np.asarray(result.signal).reshape(300, -1)[-1].sum())
 
     pool = phantom.pools[0]
 

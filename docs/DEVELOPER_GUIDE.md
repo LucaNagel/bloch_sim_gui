@@ -741,8 +741,11 @@ Repeated RF segments can use simulation-local affine propagators, keyed by
 exact interval inputs. Source samples must fit the source basis within a
 relative tolerance of $10^{-12}$; other occurrences remain stepwise.
 Cached segments containing internal ADC, crusher, or checkpoint actions are
-ineligible. Dynamic B0 and more than six pools retain the established
-execution paths. Float16/float32 checkpoints are written into a bounded
+ineligible. Dynamic B0 and coupled phantoms with more than six pools retain
+the established execution paths. Independent pools (no inflow, washout or conversion), contrast phantoms
+included, run one pass per populated pool on the executor whatever the pool
+count. A memory budget below the executor's working set lowers its thread
+count, then its slice size, instead of leaving the executor. Float16/float32 checkpoints are written into a bounded
 Float64 staging buffer with slice-local payloads (slices are also cut by
 checkpoint count) and converted on storage, exactly as the interval paths
 store their Float64 state. Actions at state index zero (ADC, checkpoint) run

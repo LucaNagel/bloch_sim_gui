@@ -248,6 +248,39 @@ def test_spin_major_result_does_not_depend_on_slices_or_threads(monkeypatch):
         np.testing.assert_array_equal(getattr(sliced, name), getattr(serial, name))
 
 
+def test_tiny_memory_budget_drops_spin_major_threads_and_slices():
+    phantom = _phantom(shape=(12, 10, 10), inflow="polarized", tracked=True)
+    program = _program()
+    kwargs = dict(use_parallel=True, num_threads=4)
+
+    parallel = _run(phantom, program, "native_parallel", **kwargs)
+    tiny = _run(phantom, program, "native_parallel", memory_budget_bytes=1, **kwargs)
+
+    assert tiny.metadata["native_spin_major_enabled"] is True
+    assert tiny.metadata["native_spin_major_fallback_reason"] is None
+    assert tiny.metadata["native_spin_major_memory_limited"] is True
+    assert tiny.metadata["native_spin_major_threads"] == 1
+    assert parallel.metadata["native_spin_major_memory_limited"] is False
+    assert tiny.metadata["native_spin_major_chunks"] > (
+        parallel.metadata["native_spin_major_chunks"]
+    )
+    for name in OUTPUTS:
+        np.testing.assert_array_equal(getattr(tiny, name), getattr(parallel, name))
+
+
+def test_spin_major_slice_plan_drops_threads_before_slices():
+    plan = dynamic_module._spin_major_slice_plan
+    limits = dynamic_module._spin_major_slice_limits
+    # Fits one thread with 16 receive channels and six pools, not 16 threads.
+    budget = 32 * 1024**2
+    assert limits(budget, 16, 16, 6, True) is None
+    interval_limit, adc_limit, threads, limited = plan(budget, 16, 16, 6, True)
+    assert 1 <= threads < 16 and limited
+    assert (interval_limit, adc_limit) == limits(budget, 16, threads, 6, True)
+    assert plan(1, 16, 8, 6, True) == (1, 1, 1, True)
+    assert plan(None, 16, 8)[2:] == (8, False)
+
+
 def test_spin_major_progress_starts_at_zero_with_short_first_slice(monkeypatch):
     phantom = _phantom(shape=(12, 10, 10), inflow="polarized", tracked=True)
     program = _program()
@@ -411,7 +444,6 @@ def test_spin_major_runs_models_it_used_to_refuse(case):
     "case, reason",
     [
         ("dynamic_b0", "dynamic B0 is unsupported"),
-        ("tiny_budget", "memory budget is too small"),
     ],
 )
 def test_spin_major_falls_back_for_unsupported_models(case, reason):

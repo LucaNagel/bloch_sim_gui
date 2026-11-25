@@ -15,7 +15,8 @@ Mapping of static component ``c`` onto pool ``c``:
   densities, normalised per pass to at most one so small checkpoint dtypes
   stay in range; the normalisation is folded into the receive sensitivity;
 * Mz relaxes toward ``equilibrium * density``; per-voxel T1/T2 become
-  relaxation groups whose most frequent row is the pool constant;
+  relaxation groups whose most frequent row is the pool constant; objects
+  with more distinct T1/T2 rows than one run holds run in voxel batches;
 * B0 is shared, the component's constant chemical shift is the pool offset;
 * more than six components run in passes of at most six pools.
 
@@ -108,6 +109,21 @@ def _relaxation_groups(rows: np.ndarray, active: np.ndarray):
     group_map[active] = group_of_unique[inverse]
     groups = np.ascontiguousarray(unique[others].reshape(-1, npools, 2))
     return constants, group_map, groups
+
+
+def _relaxation_batches(items, union: np.ndarray) -> List[np.ndarray]:
+    """Split active voxels into batches whose T1/T2 rows fit one run.
+
+    A batch holds at most ``MAX_RELAXATION_GROUPS + 1`` distinct rows over
+    all components (the pool constants plus the groups), so every pass of
+    six or fewer components fits too. Voxels never interact, so batches only
+    change the order in which the signal is summed.
+    """
+    indices = np.flatnonzero(union)
+    rows = np.concatenate([item.rows[indices] for item in items], axis=1)
+    _, inverse = np.unique(rows, axis=0, return_inverse=True)
+    batch = np.asarray(inverse).reshape(-1) // (MAX_RELAXATION_GROUPS + 1)
+    return [indices[batch == value] for value in range(int(batch.max()) + 1)]
 
 
 def _most_frequent_row(values: np.ndarray) -> np.ndarray:
@@ -312,7 +328,6 @@ def run_static_components(
         for (name, _), flat in zip(components, flats)
     ]
     union = np.any([item.mask for item in items], axis=0)
-    union_indices = np.flatnonzero(union)
     for label, values in (
         ("Tx sensitivity", reference["tx_sensitivity"][union]),
         ("Rx sensitivities", reference["rx_sensitivities"][:, union]),
@@ -362,23 +377,28 @@ def run_static_components(
         items[start : start + _SPIN_MAJOR_MAX_POOLS]
         for start in range(0, len(items), _SPIN_MAJOR_MAX_POOLS)
     ]
-    built = [
-        _pass_phantom(
-            group,
-            shape3=shape3,
-            fov3=fov3,
-            affine=affine,
-            positions=positions,
-            active=union,
-            b0_hz=b0_hz,
-            tx=tx,
-            rx=rx,
-            equilibrium=equilibrium,
-            field_strength=field_strength,
-            nucleus=nucleus,
+    batches = _relaxation_batches(items, union)
+    jobs = [(group, batch) for batch in batches for group in passes]
+    built = []
+    for group, batch in jobs:
+        active = np.zeros(union.size, dtype=bool)
+        active[batch] = True
+        built.append(
+            _pass_phantom(
+                group,
+                shape3=shape3,
+                fov3=fov3,
+                affine=affine,
+                positions=positions,
+                active=active,
+                b0_hz=b0_hz,
+                tx=tx,
+                rx=rx,
+                equilibrium=equilibrium,
+                field_strength=field_strength,
+                nucleus=nucleus,
+            )
         )
-        for group in passes
-    ]
     n_rx = int(rx.shape[0])
     pass_preview = None
     if preview_callback is not None:
@@ -404,54 +424,71 @@ def run_static_components(
         spin_sampling=spin_sampling,
         spoiler_mode=spoiler_mode,
         checkpoint_dtype=checkpoint_dtype,
-        _voxel_indices=union_indices,
     )
     try:
         runs = _run_superposed_passes(
-            program, [phantom for phantom, _, _ in built], kwargs
+            program,
+            [phantom for phantom, _, _ in built],
+            kwargs,
+            [{"_voxel_indices": batch} for _, batch in jobs],
         )
     except _SpinMajorRequired as exc:
         raise StaticSpinMajorFallback(exc.reason) from exc
 
     checkpoint_dtype = np.dtype(checkpoint_dtype)
-    outputs: List[StaticComponentOutput] = []
-    for group, (_, density, _), run in zip(passes, built, runs):
+    signals = {}
+    finals = {id(item): np.zeros((item.indices.size, 3)) for item in items}
+    checkpoints = {}
+    for (group, batch), (_, density, _), run in zip(jobs, built, runs):
         species_signal = np.asarray(run.species_signal)
         if species_signal.ndim == 2:
             species_signal = species_signal[:, None, :]
         final_pool = np.asarray(run.final_pool_magnetization, dtype=np.float64)
         checkpoint_pool = run.checkpoint_pool_magnetization
+        n_checkpoints = 0 if checkpoint_pool is None else checkpoint_pool.shape[0]
         for index, item in enumerate(group):
-            rows = np.searchsorted(union_indices, item.indices)
-            unit = density[index][item.indices][:, None]
-            final = np.divide(
+            key = id(item)
+            signals[key] = (
+                np.array(species_signal[index], copy=True)
+                if key not in signals
+                else signals[key] + species_signal[index]
+            )
+            if key not in checkpoints:
+                checkpoints[key] = np.zeros((n_checkpoints, item.indices.size, 3))
+            keep = np.flatnonzero(np.isin(item.indices, batch))
+            voxels = item.indices[keep]
+            rows = np.searchsorted(batch, voxels)
+            unit = density[index][voxels][:, None]
+            finals[key][keep] = np.divide(
                 final_pool[index][rows],
                 unit,
                 out=np.zeros((rows.size, 3)),
                 where=unit > 0.0,
             )
-            if checkpoint_pool is None:
-                checkpoints = np.zeros((0, rows.size, 3), dtype=checkpoint_dtype)
-            else:
+            if n_checkpoints:
                 values = np.asarray(checkpoint_pool[:, index], dtype=np.float64)
-                checkpoints = np.divide(
+                checkpoints[key][:, keep] = np.divide(
                     values[:, rows],
                     unit[None],
-                    out=np.zeros((values.shape[0], rows.size, 3)),
+                    out=np.zeros((n_checkpoints, rows.size, 3)),
                     where=unit[None] > 0.0,
-                ).astype(checkpoint_dtype, copy=False)
-            outputs.append(
-                StaticComponentOutput(
-                    signal=np.array(species_signal[index], copy=True),
-                    final_active=final,
-                    checkpoints_active=checkpoints,
                 )
-            )
+    outputs: List[StaticComponentOutput] = [
+        StaticComponentOutput(
+            signal=signals[id(item)],
+            final_active=finals[id(item)],
+            checkpoints_active=checkpoints[id(item)].astype(
+                checkpoint_dtype, copy=False
+            ),
+        )
+        for item in items
+    ]
 
     run_metadata = runs[0].metadata
     metadata = {
         "static_spin_major": True,
         "static_spin_major_passes": len(runs),
+        "static_spin_major_voxel_batches": len(batches),
         "static_spin_major_relaxation_groups": [n for _, _, n in built],
         "static_spin_major_intervals": int(
             run_metadata.get("native_spin_major_intervals", 0)

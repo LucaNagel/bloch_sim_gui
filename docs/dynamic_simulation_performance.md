@@ -21,8 +21,11 @@ plan slices, including spatial complex Tx, receive coils, subvoxel spins, and
 existing inflow/concentration modes. Repeated RF segments may use cached
 affine propagators. Cache keys use exact interval inputs; source samples
 must fit their basis within a relative tolerance of $10^{-12}$, and internal
-boundary actions force stepwise execution. Dynamic B0 and more than six pools
-use the previous paths. Float16/float32 checkpoints are computed in Float64
+boundary actions force stepwise execution. Dynamic B0 and coupled phantoms
+with more than six pools use the previous paths. Independent pools (no inflow, washout or conversion), contrast phantoms
+included, run one pass per populated pool on the executor whatever the pool
+count. A memory budget below the executor's working set lowers its thread
+count, then its slice size, instead of leaving the executor. Float16/float32 checkpoints are computed in Float64
 and converted on storage, slice by slice through a bounded staging buffer, so
 the GUI animation replay stays on the spin-major executor. ADC samples and
 checkpoints at time zero are taken from the initial state before it starts.
